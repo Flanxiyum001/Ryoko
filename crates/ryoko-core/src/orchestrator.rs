@@ -210,42 +210,42 @@ impl Orchestrator {
             let task_on_panic = task.clone();
             join_set.spawn(async move {
                 let operation = async {
-                let task = task;
-                if let Some(reason) = wait_for_dependencies(&dependencies).await {
-                    events.emit(OrchestratorEvent::TaskSkipped {
-                        task_id: task.id,
-                        role: task.assigned_to.clone(),
-                        reason: reason.clone(),
-                    });
-                    return (task, None, TaskOutcome::Skipped { reason });
-                }
-
-                let permit = match semaphore.acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        return (
-                            task.clone(),
-                            None,
-                            TaskOutcome::Failed {
-                                reason: "orchestrator semaphore closed".to_owned(),
-                                attempts: 0,
-                            },
-                        );
+                    let task = task;
+                    if let Some(reason) = wait_for_dependencies(&dependencies).await {
+                        events.emit(OrchestratorEvent::TaskSkipped {
+                            task_id: task.id,
+                            role: task.assigned_to.clone(),
+                            reason: reason.clone(),
+                        });
+                        return (task, None, TaskOutcome::Skipped { reason });
                     }
-                };
 
-                let (outcome, success) = execute_task(
-                    &task,
-                    agent,
-                    context,
-                    workspace,
-                    events.clone(),
-                    max_attempts,
-                )
-                .await;
-                drop(permit);
+                    let permit = match semaphore.acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            return (
+                                task.clone(),
+                                None,
+                                TaskOutcome::Failed {
+                                    reason: "orchestrator semaphore closed".to_owned(),
+                                    attempts: 0,
+                                },
+                            );
+                        }
+                    };
 
-                (task, success, outcome)
+                    let (outcome, success) = execute_task(
+                        &task,
+                        agent,
+                        context,
+                        workspace,
+                        events.clone(),
+                        max_attempts,
+                    )
+                    .await;
+                    drop(permit);
+
+                    (task, success, outcome)
                 };
                 match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
                     Ok(value) => value,
@@ -702,10 +702,12 @@ mod tests {
     #[tokio::test]
     async fn panicking_agents_do_not_hang_dependent_tasks() {
         let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
-            .with_config(OrchestratorConfig { max_concurrency: 2, max_attempts: 1 });
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+            });
         let first = Task::new("crash", AgentRole::ProjectManager);
-        let second = Task::new("must skip", AgentRole::SeniorDeveloper)
-            .with_dependency(first.id);
+        let second = Task::new("must skip", AgentRole::SeniorDeveloper).with_dependency(first.id);
         let manager: Arc<dyn AgentRuntime> = Arc::new(PanicAgent {
             identity: AgentIdentity::new(AgentRole::ProjectManager, "pm-1", "planner"),
         });
@@ -715,7 +717,11 @@ mod tests {
         });
         let report = tokio::time::timeout(
             Duration::from_secs(3),
-            orchestrator.run(vec![first.clone(), second], vec![manager, developer], ProjectContext::default()),
+            orchestrator.run(
+                vec![first.clone(), second],
+                vec![manager, developer],
+                ProjectContext::default(),
+            ),
         )
         .await
         .expect("orchestrator hung after an agent panic")
