@@ -52,7 +52,7 @@ fn valid_env(name: &str) -> bool {
 
 fn is_loopback(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
-        || host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        || host.trim_matches(|ch| ch == '[' || ch == ']').parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 impl ProviderProfile {
