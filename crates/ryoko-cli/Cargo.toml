@@ -1,0 +1,8 @@
+[package]
+name = "ryoko-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ryoko"
+path = "src/main.rs"
