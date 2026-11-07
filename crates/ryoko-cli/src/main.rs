@@ -3,7 +3,10 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use ryoko_core::{Orchestrator, team::{application_plan, standard_team}};
+use ryoko_core::{
+    Orchestrator,
+    team::{application_plan, standard_team},
+};
 use ryoko_models::{ChatRequest, ModelRouter, ProviderCatalog};
 use uuid::Uuid;
 
@@ -91,15 +94,29 @@ async fn execute(command: Command) -> Result<(), Box<dyn Error>> {
             }
             println!("Profiles validated; endpoints and credentials not tested.");
         }
-        Command::Ask { config, model, prompt, max_tokens } => {
+        Command::Ask {
+            config,
+            model,
+            prompt,
+            max_tokens,
+        } => {
             validate_max_tokens(max_tokens)?;
             let router = load_router(&config)?;
             let response = router
-                .complete(ChatRequest::new(model).with_user(prompt).with_max_tokens(max_tokens))
+                .complete(
+                    ChatRequest::new(model)
+                        .with_user(prompt)
+                        .with_max_tokens(max_tokens),
+                )
                 .await?;
             println!("{}", response.text);
         }
-        Command::TeamPreview { config, model, goal, max_tokens } => {
+        Command::TeamPreview {
+            config,
+            model,
+            goal,
+            max_tokens,
+        } => {
             if goal.trim().is_empty() {
                 return Err("goal must not be empty".into());
             }
@@ -109,9 +126,13 @@ async fn execute(command: Command) -> Result<(), Box<dyn Error>> {
             let plan = application_plan(&goal);
             Orchestrator::validate_plan(&plan)?;
             let mut outputs: HashMap<Uuid, String> = HashMap::new();
-            eprintln!("Preview only: eight model calls; no file writes, command execution or deployment.");
+            eprintln!(
+                "Preview only: eight model calls; no file writes, command execution or deployment."
+            );
             for task in plan {
-                let member = members.iter().find(|m| m.role == task.assigned_to)
+                let member = members
+                    .iter()
+                    .find(|m| m.role == task.assigned_to)
                     .ok_or("missing team member")?;
                 let mut context = String::new();
                 for id in &task.dependencies {
@@ -134,7 +155,10 @@ async fn execute(command: Command) -> Result<(), Box<dyn Error>> {
                 if response.text.trim().is_empty() {
                     return Err(format!("{} returned no text", member.title).into());
                 }
-                println!("\n## {} ({})\n\n{}\n", member.title, member.role, response.text);
+                println!(
+                    "\n## {} ({})\n\n{}\n",
+                    member.title, member.role, response.text
+                );
                 outputs.insert(task.id, response.text);
             }
         }
