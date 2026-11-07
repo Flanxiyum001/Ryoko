@@ -64,32 +64,50 @@ pub fn application_plan(goal: &str) -> Vec<Task> {
     let architect = Task::new(
         format!("Architecture and interfaces for: {goal}"),
         AgentRole::Custom("software-architect".into()),
-    ).depends_on(&pm);
+    )
+    .depends_on(&pm);
     let ux = Task::new(
         format!("Accessible screens and user flows for: {goal}"),
         AgentRole::UiUxDesigner,
-    ).depends_on(&architect);
+    )
+    .depends_on(&architect);
     let backend = Task::new(
         format!("Backend APIs, storage and auth for: {goal}"),
         AgentRole::Custom("backend-engineer".into()),
-    ).depends_on(&architect);
+    )
+    .depends_on(&architect);
     let implementation = Task::new(
         format!("Integrate frontend and backend for: {goal}"),
         AgentRole::SeniorDeveloper,
-    ).depends_on(&ux).depends_on(&backend);
+    )
+    .depends_on(&ux)
+    .depends_on(&backend);
     let security = Task::new(
         format!("Threat model and security review for: {goal}"),
         AgentRole::Custom("security-engineer".into()),
-    ).depends_on(&implementation);
+    )
+    .depends_on(&implementation);
     let qa = Task::new(
         format!("Acceptance and regression verification for: {goal}"),
         AgentRole::QaEngineer,
-    ).depends_on(&implementation);
+    )
+    .depends_on(&implementation);
     let operations = Task::new(
         format!("Staging, monitoring and rollback plan for: {goal}"),
         AgentRole::Custom("devops-engineer".into()),
-    ).depends_on(&security).depends_on(&qa);
-    vec![pm, architect, ux, backend, implementation, security, qa, operations]
+    )
+    .depends_on(&security)
+    .depends_on(&qa);
+    vec![
+        pm,
+        architect,
+        ux,
+        backend,
+        implementation,
+        security,
+        qa,
+        operations,
+    ]
 }
 
 #[cfg(test)]
@@ -116,7 +134,11 @@ mod tests {
         let operations = tasks.last().unwrap();
         assert_eq!(operations.dependencies.len(), 2);
         for dependency in &operations.dependencies {
-            let role = &tasks.iter().find(|task| task.id == *dependency).unwrap().assigned_to;
+            let role = &tasks
+                .iter()
+                .find(|task| task.id == *dependency)
+                .unwrap()
+                .assigned_to;
             assert!(matches!(role, AgentRole::QaEngineer | AgentRole::Custom(_)));
         }
     }
