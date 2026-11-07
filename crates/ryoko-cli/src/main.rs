@@ -13,26 +13,22 @@ enum Command {
     /// Show built-in engineering team responsibilities.
     Roles,
     /// Create a deterministic, dependency-checked engineering task plan.
-    Plan {
-            goal: String,
-    },
+    Plan { goal: String },
     /// Validate provider profiles without contacting any endpoint or reading keys.
-    Providers {
-            config: PathBuf,
-    },
+    Providers { config: PathBuf },
     /// Ask one configured model a question (no tools or filesystem changes).
     Ask {
-            config: PathBuf,
-            model: String,
-            prompt: String,
-            max_tokens: u32,
+        config: PathBuf,
+        model: String,
+        prompt: String,
+        max_tokens: u32,
     },
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
     TeamPreview {
-            config: PathBuf,
-            model: String,
-            goal: String,
-            max_tokens: u32,
+        config: PathBuf,
+        model: String,
+        goal: String,
+        max_tokens: u32,
     },
 }
 
@@ -50,7 +46,9 @@ fn usage() {
 }
 
 fn take(options: &mut HashMap<String, String>, name: &str) -> Result<String, Box<dyn Error>> {
-    options.remove(name).ok_or_else(|| format!("missing required --{name}").into())
+    options
+        .remove(name)
+        .ok_or_else(|| format!("missing required --{name}").into())
 }
 
 fn token_limit(options: &mut HashMap<String, String>, default: u32) -> Result<u32, Box<dyn Error>> {
@@ -79,13 +77,19 @@ fn parse_cli() -> Result<Option<Command>, Box<dyn Error>> {
         if name.is_empty() || options.contains_key(name) {
             return Err(format!("invalid or duplicate option --{name}").into());
         }
-        let value = args.next().ok_or_else(|| format!("missing value for --{name}"))?;
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for --{name}"))?;
         options.insert(name.to_owned(), value);
     }
     let parsed = match command.as_str() {
         "roles" => Command::Roles,
-        "plan" => Command::Plan { goal: take(&mut options, "goal")? },
-        "providers" => Command::Providers { config: take(&mut options, "config")?.into() },
+        "plan" => Command::Plan {
+            goal: take(&mut options, "goal")?,
+        },
+        "providers" => Command::Providers {
+            config: take(&mut options, "config")?.into(),
+        },
         "ask" => Command::Ask {
             config: take(&mut options, "config")?.into(),
             model: take(&mut options, "model")?,
@@ -101,7 +105,11 @@ fn parse_cli() -> Result<Option<Command>, Box<dyn Error>> {
         _ => return Err(format!("unknown command {command}; use --help").into()),
     };
     if !options.is_empty() {
-        return Err(format!("unsupported options: {:?}", options.keys().collect::<Vec<_>>()).into());
+        return Err(format!(
+            "unsupported options: {:?}",
+            options.keys().collect::<Vec<_>>()
+        )
+        .into());
     }
     Ok(Some(parsed))
 }
