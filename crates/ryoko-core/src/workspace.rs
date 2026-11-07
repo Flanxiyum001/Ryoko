@@ -57,6 +57,11 @@ pub fn validate_relative_path(path: &str) -> CoreResult<PathBuf> {
     if path.trim().is_empty() {
         return Err(CoreError::Workspace("empty change path".to_owned()));
     }
+    // Reject cross-platform drive prefixes, alternate streams and separators even
+    // when validating a Windows-targeted project on a Unix host.
+    if path.contains(['\\\\', ':', '\\0']) {
+        return Err(CoreError::Workspace("unsafe path separator or prefix".to_owned()));
+    }
     let candidate = Path::new(path);
     if candidate.is_absolute() {
         return Err(CoreError::Workspace(format!(
@@ -66,7 +71,13 @@ pub fn validate_relative_path(path: &str) -> CoreResult<PathBuf> {
     let mut clean = PathBuf::new();
     for component in candidate.components() {
         match component {
-            Component::Normal(part) => clean.push(part),
+            Component::Normal(part) => {
+                let name = part.to_string_lossy();
+                if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".ryoko") {
+                    return Err(CoreError::Workspace("writing Git/Ryoko metadata is forbidden".to_owned()));
+                }
+                clean.push(part);
+            },
             Component::CurDir => {}
             Component::ParentDir => {
                 return Err(CoreError::Workspace(format!(
@@ -207,6 +218,10 @@ mod tests {
         assert!(validate_relative_path("/etc/passwd").is_err());
         assert!(validate_relative_path("../outside").is_err());
         assert!(validate_relative_path("").is_err());
+        assert!(validate_relative_path(".git/config").is_err());
+        assert!(validate_relative_path("src/.ryoko/settings").is_err());
+        assert!(validate_relative_path("C:\\\\Windows\\\\win.ini").is_err());
+        assert!(validate_relative_path("file.txt:alternate").is_err());
     }
 
     #[tokio::test]
