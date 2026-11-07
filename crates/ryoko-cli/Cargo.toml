@@ -8,7 +8,6 @@ name = "ryoko"
 path = "src/main.rs"
 
 [dependencies]
-clap.workspace = true
 ryoko-core = { path = "../ryoko-core" }
 ryoko-models = { path = "../ryoko-models" }
 serde_json.workspace = true
