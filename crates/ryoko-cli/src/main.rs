@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
 use ryoko_core::{
     Orchestrator,
     team::{application_plan, standard_team},
@@ -10,49 +9,101 @@ use ryoko_core::{
 use ryoko_models::{ChatRequest, ModelRouter, ProviderCatalog};
 use uuid::Uuid;
 
-#[derive(Parser)]
-#[command(name = "ryoko", about = "Provider-neutral AI engineering team preview")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
 enum Command {
     /// Show built-in engineering team responsibilities.
     Roles,
     /// Create a deterministic, dependency-checked engineering task plan.
     Plan {
-        #[arg(long)]
-        goal: String,
+            goal: String,
     },
     /// Validate provider profiles without contacting any endpoint or reading keys.
     Providers {
-        #[arg(long)]
-        config: PathBuf,
+            config: PathBuf,
     },
     /// Ask one configured model a question (no tools or filesystem changes).
     Ask {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        model: String,
-        #[arg(long)]
-        prompt: String,
-        #[arg(long, default_value_t = 2048)]
-        max_tokens: u32,
+            config: PathBuf,
+            model: String,
+            prompt: String,
+            max_tokens: u32,
     },
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
     TeamPreview {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        model: String,
-        #[arg(long)]
-        goal: String,
-        #[arg(long, default_value_t = 1024)]
-        max_tokens: u32,
+            config: PathBuf,
+            model: String,
+            goal: String,
+            max_tokens: u32,
     },
+}
+
+fn usage() {
+    println!(
+        "Ryoko (pre-alpha)\n\
+         Usage:\n\
+           ryoko roles\n\
+           ryoko plan --goal DESCRIPTION\n\
+           ryoko providers --config FILE.json\n\
+           ryoko ask --config FILE.json --model PROVIDER/MODEL --prompt TEXT [--max-tokens 2048]\n\
+           ryoko team-preview --config FILE.json --model PROVIDER/MODEL --goal TEXT [--max-tokens 1024]\n\
+         Provider secrets are read only from environment variables. Team preview makes eight paid/local model calls but does not modify files."
+    );
+}
+
+fn take(options: &mut HashMap<String, String>, name: &str) -> Result<String, Box<dyn Error>> {
+    options.remove(name).ok_or_else(|| format!("missing required --{name}").into())
+}
+
+fn token_limit(options: &mut HashMap<String, String>, default: u32) -> Result<u32, Box<dyn Error>> {
+    match options.remove("max-tokens") {
+        Some(value) => Ok(value.parse()?),
+        None => Ok(default),
+    }
+}
+
+fn parse_cli() -> Result<Option<Command>, Box<dyn Error>> {
+    let mut args = std::env::args().skip(1);
+    let Some(command) = args.next() else {
+        usage();
+        return Ok(None);
+    };
+    if command == "--help" || command == "-h" || command == "help" {
+        usage();
+        return Ok(None);
+    }
+
+    let mut options = HashMap::new();
+    while let Some(flag) = args.next() {
+        let Some(name) = flag.strip_prefix("--") else {
+            return Err(format!("expected --flag, got {flag}").into());
+        };
+        if name.is_empty() || options.contains_key(name) {
+            return Err(format!("invalid or duplicate option --{name}").into());
+        }
+        let value = args.next().ok_or_else(|| format!("missing value for --{name}"))?;
+        options.insert(name.to_owned(), value);
+    }
+    let parsed = match command.as_str() {
+        "roles" => Command::Roles,
+        "plan" => Command::Plan { goal: take(&mut options, "goal")? },
+        "providers" => Command::Providers { config: take(&mut options, "config")?.into() },
+        "ask" => Command::Ask {
+            config: take(&mut options, "config")?.into(),
+            model: take(&mut options, "model")?,
+            prompt: take(&mut options, "prompt")?,
+            max_tokens: token_limit(&mut options, 2048)?,
+        },
+        "team-preview" => Command::TeamPreview {
+            config: take(&mut options, "config")?.into(),
+            model: take(&mut options, "model")?,
+            goal: take(&mut options, "goal")?,
+            max_tokens: token_limit(&mut options, 1024)?,
+        },
+        _ => return Err(format!("unknown command {command}; use --help").into()),
+    };
+    if !options.is_empty() {
+        return Err(format!("unsupported options: {:?}", options.keys().collect::<Vec<_>>()).into());
+    }
+    Ok(Some(parsed))
 }
 
 fn load_catalog(path: &Path) -> Result<ProviderCatalog, Box<dyn Error>> {
@@ -168,8 +219,12 @@ async fn execute(command: Command) -> Result<(), Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-    if let Err(error) = execute(cli.command).await {
+    let result = match parse_cli() {
+        Ok(Some(command)) => execute(command).await,
+        Ok(None) => Ok(()),
+        Err(err) => Err(err),
+    };
+    if let Err(error) = result {
         eprintln!("Ryoko error: {error}");
         std::process::exit(1);
     }
