@@ -1,0 +1,18 @@
+[package]
+name = "ryoko-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ryoko-core = { path = "../ryoko-core" }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+wasmtime.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+
+[lib]
+path = "src/lib.rs"
