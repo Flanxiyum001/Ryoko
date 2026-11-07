@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::FutureExt;
 use serde::Serialize;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
@@ -206,7 +207,9 @@ impl Orchestrator {
             });
 
             let max_attempts = self.config.max_attempts.max(1);
+            let task_on_panic = task.clone();
             join_set.spawn(async move {
+                let operation = async {
                 let task = task;
                 if let Some(reason) = wait_for_dependencies(&dependencies).await {
                     events.emit(OrchestratorEvent::TaskSkipped {
@@ -243,6 +246,18 @@ impl Orchestrator {
                 drop(permit);
 
                 (task, success, outcome)
+                };
+                match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
+                    Ok(value) => value,
+                    Err(_) => (
+                        task_on_panic,
+                        None,
+                        TaskOutcome::Failed {
+                            reason: "agent task panicked".to_owned(),
+                            attempts: 1,
+                        },
+                    ),
+                }
             });
         }
 
