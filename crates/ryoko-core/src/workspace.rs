@@ -60,7 +60,9 @@ pub fn validate_relative_path(path: &str) -> CoreResult<PathBuf> {
     // Reject cross-platform drive prefixes, alternate streams and separators even
     // when validating a Windows-targeted project on a Unix host.
     if path.contains('\\') || path.contains(':') || path.contains('\0') {
-        return Err(CoreError::Workspace("unsafe path separator or prefix".to_owned()));
+        return Err(CoreError::Workspace(
+            "unsafe path separator or prefix".to_owned(),
+        ));
     }
     let candidate = Path::new(path);
     if candidate.is_absolute() {
@@ -74,10 +76,12 @@ pub fn validate_relative_path(path: &str) -> CoreResult<PathBuf> {
             Component::Normal(part) => {
                 let name = part.to_string_lossy();
                 if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".ryoko") {
-                    return Err(CoreError::Workspace("writing Git/Ryoko metadata is forbidden".to_owned()));
+                    return Err(CoreError::Workspace(
+                        "writing Git/Ryoko metadata is forbidden".to_owned(),
+                    ));
                 }
                 clean.push(part);
-            },
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 return Err(CoreError::Workspace(format!(
