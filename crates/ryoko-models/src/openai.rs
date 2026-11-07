@@ -154,17 +154,6 @@ impl ModelProvider for OpenAiCompatProvider {
     }
 }
 
-fn truncate(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_owned();
-    }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &text[..end])
-}
-
 /// Converts a normalized request into the OpenAI wire shape.
 pub fn wire_body(request: &ChatRequest, stream: bool) -> Value {
     let mut messages: Vec<Value> = Vec::new();
