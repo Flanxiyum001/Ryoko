@@ -41,7 +41,9 @@ fn invalid(message: impl Into<String>) -> ModelError {
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn valid_env(name: &str) -> bool {
@@ -52,13 +54,18 @@ fn valid_env(name: &str) -> bool {
 
 fn is_loopback(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
-        || host.trim_matches(|ch| ch == '[' || ch == ']').parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        || host
+            .trim_matches(|ch| ch == '[' || ch == ']')
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 impl ProviderProfile {
     pub fn validate(&self) -> Result<(), ModelError> {
         if !valid_id(&self.id) {
-            return Err(invalid("provider id must contain only letters, digits, '-' or '_'"));
+            return Err(invalid(
+                "provider id must contain only letters, digits, '-' or '_'",
+            ));
         }
         let url = reqwest::Url::parse(&self.base_url)
             .map_err(|_| invalid(format!("invalid base URL for provider {}", self.id)))?;
@@ -69,20 +76,32 @@ impl ProviderProfile {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err(invalid(format!("provider {} requires an HTTP(S) URL without credentials, query or fragment", self.id)));
+            return Err(invalid(format!(
+                "provider {} requires an HTTP(S) URL without credentials, query or fragment",
+                self.id
+            )));
         }
         if let Some(env_name) = &self.api_key_env {
             if !valid_env(env_name) {
-                return Err(invalid(format!("provider {} has an invalid api_key_env", self.id)));
+                return Err(invalid(format!(
+                    "provider {} has an invalid api_key_env",
+                    self.id
+                )));
             }
         }
         if url.scheme() == "http" {
             let loopback = url.host_str().is_some_and(is_loopback);
             if !loopback && !self.allow_insecure_http {
-                return Err(invalid(format!("provider {} must use HTTPS outside loopback (or explicitly opt in for keyless HTTP)", self.id)));
+                return Err(invalid(format!(
+                    "provider {} must use HTTPS outside loopback (or explicitly opt in for keyless HTTP)",
+                    self.id
+                )));
             }
             if !loopback && self.api_key_env.is_some() {
-                return Err(invalid(format!("provider {} cannot transmit a key over non-loopback HTTP", self.id)));
+                return Err(invalid(format!(
+                    "provider {} cannot transmit a key over non-loopback HTTP",
+                    self.id
+                )));
             }
         }
         if let Some(path) = &self.chat_path {
@@ -93,7 +112,10 @@ impl ProviderProfile {
                 || path.contains('\\')
                 || path.split('/').any(|part| part == "." || part == "..")
             {
-                return Err(invalid(format!("provider {} has an invalid chat_path", self.id)));
+                return Err(invalid(format!(
+                    "provider {} has an invalid chat_path",
+                    self.id
+                )));
             }
         }
         Ok(())
@@ -107,10 +129,16 @@ impl ProviderProfile {
         }
         if let Some(var) = &self.api_key_env {
             let key = std::env::var(var).map_err(|_| {
-                invalid(format!("provider {} requires the environment variable {var}", self.id))
+                invalid(format!(
+                    "provider {} requires the environment variable {var}",
+                    self.id
+                ))
             })?;
             if key.trim().is_empty() {
-                return Err(invalid(format!("provider {} has an empty API key environment variable", self.id)));
+                return Err(invalid(format!(
+                    "provider {} has an empty API key environment variable",
+                    self.id
+                )));
             }
             config = config.with_api_key(key);
         }
@@ -214,7 +242,12 @@ mod tests {
 
     #[test]
     fn rejects_unknown_fields_and_duplicate_ids() {
-        assert!(ProviderCatalog::parse_json(r#"{"default_provider":"local","providers":[],"api_key":"secret"}"#).is_err());
+        assert!(
+            ProviderCatalog::parse_json(
+                r#"{"default_provider":"local","providers":[],"api_key":"secret"}"#
+            )
+            .is_err()
+        );
         let mut catalog = example();
         catalog.providers.push(catalog.providers[0].clone());
         assert!(catalog.validate().is_err());
