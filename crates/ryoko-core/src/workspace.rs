@@ -59,7 +59,7 @@ pub fn validate_relative_path(path: &str) -> CoreResult<PathBuf> {
     }
     // Reject cross-platform drive prefixes, alternate streams and separators even
     // when validating a Windows-targeted project on a Unix host.
-    if path.contains(['\\\\', ':', '\\0']) {
+    if path.contains('\\') || path.contains(':') || path.contains('\0') {
         return Err(CoreError::Workspace("unsafe path separator or prefix".to_owned()));
     }
     let candidate = Path::new(path);
