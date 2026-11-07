@@ -684,6 +684,47 @@ mod tests {
         }
     }
 
+    struct PanicAgent {
+        identity: AgentIdentity,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for PanicAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, _task: Task) -> CoreResult<TaskResult> {
+            panic!("simulated agent panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_agents_do_not_hang_dependent_tasks() {
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig { max_concurrency: 2, max_attempts: 1 });
+        let first = Task::new("crash", AgentRole::ProjectManager);
+        let second = Task::new("must skip", AgentRole::SeniorDeveloper)
+            .with_dependency(first.id);
+        let manager: Arc<dyn AgentRuntime> = Arc::new(PanicAgent {
+            identity: AgentIdentity::new(AgentRole::ProjectManager, "pm-1", "planner"),
+        });
+        let developer: Arc<dyn AgentRuntime> = Arc::new(SleepAgent {
+            identity: dev(),
+            delay: Duration::ZERO,
+        });
+        let report = tokio::time::timeout(
+            Duration::from_secs(3),
+            orchestrator.run(vec![first.clone(), second], vec![manager, developer], ProjectContext::default()),
+        )
+        .await
+        .expect("orchestrator hung after an agent panic")
+        .unwrap();
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].task_id, first.id);
+        assert_eq!(report.skipped.len(), 1);
+    }
+
     struct DenyValidator;
 
     #[async_trait]
