@@ -90,6 +90,8 @@ impl OpenAiCompatProvider {
     pub fn new(config: OpenAiCompatConfig) -> Result<Self, ModelError> {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(20))
+            .timeout(std::time::Duration::from_secs(180))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("ryoko/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self { config, client })
@@ -139,11 +141,12 @@ impl ModelProvider for OpenAiCompatProvider {
         let response = builder.send().await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            // Provider error bodies can echo credentials and be arbitrarily large.
+            // Keep only the status and provider identifier in propagated errors.
             return Err(ModelError::Http {
                 provider: self.config.id.clone(),
                 status: status.as_u16(),
-                body: truncate(&body, 2_000),
+                body: "provider error details omitted to protect secrets".to_owned(),
             });
         }
 
@@ -281,6 +284,11 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
                 }
             };
             buffer.extend_from_slice(&chunk);
+            // An untrusted server can send an endlessly growing SSE line.
+            if buffer.len() > 2 * 1024 * 1024 {
+                yield Err(ModelError::Decode("SSE event exceeded 2 MiB".to_owned()));
+                return;
+            }
 
             while let Some(newline) = buffer.iter().position(|b| *b == b'\n') {
                 let raw: Vec<u8> = buffer.drain(..=newline).collect();
