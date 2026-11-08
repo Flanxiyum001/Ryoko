@@ -176,6 +176,20 @@ async function login() {
   return { cookie, csrf: session.csrf };
 }
 
+test('default branch writes are denied even if the default branch starts with ryoko/', async () => {
+  const broker = new GitHubBroker({ appId: 1, clientId: 'x', clientSecret: 'y', privateKey: 'dummy' });
+  broker.authorizedRepo = async () => ({ full_name: 'owner/repo', default_branch: 'ryoko/main' });
+  broker.installationToken = async () => 'scoped-token';
+  broker.request = async (path) => {
+    if (path === '/repos/owner/repo') return { default_branch: 'ryoko/main' };
+    throw Error('should not invoke remote writes');
+  };
+  await assert.rejects(() => broker.execute('user-token', {
+    installationId: 9, repoId: 12, operation: 'commit_file',
+    params: { branch: 'ryoko/main', path: 'src/app.js', content: 'safe', message: 'safe' },
+  }), /default branch/);
+});
+
 test('server rejects unauthenticated APIs and forged OAuth callbacks', async () => {
   assert.equal((await req('/api/repositories?installationId=17')).status, 401);
   assert.equal((await req('/auth/github/callback?code=fake&state=invalid')).status, 403);
