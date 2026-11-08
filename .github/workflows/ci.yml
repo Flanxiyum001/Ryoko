@@ -28,3 +28,21 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
         run: cargo test --workspace --locked
+
+  github-app:
+    name: GitHub App / Desktop Workbench
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: services/github-app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Node syntax
+        run: npm run check
+      - name: Test GitHub App security and API
+        run: npm test
+      - name: Check browser JS syntax
+        run: node --check ../../apps/desktop/app.js
