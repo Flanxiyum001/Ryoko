@@ -1,0 +1,35 @@
+{
+  "name": "Ryoko Engineering",
+  "url": "https://YOUR_HOST",
+  "description": "A human-reviewed GitHub integration for the Ryoko AI engineering IDE",
+  "hook_attributes": {
+    "url": "https://YOUR_HOST/webhooks/github",
+    "active": true
+  },
+  "redirect_url": "https://YOUR_HOST/",
+  "callback_urls": [
+    "https://YOUR_HOST/auth/github/callback"
+  ],
+  "public": false,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "write",
+    "pull_requests": "write",
+    "issues": "write",
+    "actions": "read",
+    "checks": "read"
+  },
+  "default_events": [
+    "installation",
+    "installation_repositories",
+    "issues",
+    "issue_comment",
+    "pull_request",
+    "pull_request_review",
+    "check_run",
+    "check_suite",
+    "workflow_run",
+    "push"
+  ]
+}
