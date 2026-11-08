@@ -335,11 +335,10 @@ async fn init(args: InitArgs) -> Result<(), Box<dyn Error>> {
     let text = serde_json::to_string_pretty(&catalog)?;
     create_private_file(&args.output, &format!("{text}\n"))?;
     println!("Created provider profile: {}", args.output.display());
-    println!("API keys are not written to the file. Set any named environment variable before use.");
     println!(
-        "Next: ryoko doctor --config {}",
-        args.output.display()
+        "API keys are not written to the file. Set any named environment variable before use."
     );
+    println!("Next: ryoko doctor --config {}", args.output.display());
     Ok(())
 }
 
@@ -370,7 +369,9 @@ async fn doctor(args: DoctorArgs) -> Result<(), Box<dyn Error>> {
     }
     println!("Offline check only: no model requests, network probes or charges.");
     if missing {
-        return Err(cli_error("set missing credential environment variables before calling the affected providers"));
+        return Err(cli_error(
+            "set missing credential environment variables before calling the affected providers",
+        ));
     }
     Ok(())
 }
@@ -475,9 +476,8 @@ async fn team_preview(args: TeamPreviewArgs) -> Result<(), Box<dyn Error>> {
     let choices = settings.check_catalog(&catalog, args.model.as_deref())?;
     // Fail fast before any provider call, and don't demand credentials for unused
     // profiles when a developer is working entirely with local models.
-    let router = catalog.build_router_for_models(
-        choices.iter().map(|(_, model)| model.as_str()),
-    )?;
+    let router =
+        catalog.build_router_for_models(choices.iter().map(|(_, model)| model.as_str()))?;
     let role_models: HashMap<String, String> = choices.into_iter().collect();
     let members = standard_team();
     let plan = application_plan(&args.goal);
