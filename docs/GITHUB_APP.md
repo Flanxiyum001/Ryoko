@@ -72,6 +72,13 @@ Send POST /api/agent/proposals with Authorization: Bearer YOUR_BROKER_TOKEN and 
       "params": { "branch": "ryoko/fix-123" }
     }
 
+The host-side adapter can queue an agent proposal from a JSON file without putting the bearer token in command arguments:
+
+    export RYOKO_GITHUB_BROKER_URL="http://127.0.0.1:4173"
+    node services/github-app/src/agent-client.mjs /secure/path/to/proposal.json
+
+Only a trusted tool host should run this adapter. The model must never be given the broker token, its process environment or arbitrary terminal execution privileges. This adapter is **not automatically wired** to the Rust ModelAgent runtime.
+
 **Supported operations, after explicit approval:**
 
 | Operation | Parameters | Outcome |
