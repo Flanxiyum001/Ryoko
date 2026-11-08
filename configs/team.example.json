@@ -1,0 +1,13 @@
+{
+  "default_model": "ollama/qwen2.5-coder",
+  "role_models": {
+    "project-manager": "ollama/qwen2.5-coder",
+    "software-architect": "ollama/qwen2.5-coder",
+    "ui-ux-designer": "ollama/llama3.2",
+    "backend-engineer": "ollama/qwen2.5-coder",
+    "senior-developer": "ollama/qwen2.5-coder",
+    "security-engineer": "ollama/qwen2.5-coder",
+    "qa-engineer": "ollama/qwen2.5-coder",
+    "devops-engineer": "ollama/qwen2.5-coder"
+  }
+}
