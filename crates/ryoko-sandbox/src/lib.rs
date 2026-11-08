@@ -3,7 +3,12 @@
 //! Test artifacts run in a fresh wasmtime store with no filesystem, network,
 //! environment or WASI imports. Fuel bounds CPU, an epoch deadline bounds wall
 //! time, and a `StoreLimits` cap bounds linear memory. Only a clean `_start`
-//! return counts as a pass.
+//! return counts as a pass. [`SandboxSpecValidator`] additionally refuses
+//! proposals that do not carry tests, so source-only changes never reach review.
+
+mod spec;
+
+pub use spec::{SandboxSpecValidator, SpecError, SpecEvidence, SpecPolicy};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

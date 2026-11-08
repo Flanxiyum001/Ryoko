@@ -290,6 +290,10 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
                     }
                     let data = data_lines.join("\n");
                     data_lines.clear();
+                    if is_done(&data) {
+                        finished = true;
+                        break 'outer;
+                    }
                     match dispatch_event(&data, &provider) {
                         Ok(events) => {
                             for event in events {
@@ -297,10 +301,6 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
                             }
                         }
                         Err(err) => yield Err(err),
-                    }
-                    if data.trim() == "[DONE]" {
-                        finished = true;
-                        break 'outer;
                     }
                 } else if let Some(rest) = line.strip_prefix("data:") {
                     data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
@@ -312,7 +312,7 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
 
         if !finished && !data_lines.is_empty() {
             let data = data_lines.join("\n");
-            if data.trim() != "[DONE]" {
+            if !is_done(&data) {
                 match dispatch_event(&data, &provider) {
                     Ok(events) => {
                         for event in events {
@@ -324,6 +324,10 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
             }
         }
     })
+}
+
+fn is_done(data: &str) -> bool {
+    data.trim() == "[DONE]"
 }
 
 fn dispatch_event(data: &str, provider: &str) -> Result<Vec<StreamEvent>, ModelError> {
@@ -470,6 +474,13 @@ mod tests {
         assert_eq!(body["messages"][3]["tool_call_id"], "call_9");
         assert_eq!(body["tools"][0]["function"]["name"], "read_file");
         assert_eq!(body["max_tokens"], 256);
+    }
+
+    #[test]
+    fn recognises_the_terminal_sse_frame() {
+        assert!(is_done("[DONE]"));
+        assert!(is_done("  [DONE]\r\n"));
+        assert!(!is_done(r#"{"choices":[]}"#));
     }
 
     #[test]
