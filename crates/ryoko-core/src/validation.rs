@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,11 +12,25 @@ use crate::model::ProposedChange;
 pub struct StagedChanges {
     pub task_id: Uuid,
     pub files: Vec<ProposedChange>,
+    /// Root of the isolated worktree that contains these changes. Validators
+    /// use it to run project-specific build and test commands without ever
+    /// touching the main checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<PathBuf>,
 }
 
 impl StagedChanges {
     pub fn new(task_id: Uuid, files: Vec<ProposedChange>) -> Self {
-        Self { task_id, files }
+        Self {
+            task_id,
+            files,
+            root: None,
+        }
+    }
+
+    pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.root = Some(root.into());
+        self
     }
 
     pub fn is_empty(&self) -> bool {

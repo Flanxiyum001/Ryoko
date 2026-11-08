@@ -34,10 +34,14 @@ pub trait WorkspaceLease: Send + Sync {
     /// Writes changes into the isolated workspace (not the project root).
     async fn apply(&self, changes: &[ProposedChange]) -> CoreResult<()>;
 
-    /// Commits the staged changes and returns a reviewable pull request.
+    /// Commits the staged changes and returns a reviewable pull request. A
+    /// provider may retain its branch after publishing so the pull request can
+    /// still be merged later.
     async fn publish(&self, task: &Task, summary: &str) -> CoreResult<PullRequest>;
 
-    /// Removes the workspace and its branch. Must be idempotent.
+    /// Releases the workspace. Must be idempotent. Providers must keep a
+    /// published branch available for merge; unpublished branches may be
+    /// deleted. Abandoning a published branch is a separate, explicit action.
     async fn discard(&self) -> CoreResult<()>;
 }
 

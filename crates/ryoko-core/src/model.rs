@@ -170,6 +170,56 @@ impl ProposedChange {
         self.language = Some(language.into());
         self
     }
+
+    /// Whether this change carries tests, either as a conventional test file
+    /// or as an inline test block. This is intentionally a conservative
+    /// heuristic: the sandbox validator still has to execute the proposal.
+    pub fn is_test(&self) -> bool {
+        is_test_path(&self.path) || has_inline_tests(&self.content)
+    }
+}
+
+fn is_test_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    let original_name = normalized.rsplit('/').next().unwrap_or(&normalized);
+
+    lower.starts_with("tests/")
+        || lower.starts_with("test/")
+        || lower.starts_with("__tests__/")
+        || lower.contains("/tests/")
+        || lower.contains("/test/")
+        || lower.contains("/__tests__/")
+        || name.ends_with("_test.rs")
+        || name.ends_with("_tests.rs")
+        || name.ends_with("_test.go")
+        || name.ends_with("_test.py")
+        || name.ends_with("_spec.rb")
+        || name.starts_with("test_")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || original_name.ends_with("Test.java")
+        || original_name.ends_with("Tests.java")
+        || original_name.ends_with("Test.cs")
+        || original_name.ends_with("Tests.cs")
+        || original_name.ends_with("Test.kt")
+        || original_name.ends_with("Tests.swift")
+}
+
+fn has_inline_tests(content: &str) -> bool {
+    content.contains("#[cfg(test)]")
+        || content.contains("#[test]")
+        || content.contains("#[tokio::test]")
+        || content.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("describe(")
+                || line.starts_with("it(")
+                || line.starts_with("test(")
+                || line.starts_with("test (")
+                || line.starts_with("def test_")
+                || line.starts_with("func Test")
+        })
 }
 
 /// Result returned by [`AgentRuntime::execute_task`](crate::AgentRuntime::execute_task).
@@ -259,5 +309,16 @@ mod tests {
         ]);
         assert_eq!(result.changes_proposed, vec!["src/main.rs", "README.md"]);
         assert!(result.success);
+    }
+
+    #[test]
+    fn identifies_test_changes_without_treating_every_java_file_as_a_test() {
+        assert!(ProposedChange::new("tests/api.rs", "").is_test());
+        assert!(ProposedChange::new("web/app.test.tsx", "").is_test());
+        assert!(ProposedChange::new("pkg/handler_test.go", "").is_test());
+        assert!(ProposedChange::new("src/lib.rs", "#[cfg(test)]\nmod tests {}").is_test());
+        assert!(ProposedChange::new("src/lib.rs", "describe(\"api\", () => {});").is_test());
+        assert!(!ProposedChange::new("src/main.rs", "fn main() {}").is_test());
+        assert!(!ProposedChange::new("src/Contest.java", "class Contest {}").is_test());
     }
 }
