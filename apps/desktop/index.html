@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Ryoko — a multi-agent AI engineering workbench with controlled GitHub integration.">
+  <title>Ryoko — Engineering Workbench</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to workspace</a>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><span>ryoko</span><span class="brand-sub">STUDIO</span></div>
+      <div class="project-pill"><span class="pulse-dot" id="onlineDot"></span><span id="currentProject">Select a GitHub repository</span></div>
+      <div class="top-actions">
+        <span class="quiet-label" id="connectionState">Not connected</span>
+        <button id="themeToggle" class="icon-button" type="button" title="Toggle appearance" aria-label="Toggle appearance">◐</button>
+        <a id="installLink" class="button ghost hidden" href="https://github.com/apps" target="_blank" rel="noopener noreferrer">Install App</a>
+        <a id="connectButton" class="button primary" href="/auth/github/start">Connect GitHub</a>
+        <button id="disconnectButton" class="button ghost hidden" type="button">Disconnect</button>
+      </div>
+    </header>
+
+    <div class="body-grid">
+      <nav class="rail" aria-label="Main views">
+        <button class="rail-button active" data-view="workbench" type="button" title="Workbench" aria-label="Workbench"><span>▤</span><small>IDE</small></button>
+        <button class="rail-button" data-view="mission" type="button" title="Agent Mission Control" aria-label="Agent Mission Control"><span>◈</span><small>Agents</small></button>
+        <button class="rail-button" data-view="github" type="button" title="GitHub repositories" aria-label="GitHub repositories"><span>⑂</span><small>GitHub</small></button>
+        <button class="rail-button" data-view="approvals" type="button" title="Approval requests" aria-label="Approval requests"><span>◇</span><small>Review</small></button>
+        <button class="rail-button" data-view="settings" type="button" title="Setup and settings" aria-label="Setup and settings"><span>⚙</span><small>Setup</small></button>
+        <div class="rail-spacer"></div>
+        <span class="rail-version">PRE-ALPHA</span>
+      </nav>
+
+      <aside class="sidebar" aria-label="Repository explorer">
+        <div class="sidebar-head"><span class="eyebrow">WORKSPACE</span><span class="side-counter" id="repoCounter">0 repos</span></div>
+        <label for="installationSelect">GitHub installation</label>
+        <select id="installationSelect"><option value="">Connect to begin</option></select>
+        <label for="repoSelect">Repository</label>
+        <select id="repoSelect"><option value="">Choose a repository</option></select>
+        <div class="side-section-head"><span>EXPLORER</span><span class="small-pill" id="fileCounter">0 files</span></div>
+        <label class="sr-only" for="fileSearch">Filter files</label>
+        <input type="search" id="fileSearch" placeholder="Find file…" autocomplete="off">
+        <div class="file-list" id="fileList"><p class="subtle">Files will appear here when you select a repository.</p></div>
+        <div class="side-section-head"><span>QUICK ACTIONS</span></div>
+        <button id="refreshButton" class="sidebar-action" type="button">↻ <span>Refresh repository</span></button>
+        <button id="openApprovals" class="sidebar-action" type="button">◇ <span>Review agent proposals</span></button>
+      </aside>
+
+      <main id="main" class="main-content" tabindex="-1">
+        <div class="workspace-header">
+          <div><p class="eyebrow" id="viewEyebrow">DEVELOPMENT ENVIRONMENT</p><h1 id="viewTitle">Workbench</h1><p class="view-subtitle" id="viewDescription">Inspect code and coordinate safe engineering work.</p></div>
+          <span id="workspaceBadge" class="status-tag">Preview build</span>
+        </div>
+
+        <section class="view active" id="view-workbench" aria-label="Code workbench">
+          <div class="tabs" role="tablist" aria-label="Editor tabs"><button class="tab active" id="editorTab" role="tab" aria-selected="true" type="button">Code inspection</button><span class="tab-path" id="filePath">No file open</span></div>
+          <div class="editor">
+            <div class="editor-toolbar"><span id="editorLanguage">TEXT</span><span class="read-only">READ ONLY · GitHub snapshot</span></div>
+            <pre id="codeViewer" tabindex="0" aria-label="File contents">Select a file in the explorer to inspect its contents.
+
+Use the GitHub panel to browse branches, issues, pull requests and CI.
+Write operations are reviewed through the Approval Queue.</pre>
+          </div>
+          <div class="workbench-foot"><span>GitHub content is fetched on demand</span><span>No implicit file edits or terminal execution</span></div>
+        </section>
+
+        <section class="view" id="view-mission" aria-label="Agent Mission Control">
+          <div class="metric-grid">
+            <article class="metric"><span>TEAM MEMBERS</span><strong>08</strong><small>Specialist roles configured</small></article>
+            <article class="metric"><span>LOCAL SESSION LINK</span><strong id="missionConnection">Offline</strong><small id="missionNote">Connect the Ryoko CLI to see worktree progress</small></article>
+            <article class="metric"><span>WAITING FOR REVIEW</span><strong id="reviewCount">0</strong><small>Published local worktrees</small></article>
+          </div>
+          <div class="section-title"><div><h2>Agent team</h2><p>Agent state reflects verified local worktree records, not simulated work.</p></div><button class="button ghost" id="refreshMission" type="button">Refresh</button></div>
+          <div id="agentsGrid" class="agents-grid"></div>
+          <div class="section-title"><div><h2>Activity timeline</h2><p>Verified GitHub webhook activity for installations you can access.</p></div></div>
+          <div id="eventFeed" class="timeline"><div class="empty">No GitHub events received yet. Recent events appear here after webhook setup.</div></div>
+        </section>
+
+        <section class="view" id="view-github" aria-label="GitHub integration">
+          <div class="section-title"><div><h2>Repository activity</h2><p>Real GitHub data, scoped to your installed repositories.</p></div><button id="refreshGitHub" class="button ghost" type="button">Reload</button></div>
+          <div class="github-grid">
+            <article class="panel"><div class="panel-heading"><h3>Open pull requests</h3><span id="prCount">0</span></div><div id="prList" class="item-list"><p class="subtle">Select a repository</p></div></article>
+            <article class="panel"><div class="panel-heading"><h3>Open issues</h3><span id="issueCount">0</span></div><div id="issueList" class="item-list"><p class="subtle">Select a repository</p></div></article>
+            <article class="panel"><div class="panel-heading"><h3>Actions / CI</h3><span id="ciCount">0</span></div><div id="ciList" class="item-list"><p class="subtle">Select a repository</p></div></article>
+            <article class="panel"><div class="panel-heading"><h3>Branches</h3><span id="branchCount">0</span></div><div id="branchList" class="item-list"><p class="subtle">Select a repository</p></div></article>
+          </div>
+        </section>
+
+        <section class="view" id="view-approvals" aria-label="Approved GitHub operations">
+          <div class="section-title"><div><h2>Permission broker</h2><p>Every remote code change must be proposed and explicitly approved.</p></div><span class="status-tag pending">Manual approval required</span></div>
+          <div class="approvals-grid">
+            <article class="panel proposal-form">
+              <h3>Request an operation</h3>
+              <p class="subtle">This creates a pending proposal. It does not change GitHub until you approve it.</p>
+              <form id="proposalForm">
+                <label for="operation">Action</label>
+                <select id="operation" required>
+                  <option value="create_branch">Create isolated branch</option>
+                  <option value="commit_file">Commit file to isolated branch</option>
+                  <option value="open_pull_request">Open pull request</option>
+                  <option value="review_comment">Comment on pull request</option>
+                </select>
+                <div id="proposalFields"></div>
+                <button class="button primary block" type="submit">Request approval</button>
+              </form>
+            </article>
+            <article class="panel approvals-list">
+              <div class="panel-heading"><h3>Approval queue</h3><button id="refreshProposals" class="tiny-button" type="button">Refresh</button></div>
+              <div id="proposalList" class="item-list"><p class="subtle">Connect GitHub to see proposals.</p></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-settings" aria-label="GitHub App setup">
+          <div class="section-title"><div><h2>Connection and permissions</h2><p>Security first. GitHub credentials never belong in frontend source code.</p></div></div>
+          <div class="settings-grid">
+            <article class="panel"><h3>Connection</h3><div id="accountDetails" class="subtle">Not connected</div><p class="permission-note">Access is limited to repositories selected during GitHub App installation and granted by that user.</p></article>
+            <article class="panel"><h3>Getting started</h3><ol class="setup-steps"><li>Register Ryoko as a GitHub App with selected repositories.</li><li>Configure App ID, client ID, client secret, webhook secret and server-side private key.</li><li>Sign in and choose an installation.</li><li>Inspect repositories, agent worktrees and pending approvals here.</li></ol><p class="subtle">See docs/GITHUB_APP.md for exact permissions and deployment requirements.</p></article>
+            <article class="panel"><h3>Permission model</h3><div class="permission-list"><span>Repository metadata</span><b>Read</b><span>Contents</span><b>Read / approved write</b><span>Issues & PRs</span><b>Read / approved write</b><span>Checks & Actions</span><b>Read</b><span>Workflows & admin</span><b>Not requested</b></div></article>
+            <article class="panel"><h3>Workbench appearance</h3><p class="subtle">Dark by default with a light theme and reduced-motion support. No analytics or personal project data is sent from this UI outside its selected GitHub integration.</p></article>
+          </div>
+        </section>
+      </main>
+
+      <aside class="inspector" aria-label="Context inspector">
+        <p class="eyebrow">CONTEXT</p><h2>Project intelligence</h2>
+        <div class="inspector-section"><span class="inspector-label">ACTIVE REPOSITORY</span><strong id="inspectRepo">None selected</strong><span id="inspectBranch" class="subtle">Branch: —</span></div>
+        <div class="inspector-section"><span class="inspector-label">GITHUB APP</span><strong id="inspectAuth">Disconnected</strong><span class="subtle">Selected-repository installation access</span></div>
+        <div class="inspector-section"><span class="inspector-label">AVAILABLE ACTIONS</span><span class="chip">Read repository</span><span class="chip">Prepare branch</span><span class="chip">Request PR</span><span class="chip">Review gate</span></div>
+        <div class="inspector-section callout"><strong>Approval boundary</strong><p>Agent proposals are untrusted until a human inspects and approves the exact operation.</p></div>
+      </aside>
+    </div>
+
+    <footer class="statusbar"><div><span class="status-dot"></span><span id="statusMessage" role="status" aria-live="polite">Workbench ready · Connect GitHub to begin</span></div><div><span>Ryoko GitHub App</span><span>●</span><span>PRE-ALPHA</span></div></footer>
+  </div>
+</body>
+</html>
