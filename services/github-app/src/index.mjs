@@ -46,6 +46,7 @@ const server = createRyokoServer({
     agentRepoIds: (process.env.RYOKO_AGENT_ALLOWED_REPO_IDS || '').split(',').filter(Boolean),
     ryokoBinary: process.env.RYOKO_CLI_BIN || '',
     projectRoot: process.env.RYOKO_PROJECT_ROOT || '',
+    projectsRoot: process.env.RYOKO_PROJECTS_ROOT || '',
   },
 });
 
