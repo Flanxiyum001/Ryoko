@@ -118,3 +118,19 @@ cargo test --workspace --locked
 ```
 
 Security-sensitive project changes should be evaluated in isolated, restricted execution environments and reviewed by a human before integration. **Changes are merged only after explicit human acceptance; the CLI never pushes or deploys.**
+
+## GitHub App workbench (experimental)
+
+Ryoko includes a browser-hosted, Tauri-ready code-inspection and Mission Control shell with a trusted Node.js GitHub App broker. The GitHub App installation and OAuth credentials must be registered by the operator; no GitHub private key is embedded in the desktop frontend.
+
+- One-repository, short-lived installation tokens with separate read and write scopes
+- GitHub OAuth login with owner allowlist; repository browsing, PRs, issues and CI status
+- HMAC-verified GitHub webhook timeline and optional real Rust worktree session state
+- Explicit human-approved clone, branch, commit-file, PR and PR-comment proposals
+- Dark/light responsive UI, read-only code inspection and review queue
+
+Requirements: Node.js 22+, Git for server-side clones. After configuring environment variables in the [GitHub App guide](docs/GITHUB_APP.md):
+
+    node services/github-app/src/index.mjs
+
+Open http://127.0.0.1:4173 and connect your GitHub App installation. The initial UX is a browser shell, **not yet a packaged native desktop app or a Monaco/LSP editor**. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
