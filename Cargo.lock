@@ -1412,6 +1412,7 @@ dependencies = [
  "ryoko-models",
  "ryoko-sandbox",
  "ryoko-worktree",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
