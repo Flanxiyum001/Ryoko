@@ -1,5 +1,5 @@
 import { cloneWithInstallationToken } from './clone.mjs';
-import { positiveId, READ_PERMISSIONS, WRITE_PERMISSIONS, safeBranch, safeGitHubApiPath, safePath, signAppJwt } from './security.mjs';
+import { positiveId, READ_PERMISSIONS, WRITE_PERMISSIONS, PR_PERMISSIONS, CLONE_PERMISSIONS, safeBranch, safeGitHubApiPath, safePath, signAppJwt } from './security.mjs';
 
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
@@ -146,7 +146,10 @@ export class GitHubBroker {
   async installationToken(installationId, repoId, mode = 'read') {
     const install = positiveId(installationId, 'installation');
     const repository = positiveId(repoId, 'repository');
-    const scope = mode === 'write' ? WRITE_PERMISSIONS : READ_PERMISSIONS;
+    const available = { read: READ_PERMISSIONS, contents: WRITE_PERMISSIONS,
+      pull_requests: PR_PERMISSIONS, clone: CLONE_PERMISSIONS };
+    const scope = available[mode];
+    if (!scope) throw bad('unsupported GitHub token scope');
     const cacheKey = install + ':' + repository + ':' + mode;
     const cached = this.tokenCache.get(cacheKey);
     if (cached && cached.expires > Date.now() + 90_000) return cached.token;
@@ -217,7 +220,7 @@ export class GitHubBroker {
 
   async clone(userToken, proposal, projectsRoot) {
     const repo = await this.authorizedRepo(userToken, proposal.installationId, proposal.repoId);
-    const token = await this.installationToken(proposal.installationId, proposal.repoId, 'read');
+    const token = await this.installationToken(proposal.installationId, proposal.repoId, 'clone');
     return cloneWithInstallationToken({
       repo, token, projectsRoot, projectName: proposal.params.projectName,
     });
@@ -226,7 +229,9 @@ export class GitHubBroker {
   async execute(userToken, proposal) {
     const { installationId, repoId, operation, params } = proposal;
     const repo = await this.authorizedRepo(userToken, installationId, repoId);
-    const token = await this.installationToken(installationId, repoId, 'write');
+    const scope = operation === 'create_branch' || operation === 'commit_file'
+      ? 'contents' : 'pull_requests';
+    const token = await this.installationToken(installationId, repoId, scope);
     const root = repoPath(repo);
     const repoInfo = await this.request(root, token);
     const base = repoInfo.default_branch;
@@ -243,6 +248,7 @@ export class GitHubBroker {
       }
       case 'commit_file': {
         const branch = safeBranch(params.branch);
+        if (branch === base) throw bad('cannot write the default branch', 403);
         await this.request(root + '/branches/' + encodeURIComponent(branch), token);
         const path = safePath(params.path).split('/').map(encodeURIComponent).join('/');
         const result = await this.request(root + '/contents/' + path, token, {
