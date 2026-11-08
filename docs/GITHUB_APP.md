@@ -2,6 +2,8 @@
 
 This integration adds a **trusted GitHub App broker** and a **browser-hosted, Tauri-ready IDE workbench** with Agent Mission Control. It does **not** register the GitHub App automatically, package a native binary, merge code or deploy applications.
 
+Use [the least-privilege App manifest template](../configs/github-app-manifest.example.json) as a registration reference. Replace YOUR_HOST before registering. For this prototype, leave request_oauth_on_install disabled and use the explicit Connect GitHub button, which creates a per-session OAuth state first.
+
 ## 1. Register the GitHub App
 
 Visit GitHub Settings → Developer settings → GitHub Apps → New GitHub App. Create an App with:
