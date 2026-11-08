@@ -95,12 +95,12 @@ test('installation tokens are scoped to exactly one repository and explicit priv
       }), { status: 201, headers: { 'content-type': 'application/json' } });
     },
   });
-  const token = await broker.installationToken(42, 88, 'write');
+  const token = await broker.installationToken(42, 88, 'contents');
   assert.equal(token, 'test-installation-token');
   assert.equal(requests.length, 1);
   assert.match(requests[0].url, /\/app\/installations\/42\/access_tokens$/);
   assert.deepEqual(JSON.parse(requests[0].options.body), {
-    repository_ids: [88], permissions: { contents: 'write', issues: 'write', pull_requests: 'write' },
+    repository_ids: [88], permissions: { contents: 'write' },
   });
   await broker.installationToken(42, 88, 'write');
   assert.equal(requests.length, 1, 'short-lived installation token should be cached');
