@@ -9,6 +9,7 @@
 //! - provider-neutral model access through [`ryoko_models::ModelRouter`].
 
 pub mod agent;
+pub mod agents;
 pub mod error;
 pub mod event;
 pub mod iacp;
@@ -20,6 +21,10 @@ pub mod validation;
 pub mod workspace;
 
 pub use agent::{AgentRuntime, TaskContext};
+pub use agents::{
+    CODEGEN_SYSTEM_PROMPT, CONTEXT_METADATA, ModelAgent, RETRY_FEEDBACK_METADATA,
+    StructuredProposal, parse_structured_proposal,
+};
 pub use error::{CoreError, CoreResult};
 pub use event::{EventSink, OrchestratorEvent};
 pub use iacp::{

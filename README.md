@@ -2,7 +2,7 @@
 
 **Ryoko** is an experimental Rust foundation for a provider-neutral, multi-agent AI IDE. The target experience is a full engineering team—project manager, architect, senior UI/UX, backend, full-stack, security, QA and DevOps—collaborating on a user-defined application, with isolated worktrees and human-reviewed changes.
 
-> **Project status:** pre-alpha. The current CLI supports provider setup, chat and **review-only team previews**. It does not yet provide an editor UI, autonomous source-code application, secure project-specific build runner or deployment. Do not use its previews as proof of successful implementation.
+> **Project status:** pre-alpha. The current CLI supports provider setup, chat, **review-only team previews**, and an isolated, human-reviewed file-generation workflow. It does not yet provide an editor UI, hardened project-specific build isolation or deployment. Do not use its previews as proof of successful implementation.
 
 ## Prerequisites
 
@@ -35,6 +35,22 @@ cargo run -p ryoko-cli -- team-preview \
 
 The preview uses the same model for all eight roles; per-role model selection is a planned follow-up. It prints proposed architecture, designs, engineering guidance, security review, QA and operations plans. It never writes generated files or runs code. No hosted GitHub pull requests are produced by this command.
 
+## Isolated generation and review
+
+`run` creates a temporary branch and worktree, asks the model for a structured JSON file proposal, writes only those paths inside the worktree, and runs the project's build/test command before publishing it for review. `review` shows the Git diff and the pre-flight result, then accepts, rejects, or sends feedback back to the model.
+
+```sh
+cargo run -p ryoko-cli -- run \
+  --config configs/providers.example.json \
+  --model ollama/qwen2.5-coder \
+  --repo . \
+  "Add a config loader with unit tests"
+
+cargo run -p ryoko-cli -- review --repo .
+```
+
+`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust.
+
 ## Provider configuration
 
 ```json
@@ -64,7 +80,7 @@ The root workspace is organized as follows:
 | `ryoko-core` | Task DAG, agent lifecycle, IACP messages, memory and permissions abstractions |
 | `ryoko-worktree` | Isolated task Git worktrees and reviewable internal change proposals |
 | `ryoko-sandbox` | Capability-free WASM test artifact execution, not a general app runner |
-| `ryoko-cli` | Terminal-facing provider and team preview |
+| `ryoko-cli` | Terminal-facing provider setup, team preview, isolated generation and human review |
 | `ryoko-native`, `ryoko-scripting`, `ryoko-vfs` | Future native, plugin and virtual filesystem layers |
 
 See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) and [IACP specification](docs/IACP.md).
@@ -77,4 +93,4 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Security-sensitive project changes should be evaluated in isolated, restricted execution environments and reviewed by a human before integration. **No automatic merges or production deployments are performed by the CLI.**
+Security-sensitive project changes should be evaluated in isolated, restricted execution environments and reviewed by a human before integration. **Changes are merged only after explicit human acceptance; the CLI never pushes or deploys.**
