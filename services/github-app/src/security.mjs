@@ -3,9 +3,9 @@ import { createHmac, sign, timingSafeEqual } from 'node:crypto';
 export const READ_PERMISSIONS = Object.freeze({
   contents: 'read', issues: 'read', pull_requests: 'read', checks: 'read', actions: 'read',
 });
-export const WRITE_PERMISSIONS = Object.freeze({
-  contents: 'write', issues: 'write', pull_requests: 'write',
-});
+export const WRITE_PERMISSIONS = Object.freeze({ contents: 'write' });
+export const PR_PERMISSIONS = Object.freeze({ pull_requests: 'write' });
+export const CLONE_PERMISSIONS = Object.freeze({ contents: 'read' });
 
 const unsafe = (message) => Object.assign(new Error(message), { status: 400 });
 
