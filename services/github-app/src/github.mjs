@@ -1,3 +1,4 @@
+import { cloneWithInstallationToken } from './clone.mjs';
 import { positiveId, READ_PERMISSIONS, WRITE_PERMISSIONS, safeBranch, safeGitHubApiPath, safePath, signAppJwt } from './security.mjs';
 
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -212,6 +213,14 @@ export class GitHubBroker {
       }
       default: throw bad('unsupported repository view');
     }
+  }
+
+  async clone(userToken, proposal, projectsRoot) {
+    const repo = await this.authorizedRepo(userToken, proposal.installationId, proposal.repoId);
+    const token = await this.installationToken(proposal.installationId, proposal.repoId, 'read');
+    return cloneWithInstallationToken({
+      repo, token, projectsRoot, projectName: proposal.params.projectName,
+    });
   }
 
   async execute(userToken, proposal) {
