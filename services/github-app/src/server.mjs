@@ -67,6 +67,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     agentRepoIds: (config?.agentRepoIds || []).map(Number),
     ryokoBinary: config?.ryokoBinary || '',
     projectRoot: config?.projectRoot || '',
+    projectsRoot: config?.projectsRoot || '',
   };
   const client = broker || new GitHubBroker(config || {});
   const pagesRoot = frontendPath || resolve('apps/desktop');
@@ -284,7 +285,9 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       }
       item.status = 'executing';
       try {
-        const result = await client.execute(session.token, item.proposal);
+        const result = item.proposal.operation === 'clone_repository'
+          ? await client.clone(session.token, item.proposal, settings.projectsRoot)
+          : await client.execute(session.token, item.proposal);
         item.status = 'completed';
         item.result = result;
         return json(res, 200, { id: item.id, status: item.status, result });
