@@ -1124,10 +1124,6 @@ fn load_catalog(path: &Path) -> Result<ProviderCatalog, Box<dyn Error>> {
     Ok(ProviderCatalog::parse_json(&json)?)
 }
 
-fn load_router(path: &Path) -> Result<ModelRouter, Box<dyn Error>> {
-    Ok(load_catalog(path)?.build_router()?)
-}
-
 fn validate_max_tokens(max_tokens: u32) -> Result<(), Box<dyn Error>> {
     if !(1..=16_384).contains(&max_tokens) {
         return Err(cli_error("max_tokens must be between 1 and 16384"));
