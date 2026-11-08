@@ -56,9 +56,11 @@ impl TeamSettings {
             .map(String::as_str)
             .or(cli_default)
             .or(self.default_model.as_deref())
-            .ok_or_else(|| bad(format!(
-                "no model configured for {role}; set --model or default_model"
-            )))?;
+            .ok_or_else(|| {
+                bad(format!(
+                    "no model configured for {role}; set --model or default_model"
+                ))
+            })?;
         valid_model(selected)?;
         Ok(selected.to_owned())
     }
@@ -72,11 +74,14 @@ impl TeamSettings {
         let mut assignments = Vec::new();
         for member in standard_team() {
             let model = self.model_for(member.role.label(), cli_default)?;
-            let provider = model.split_once('/').map_or(
-                catalog.default_provider.as_str(),
-                |(provider, _)| provider,
-            );
-            if !catalog.providers.iter().any(|profile| profile.id == provider) {
+            let provider = model
+                .split_once('/')
+                .map_or(catalog.default_provider.as_str(), |(provider, _)| provider);
+            if !catalog
+                .providers
+                .iter()
+                .any(|profile| profile.id == provider)
+            {
                 return Err(bad(format!(
                     "role {} selects unknown provider {provider}",
                     member.role
@@ -92,9 +97,13 @@ fn valid_model(model: &str) -> io::Result<()> {
     if model.trim().is_empty()
         || model.trim() != model
         || model.chars().any(char::is_control)
-        || model.split_once('/').is_some_and(|(left, right)| left.is_empty() || right.is_empty())
+        || model
+            .split_once('/')
+            .is_some_and(|(left, right)| left.is_empty() || right.is_empty())
     {
-        return Err(bad("model IDs must be nonempty, trimmed, and use provider/model syntax"));
+        return Err(bad(
+            "model IDs must be nonempty, trimmed, and use provider/model syntax",
+        ));
     }
     Ok(())
 }
@@ -178,7 +187,10 @@ pub fn create_private_file(path: &Path, content: &str) -> io::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    if let Err(error) = file.write_all(content.as_bytes()).and_then(|_| file.sync_all()) {
+    if let Err(error) = file
+        .write_all(content.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
         drop(file);
         let _ = std::fs::remove_file(path);
         return Err(error);
@@ -221,25 +233,42 @@ mod tests {
         let choices = settings.check_catalog(&catalog(), None).unwrap();
         assert_eq!(choices.len(), 8);
         assert_eq!(
-            choices.iter().find(|(role, _)| role == "ui-ux-designer").unwrap().1,
+            choices
+                .iter()
+                .find(|(role, _)| role == "ui-ux-designer")
+                .unwrap()
+                .1,
             "cloud/designer"
         );
-        assert_eq!(settings.model_for("qa-engineer", None).unwrap(), "local/primary");
-        assert_eq!(settings.model_for("qa-engineer", Some("local/override")).unwrap(), "local/override");
+        assert_eq!(
+            settings.model_for("qa-engineer", None).unwrap(),
+            "local/primary"
+        );
+        assert_eq!(
+            settings
+                .model_for("qa-engineer", Some("local/override"))
+                .unwrap(),
+            "local/override"
+        );
     }
 
     #[test]
     fn rejects_unknown_role_model_and_provider_before_calls() {
-        assert!(TeamSettings::from_json(
-            r#"{"default_model":"local/a","role_models":{"unknown-role":"local/b"}}"#
-        ).is_err());
+        assert!(
+            TeamSettings::from_json(
+                r#"{"default_model":"local/a","role_models":{"unknown-role":"local/b"}}"#
+            )
+            .is_err()
+        );
         assert!(TeamSettings::from_json(r#"{"default_model":"bad/"}"#).is_err());
-        assert!(TeamSettings::from_json(
-            r#"{"default_model":"local/a","secret":"oops"}"#
-        ).is_err());
+        assert!(TeamSettings::from_json(r#"{"default_model":"local/a","secret":"oops"}"#).is_err());
         let settings = TeamSettings::from_json(r#"{"default_model":"missing/model"}"#).unwrap();
         assert!(settings.check_catalog(&catalog(), None).is_err());
-        assert!(TeamSettings::default().check_catalog(&catalog(), None).is_err());
+        assert!(
+            TeamSettings::default()
+                .check_catalog(&catalog(), None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -266,6 +295,11 @@ mod tests {
         });
         assert_eq!(report.total_usage(), Usage::new(22, 13));
         assert!(report.render_markdown().contains("Completed roles:** 1/8"));
-        assert!(report.render_json().unwrap().contains("provider unreachable"));
+        assert!(
+            report
+                .render_json()
+                .unwrap()
+                .contains("provider unreachable")
+        );
     }
 }
