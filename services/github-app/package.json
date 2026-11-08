@@ -7,6 +7,6 @@
   "scripts": {
     "start": "node src/index.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/security.mjs && node --check src/github.mjs && node --check src/clone.mjs && node --check src/server.mjs && node --check src/index.mjs"
+    "check": "node --check src/security.mjs && node --check src/github.mjs && node --check src/clone.mjs && node --check src/server.mjs && node --check src/index.mjs && node --check src/agent-client.mjs"
   }
 }
