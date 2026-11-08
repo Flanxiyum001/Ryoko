@@ -308,13 +308,144 @@ async fn providers(args: ProvidersArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn init(args: InitArgs) -> Result<(), Box<dyn Error>> {
+    let catalog = ProviderCatalog {
+        default_provider: args.id.clone(),
+        providers: vec![ProviderProfile {
+            id: args.id,
+            base_url: args.base_url,
+            api_key_env: args.api_key_env,
+            chat_path: None,
+            allow_insecure_http: false,
+        }],
+    };
+    catalog.validate()?;
+    let text = serde_json::to_string_pretty(&catalog)?;
+    create_private_file(&args.output, &format!("{text}\n"))?;
+    println!("Created provider profile: {}", args.output.display());
+    println!("API keys are not written to the file. Set any named environment variable before use.");
+    println!(
+        "Next: ryoko doctor --config {}",
+        args.output.display()
+    );
+    Ok(())
+}
+
+async fn doctor(args: DoctorArgs) -> Result<(), Box<dyn Error>> {
+    let catalog = load_catalog(&args.config)?;
+    println!("Provider configuration: valid");
+    let mut missing = false;
+    for profile in &catalog.providers {
+        let key_status = if let Some(var) = &profile.api_key_env {
+            if std::env::var_os(var).is_some_and(|value| !value.is_empty()) {
+                format!("credential environment variable {var}: set")
+            } else {
+                missing = true;
+                format!("credential environment variable {var}: MISSING")
+            }
+        } else {
+            "keyless configuration".to_owned()
+        };
+        println!("  {}: {} ({key_status})", profile.id, profile.base_url);
+    }
+    if args.team_config.is_some() || args.model.is_some() {
+        let settings = load_team_settings(args.team_config.as_deref())?;
+        let assignments = settings.check_catalog(&catalog, args.model.as_deref())?;
+        println!("Specialist model assignments:");
+        for (role, model) in assignments {
+            println!("  {role}: {model}");
+        }
+    }
+    println!("Offline check only: no model requests, network probes or charges.");
+    if missing {
+        return Err(cli_error("set missing credential environment variables before calling the affected providers"));
+    }
+    Ok(())
+}
+
+async fn sessions(args: SessionsArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let manager = GitWorktreeManager::new(&root);
+    let mut records = manager.open_sessions()?;
+    if let Some(state) = args.state {
+        records.retain(|record| match state {
+            SessionFilter::Active => record.state == WorktreeState::Active,
+            SessionFilter::Published => record.state == WorktreeState::Published,
+            SessionFilter::Merged => record.state == WorktreeState::Merged,
+            SessionFilter::Abandoned => record.state == WorktreeState::Abandoned,
+        });
+    }
+    records.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&records)?);
+    } else if records.is_empty() {
+        println!("No matching worktree sessions. Start with: ryoko run --help");
+    } else {
+        println!("Saved worktree sessions ({}):", records.len());
+        for record in records {
+            println!(
+                "  {}  {:?}  {}  [{} file(s)]",
+                record.session.id,
+                record.state,
+                record.session.branch_name,
+                record.files.len()
+            );
+            if let Some(summary) = &record.summary {
+                println!("    {}", truncate(&summary.replace('\n', " "), 160));
+            }
+            if record.state == WorktreeState::Published {
+                println!(
+                    "    Review: ryoko review --repo {} --task {}",
+                    root.display(),
+                    record.session.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_team_settings(path: Option<&Path>) -> Result<TeamSettings, Box<dyn Error>> {
+    match path {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)?;
+            Ok(TeamSettings::from_json(&text)?)
+        }
+        None => Ok(TeamSettings::default()),
+    }
+}
+
+fn prompt_text(args: &AskArgs) -> Result<String, Box<dyn Error>> {
+    let text = if let Some(prompt) = &args.prompt {
+        prompt.clone()
+    } else if let Some(path) = &args.prompt_file {
+        let metadata = std::fs::metadata(path)?;
+        if metadata.len() > 64 * 1024 {
+            return Err(cli_error("prompt file exceeds the 64 KiB limit"));
+        }
+        let text = std::fs::read_to_string(path)?;
+        if text.len() > 64 * 1024 {
+            return Err(cli_error("prompt file exceeds the 64 KiB limit"));
+        }
+        text
+    } else {
+        return Err(cli_error("provide --prompt or --prompt-file"));
+    };
+    if text.trim().is_empty() {
+        return Err(cli_error("prompt cannot be empty"));
+    }
+    Ok(text)
+}
+
 async fn ask(args: AskArgs) -> Result<(), Box<dyn Error>> {
     validate_max_tokens(args.max_tokens)?;
-    let router = load_router(&args.config)?;
+    let prompt = prompt_text(&args)?;
+    let catalog = load_catalog(&args.config)?;
+    let router = catalog.build_router_for_models([args.model.as_str()])?;
     let response = router
         .complete(
             ChatRequest::new(args.model)
-                .with_user(args.prompt)
+                .with_user(prompt)
                 .with_max_tokens(args.max_tokens),
         )
         .await?;
