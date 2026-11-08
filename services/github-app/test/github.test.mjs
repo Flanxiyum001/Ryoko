@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHmac, generateKeyPairSync, verify } from 'node:crypto';
 import { after, before, test } from 'node:test';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { cloneWithInstallationToken } from '../src/clone.mjs';
 import { createRyokoServer } from '../src/server.mjs';
 import { GitHubBroker } from '../src/github.mjs';
 import {
-  positiveId, safeBranch, safePath, signAppJwt,
+  positiveId, safeBranch, safePath, safeProjectName, signAppJwt,
   validateProposal, verifyWebhookSignature,
 } from '../src/security.mjs';
 
@@ -47,6 +51,36 @@ test('agent proposals are constrained to safe branch and repository operations',
     params: { branch: 'ryoko/a', path: 'src/x', content: 'x'.repeat(120_000), message: 'test' },
   }));
   assert.throws(() => positiveId('3/4'));
+});
+
+test('repository clones use a private askpass helper without tokens in argv', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ryoko-clone-test-'));
+  let destination;
+  try {
+    const result = await cloneWithInstallationToken({
+      projectsRoot: root,
+      projectName: 'sample_workspace',
+      repo: { full_name: 'trusted/example' },
+      token: 'a-test-installation-token-not-for-display',
+      runner: async (command, args, options) => {
+        assert.equal(command, 'git');
+        assert.equal(args[args.length - 2], 'https://github.com/trusted/example.git');
+        assert.ok(!JSON.stringify(args).includes('a-test-installation-token'));
+        assert.equal(options.shell, false);
+        assert.equal(options.env.RYOKO_GIT_CLONE_TOKEN, 'a-test-installation-token-not-for-display');
+        const helper = await readFile(options.env.GIT_ASKPASS, 'utf8');
+        assert.ok(helper.includes('RYOKO_GIT_CLONE_TOKEN'));
+        assert.ok(!helper.includes('a-test-installation-token-not-for-display'));
+        destination = args[args.length - 1];
+      },
+    });
+    assert.equal(result.path, destination);
+    assert.equal((await stat(destination)).isDirectory(), true);
+    assert.throws(() => safeProjectName('../escape'));
+    assert.throws(() => safeProjectName('CON'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('installation tokens are scoped to exactly one repository and explicit privileges', async () => {
