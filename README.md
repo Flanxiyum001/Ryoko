@@ -33,7 +33,31 @@ cargo run -p ryoko-cli -- team-preview \
   --goal "Build an accessible team task manager"
 ```
 
-The preview uses the same model for all eight roles; per-role model selection is a planned follow-up. It prints proposed architecture, designs, engineering guidance, security review, QA and operations plans. It never writes generated files or runs code. No hosted GitHub pull requests are produced by this command.
+Use the optional team profile to assign a different configured provider/model to each specialist. The CLI shows live role progress and reported tokens; save a report without overwriting existing files:
+
+```sh
+cargo run -p ryoko-cli -- init --output ryoko.providers.json
+cargo run -p ryoko-cli -- doctor --config ryoko.providers.json
+cargo run -p ryoko-cli -- team-preview \
+  --config ryoko.providers.json \
+  --team-config configs/team.example.json \
+  --goal "Build an accessible team task manager" \
+  --output team-report.md --format markdown
+```
+
+You must edit model names to match your installed local models or hosted provider configuration. Team configurations support a default_model and role_models keyed by role names. A --model CLI value overrides only the default, not explicit per-role selections. Use --format json for machine-readable reports. Reports can contain proprietary context and never overwrite existing paths. If a provider fails, completed turns are retained in the exported partial report; a failure still returns a nonzero exit status.
+
+Other useful commands include:
+
+```sh
+cargo run -p ryoko-cli -- ask --config ryoko.providers.json \
+  --model ollama/qwen2.5-coder --prompt-file prompt.txt
+cargo run -p ryoko-cli -- sessions --repo .
+cargo run -p ryoko-cli -- sessions --repo . --state published --json
+cargo run -p ryoko-cli -- review --repo . --compact
+```
+
+The doctor checks configuration and credential environment variables offline: it does not send requests, test a server, or incur charges. The review screen supports D to toggle the full patch. Team preview remains advice-only and does not write generated code or run commands. See the [UX upgrade notes](docs/UX_UPGRADES.md) for details and the unimplemented graphical IDE roadmap.
 
 ## Isolated generation and review
 
