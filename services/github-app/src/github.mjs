@@ -62,7 +62,7 @@ export class GitHubBroker {
       redirect: 'error',
       signal: AbortSignal.timeout(20_000),
       headers: {
-        Accept: 'application/vnd.github+json',
+        Accept: oauth ? 'application/json' : 'application/vnd.github+json',
         'User-Agent': 'Ryoko-GitHub-App',
         'X-GitHub-Api-Version': '2022-11-28',
         ...(token ? { Authorization: 'Bearer ' + token } : {}),
