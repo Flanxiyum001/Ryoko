@@ -174,6 +174,39 @@ impl ProviderCatalog {
         Ok(())
     }
 
+    /// Construct only the providers used by these model selections. This lets
+    /// developers use a local model without configuring keys for unrelated
+    /// hosted profiles present in the same catalog.
+    pub fn build_router_for_models<'a>(
+        &self,
+        models: impl IntoIterator<Item = &'a str>,
+    ) -> Result<ModelRouter, ModelError> {
+        self.validate()?;
+        let mut required = HashSet::new();
+        for model in models {
+            let provider = match model.split_once('/') {
+                Some((provider, rest)) if !provider.is_empty() && !rest.is_empty() => provider,
+                Some(_) => return Err(ModelError::UnknownModel { model: model.to_owned() }),
+                None if !model.trim().is_empty() => self.default_provider.as_str(),
+                None => return Err(ModelError::UnknownModel { model: model.to_owned() }),
+            };
+            if !self.providers.iter().any(|profile| profile.id == provider) {
+                return Err(ModelError::UnknownProvider { provider: provider.to_owned() });
+            }
+            required.insert(provider.to_owned());
+        }
+        if required.is_empty() {
+            return Err(invalid("select at least one model"));
+        }
+        let mut router = ModelRouter::new(&self.default_provider);
+        for profile in &self.providers {
+            if required.contains(&profile.id) {
+                router.register(Arc::new(profile.to_provider()?));
+            }
+        }
+        Ok(router)
+    }
+
     pub fn build_router(&self) -> Result<ModelRouter, ModelError> {
         self.validate()?;
         let mut router = ModelRouter::new(&self.default_provider);
@@ -251,6 +284,26 @@ mod tests {
         let mut catalog = example();
         catalog.providers.push(catalog.providers[0].clone());
         assert!(catalog.validate().is_err());
+    }
+
+    #[test]
+    fn selective_router_does_not_demand_unused_cloud_keys() {
+        let mut catalog = example();
+        catalog.providers.push(ProviderProfile {
+            id: "unused-cloud".into(),
+            base_url: "https://example.com/v1".into(),
+            api_key_env: Some("RYOKO_UNCONFIGURED_TEST_KEY_994301".into()),
+            chat_path: None,
+            allow_insecure_http: false,
+        });
+        let router = catalog
+            .build_router_for_models(["local/test-model"])
+            .unwrap();
+        assert_eq!(router.providers().collect::<Vec<_>>(), vec!["local"]);
+        assert!(catalog
+            .build_router_for_models(["missing/other"])
+            .is_err());
+        assert!(catalog.build_router_for_models(Vec::<&str>::new()).is_err());
     }
 
     #[test]
