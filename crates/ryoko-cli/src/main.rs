@@ -235,7 +235,9 @@ impl ModelArgs {
             .or_else(|| env("RYOKO_MODEL"))
             .ok_or_else(|| cli_error("set RYOKO_MODEL or pass --model"))?;
         if let Some(config) = &self.config {
-            return Ok((model, Arc::new(load_router(config)?)));
+            let catalog = load_catalog(config)?;
+            let router = catalog.build_router_for_models([model.as_str()])?;
+            return Ok((model, Arc::new(router)));
         }
         let base_url = self
             .base_url
@@ -253,6 +255,16 @@ impl ModelArgs {
             .filter(|provider| !provider.is_empty())
             .unwrap_or("openai");
 
+        // The CLI must validate even the direct --base-url route. The low-level
+        // adapter does not enforce URL trust policies on its own.
+        ProviderProfile {
+            id: provider_id.to_owned(),
+            base_url: base_url.clone(),
+            api_key_env: None,
+            chat_path: None,
+            allow_insecure_http: false,
+        }
+        .validate()?;
         let mut config = OpenAiCompatConfig::new(provider_id, base_url);
         if let Some(api_key) = api_key {
             config = config.with_api_key(api_key);
@@ -694,6 +706,7 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
     let mut report = validate_worktree(&validator, &session, &diff).await?;
     clean_after_check(&manager, &session).await;
     let mut refresh = false;
+    let mut show_patch = !args.compact;
 
     loop {
         if refresh {
@@ -702,14 +715,18 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
             clean_after_check(&manager, &session).await;
             refresh = false;
         }
-        print_diff(&diff);
+        print_diff(&diff, show_patch);
         print_report(&report);
 
-        println!("\n[A]ccept  [R]eject and discard  [F]eedback to agent  [Q]uit");
+        println!("\n[A]ccept  [R]eject and discard  [F]eedback  [D]iff toggle  [Q]uit");
         print!("> ");
         std::io::Write::flush(&mut std::io::stdout())?;
         let choice = read_line(&mut reader).await?;
         match choice.as_str() {
+            "d" | "diff" => {
+                show_patch = !show_patch;
+                continue;
+            }
             "a" | "accept" => {
                 if !report.passed {
                     eprintln!("Cannot accept: the pre-flight check is still failing.");
@@ -989,15 +1006,17 @@ async fn worktree_context(session: &WorktreeSession, diff: &WorktreeDiff) -> Str
     context
 }
 
-fn print_diff(diff: &WorktreeDiff) {
+fn print_diff(diff: &WorktreeDiff, show_patch: bool) {
     println!("\nChanged files ({}):", diff.files.len());
     for path in &diff.files {
         println!("  {path}");
     }
     if diff.patch.trim().is_empty() {
         println!("(no committed diff)");
-    } else {
+    } else if show_patch {
         println!("\n{}", diff.patch);
+    } else {
+        println!("Patch hidden in compact mode. Press D to inspect the full diff.");
     }
 }
 
