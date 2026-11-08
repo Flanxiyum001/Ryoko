@@ -45,6 +45,14 @@ export function safeBranch(branch) {
   return branch;
 }
 
+export function safeProjectName(name) {
+  if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{1,39}$/.test(name)
+    || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name)) {
+    throw unsafe('project folder must be a safe name of 2-40 letters, numbers, underscores or dashes');
+  }
+  return name;
+}
+
 export function safePath(path) {
   if (typeof path !== 'string' || path.length > 240 || !path
     || path.startsWith('/') || path.includes('\\') || path.includes(':')
@@ -78,6 +86,9 @@ export function validateProposal(input) {
   if (!params || typeof params !== 'object' || Array.isArray(params)) throw unsafe('proposal parameters must be an object');
   let validated;
   switch (operation) {
+    case 'clone_repository':
+      validated = { projectName: safeProjectName(params.projectName) };
+      break;
     case 'create_branch':
       validated = { branch: safeBranch(params.branch) };
       break;
