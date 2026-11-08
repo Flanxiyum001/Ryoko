@@ -102,7 +102,7 @@ test('installation tokens are scoped to exactly one repository and explicit priv
   assert.deepEqual(JSON.parse(requests[0].options.body), {
     repository_ids: [88], permissions: { contents: 'write' },
   });
-  await broker.installationToken(42, 88, 'write');
+  await broker.installationToken(42, 88, 'contents');
   assert.equal(requests.length, 1, 'short-lived installation token should be cached');
 });
 
