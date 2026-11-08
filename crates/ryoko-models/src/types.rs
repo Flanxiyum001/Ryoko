@@ -323,6 +323,9 @@ pub type ModelStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ModelError>
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
+    #[error("invalid provider configuration: {0}")]
+    Configuration(String),
+
     #[error("provider `{provider}` is not registered")]
     UnknownProvider { provider: String },
 

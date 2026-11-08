@@ -15,6 +15,7 @@ pub mod iacp;
 pub mod memory;
 pub mod model;
 pub mod orchestrator;
+pub mod team;
 pub mod validation;
 pub mod workspace;
 

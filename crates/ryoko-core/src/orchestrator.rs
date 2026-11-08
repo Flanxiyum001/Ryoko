@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::FutureExt;
 use serde::Serialize;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
@@ -206,43 +207,57 @@ impl Orchestrator {
             });
 
             let max_attempts = self.config.max_attempts.max(1);
+            let task_on_panic = task.clone();
             join_set.spawn(async move {
-                let task = task;
-                if let Some(reason) = wait_for_dependencies(&dependencies).await {
-                    events.emit(OrchestratorEvent::TaskSkipped {
-                        task_id: task.id,
-                        role: task.assigned_to.clone(),
-                        reason: reason.clone(),
-                    });
-                    return (task, None, TaskOutcome::Skipped { reason });
-                }
-
-                let permit = match semaphore.acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        return (
-                            task.clone(),
-                            None,
-                            TaskOutcome::Failed {
-                                reason: "orchestrator semaphore closed".to_owned(),
-                                attempts: 0,
-                            },
-                        );
+                let operation = async {
+                    let task = task;
+                    if let Some(reason) = wait_for_dependencies(&dependencies).await {
+                        events.emit(OrchestratorEvent::TaskSkipped {
+                            task_id: task.id,
+                            role: task.assigned_to.clone(),
+                            reason: reason.clone(),
+                        });
+                        return (task, None, TaskOutcome::Skipped { reason });
                     }
+
+                    let permit = match semaphore.acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            return (
+                                task.clone(),
+                                None,
+                                TaskOutcome::Failed {
+                                    reason: "orchestrator semaphore closed".to_owned(),
+                                    attempts: 0,
+                                },
+                            );
+                        }
+                    };
+
+                    let (outcome, success) = execute_task(
+                        &task,
+                        agent,
+                        context,
+                        workspace,
+                        events.clone(),
+                        max_attempts,
+                    )
+                    .await;
+                    drop(permit);
+
+                    (task, success, outcome)
                 };
-
-                let (outcome, success) = execute_task(
-                    &task,
-                    agent,
-                    context,
-                    workspace,
-                    events.clone(),
-                    max_attempts,
-                )
-                .await;
-                drop(permit);
-
-                (task, success, outcome)
+                match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
+                    Ok(value) => value,
+                    Err(_) => (
+                        task_on_panic,
+                        None,
+                        TaskOutcome::Failed {
+                            reason: "agent task panicked".to_owned(),
+                            attempts: 1,
+                        },
+                    ),
+                }
             });
         }
 
@@ -667,6 +682,53 @@ mod tests {
             self.rolled_back.store(true, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    struct PanicAgent {
+        identity: AgentIdentity,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for PanicAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, _task: Task) -> CoreResult<TaskResult> {
+            panic!("simulated agent panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_agents_do_not_hang_dependent_tasks() {
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+            });
+        let first = Task::new("crash", AgentRole::ProjectManager);
+        let second = Task::new("must skip", AgentRole::SeniorDeveloper).with_dependency(first.id);
+        let manager: Arc<dyn AgentRuntime> = Arc::new(PanicAgent {
+            identity: AgentIdentity::new(AgentRole::ProjectManager, "pm-1", "planner"),
+        });
+        let developer: Arc<dyn AgentRuntime> = Arc::new(SleepAgent {
+            identity: dev(),
+            delay: Duration::ZERO,
+        });
+        let report = tokio::time::timeout(
+            Duration::from_secs(3),
+            orchestrator.run(
+                vec![first.clone(), second],
+                vec![manager, developer],
+                ProjectContext::default(),
+            ),
+        )
+        .await
+        .expect("orchestrator hung after an agent panic")
+        .unwrap();
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].task_id, first.id);
+        assert_eq!(report.skipped.len(), 1);
     }
 
     struct DenyValidator;
