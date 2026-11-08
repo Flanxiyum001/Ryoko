@@ -186,12 +186,22 @@ impl ProviderCatalog {
         for model in models {
             let provider = match model.split_once('/') {
                 Some((provider, rest)) if !provider.is_empty() && !rest.is_empty() => provider,
-                Some(_) => return Err(ModelError::UnknownModel { model: model.to_owned() }),
+                Some(_) => {
+                    return Err(ModelError::UnknownModel {
+                        model: model.to_owned(),
+                    });
+                }
                 None if !model.trim().is_empty() => self.default_provider.as_str(),
-                None => return Err(ModelError::UnknownModel { model: model.to_owned() }),
+                None => {
+                    return Err(ModelError::UnknownModel {
+                        model: model.to_owned(),
+                    });
+                }
             };
             if !self.providers.iter().any(|profile| profile.id == provider) {
-                return Err(ModelError::UnknownProvider { provider: provider.to_owned() });
+                return Err(ModelError::UnknownProvider {
+                    provider: provider.to_owned(),
+                });
             }
             required.insert(provider.to_owned());
         }
@@ -300,9 +310,7 @@ mod tests {
             .build_router_for_models(["local/test-model"])
             .unwrap();
         assert_eq!(router.providers().collect::<Vec<_>>(), vec!["local"]);
-        assert!(catalog
-            .build_router_for_models(["missing/other"])
-            .is_err());
+        assert!(catalog.build_router_for_models(["missing/other"]).is_err());
         assert!(catalog.build_router_for_models(Vec::<&str>::new()).is_err());
     }
 
