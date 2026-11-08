@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, isAbsolute } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -38,6 +38,11 @@ async function readBody(req, limit = BODY_LIMIT) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+async function jsonBody(req) {
+  const bytes = await readBody(req);
+  try { return JSON.parse(bytes.toString('utf8')); }
+  catch { throw bad('invalid JSON request body'); }
 }
 function safeError(error) {
   const code = error?.status;
@@ -177,6 +182,12 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       let current = sessionFor(req);
       let id = cookieId(req);
       if (!current) {
+        if (sessions.size >= 500) {
+          for (const [key, record] of sessions) {
+            if (Date.now() > record.expires) sessions.delete(key);
+          }
+        }
+        if (sessions.size >= 500) throw bad('too many pending sign-in sessions', 429);
         id = random();
         current = { csrf: random(), expires: Date.now() + TTL };
         sessions.set(id, current);
@@ -255,15 +266,18 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     if (req.method === 'POST' && path === '/api/proposals') {
       const session = requireUser(req);
       csrf(req, session);
-      const proposal = validateProposal(JSON.parse((await readBody(req)).toString('utf8')));
+      const proposal = validateProposal(await jsonBody(req));
       await client.authorizedRepo(session.token, proposal.installationId, proposal.repoId);
       return json(res, 201, addProposal(session.user, proposal));
     }
     if (req.method === 'POST' && path === '/api/agent/proposals') {
-      const token = String(req.headers.authorization || '');
+      const token = Buffer.from(String(req.headers.authorization || ''), 'utf8');
+      const expected = Buffer.from('Bearer ' + settings.agentToken, 'utf8');
       if (!settings.agentToken || settings.agentToken.length < 32
-        || token !== 'Bearer ' + settings.agentToken) throw bad('agent broker unauthorized', 401);
-      const proposal = validateProposal(JSON.parse((await readBody(req)).toString('utf8')));
+        || token.length !== expected.length || !timingSafeEqual(token, expected)) {
+        throw bad('agent broker unauthorized', 401);
+      }
+      const proposal = validateProposal(await jsonBody(req));
       if (!settings.agentRepoIds.includes(proposal.repoId)) throw bad('agent repo not allowlisted', 403);
       const owner = Array.from(sessions.values()).find(
         (s) => s.user && settings.allowedUsers.includes(s.user.login.toLowerCase()),
