@@ -9,3 +9,12 @@ dist/
 .env.*
 !.env.example
 apps/desktop/src-tauri/gen/
+
+# GitHub App credentials, local workbench state and clones
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+services/github-app/node_modules/
+apps/desktop/node_modules/
