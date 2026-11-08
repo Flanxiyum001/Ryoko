@@ -1,0 +1,12 @@
+{
+  "name": "@ryoko/github-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/security.mjs && node --check src/github.mjs && node --check src/server.mjs && node --check src/index.mjs"
+  }
+}
