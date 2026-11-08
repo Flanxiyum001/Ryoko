@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{AgentRuntime, TaskContext};
+use crate::agents::RETRY_FEEDBACK_METADATA;
 use crate::error::{CoreError, CoreResult};
 use crate::event::{EventSink, OrchestratorEvent};
 use crate::memory::SharedMemory;
@@ -437,6 +438,7 @@ async fn execute_task(
     max_attempts: u32,
 ) -> (TaskOutcome, Option<TaskSuccess>) {
     let mut last_error = String::from("task did not run");
+    let mut feedback: Option<String> = None;
     for attempt in 1..=max_attempts {
         events.emit(OrchestratorEvent::TaskStarted {
             task_id: task.id,
@@ -449,6 +451,7 @@ async fn execute_task(
             Ok(lease) => lease,
             Err(err) => {
                 last_error = err.to_string();
+                feedback = Some(last_error.clone());
                 events.emit(OrchestratorEvent::TaskFailed {
                     task_id: task.id,
                     role: task.assigned_to.clone(),
@@ -461,7 +464,16 @@ async fn execute_task(
         };
         let ctx = context.clone().with_workspace(Some(lease.clone()));
 
-        let result = match agent.execute_task(ctx.clone(), task.clone()).await {
+        // The next attempt sees the exact validation/compiler failure. This is
+        // what makes the retry loop self-correcting instead of a blind replay.
+        let mut attempt_task = task.clone();
+        if let Some(feedback) = &feedback {
+            attempt_task
+                .metadata
+                .insert(RETRY_FEEDBACK_METADATA.to_owned(), cap_feedback(feedback));
+        }
+
+        let result = match agent.execute_task(ctx.clone(), attempt_task.clone()).await {
             Ok(result) => result,
             Err(err) => TaskResult::failure(task.id, err.to_string()),
         };
@@ -473,7 +485,8 @@ async fn execute_task(
                 .unwrap_or_else(|| "agent reported failure".to_owned());
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
-            last_error = reason;
+            last_error = reason.clone();
+            feedback = Some(reason);
             events.emit(OrchestratorEvent::TaskFailed {
                 task_id: task.id,
                 role: task.assigned_to.clone(),
@@ -491,7 +504,8 @@ async fn execute_task(
             );
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
-            last_error = reason;
+            last_error = reason.clone();
+            feedback = Some(reason);
             continue;
         }
 
@@ -499,7 +513,8 @@ async fn execute_task(
             let reason = err.to_string();
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
-            last_error = reason;
+            last_error = reason.clone();
+            feedback = Some(reason);
             continue;
         }
 
@@ -507,11 +522,9 @@ async fn execute_task(
             task_id: task.id,
             file_count: result.changes.len(),
         });
-        let report = match context
-            .validator
-            .validate(&StagedChanges::new(task.id, result.changes.clone()))
-            .await
-        {
+        let staged = StagedChanges::new(task.id, result.changes.clone())
+            .with_root(lease.root().to_path_buf());
+        let report = match context.validator.validate(&staged).await {
             Ok(report) => report,
             Err(err) => ValidationReport {
                 passed: false,
@@ -532,7 +545,13 @@ async fn execute_task(
             let reason = format!("validation rejected changes: {}", report.summary);
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
+            let mut next = reason.clone();
+            if !report.logs.is_empty() {
+                next.push_str("\n\n");
+                next.push_str(&report.logs.join("\n"));
+            }
             last_error = reason;
+            feedback = Some(next);
             continue;
         }
 
@@ -568,7 +587,8 @@ async fn execute_task(
                 let reason = format!("publish failed: {err}");
                 let _ = agent.rollback(ctx.clone(), task, &reason).await;
                 let _ = lease.discard().await;
-                last_error = reason;
+                last_error = reason.clone();
+                feedback = Some(reason);
             }
         }
     }
@@ -580,6 +600,18 @@ async fn execute_task(
         },
         None,
     )
+}
+
+fn cap_feedback(feedback: &str) -> String {
+    const MAX_BYTES: usize = 16_000;
+    if feedback.len() <= MAX_BYTES {
+        return feedback.to_owned();
+    }
+    let mut end = MAX_BYTES;
+    while end > 0 && !feedback.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &feedback[..end])
 }
 
 #[cfg(test)]
@@ -952,5 +984,87 @@ mod tests {
         assert!(report.all_succeeded());
         assert_eq!(report.succeeded[0].files, vec!["src/generated.rs"]);
         assert!(report.succeeded[0].pr_id.starts_with("pr-"));
+    }
+
+    struct FeedbackAgent {
+        identity: AgentIdentity,
+        feedback: Arc<StdMutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for FeedbackAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            self.feedback.lock().unwrap().push(
+                task.metadata
+                    .get(RETRY_FEEDBACK_METADATA)
+                    .map(ToOwned::to_owned),
+            );
+            Ok(TaskResult::success(task.id, "fixed").with_changes(change()))
+        }
+    }
+
+    struct FailOnceValidator {
+        calls: AtomicU32,
+    }
+
+    #[async_trait]
+    impl ChangeValidator for FailOnceValidator {
+        async fn validate(&self, _changes: &StagedChanges) -> CoreResult<ValidationReport> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Ok(ValidationReport::failed(
+                    "cargo test failed",
+                    vec!["error[E0425]: cannot find function `generated`".to_owned()],
+                    Duration::from_millis(1),
+                ))
+            } else {
+                Ok(ValidationReport::passed(
+                    "cargo test passed",
+                    Vec::new(),
+                    Duration::from_millis(1),
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn validation_feedback_is_sent_to_the_next_attempt() {
+        let feedback = Arc::new(StdMutex::new(Vec::new()));
+        let agent: Arc<dyn AgentRuntime> = Arc::new(FeedbackAgent {
+            identity: dev(),
+            feedback: feedback.clone(),
+        });
+        let orchestrator = Orchestrator::new(
+            workspace(),
+            Arc::new(FailOnceValidator {
+                calls: AtomicU32::new(0),
+            }),
+            router(),
+        )
+        .with_config(OrchestratorConfig {
+            max_concurrency: 1,
+            max_attempts: 2,
+        });
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("fix compiler error", AgentRole::SeniorDeveloper)],
+                vec![agent],
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.succeeded.len(), 1);
+        assert_eq!(report.succeeded[0].attempts, 2);
+        let seen = feedback.lock().unwrap();
+        assert!(seen[0].is_none());
+        let retry = seen[1].as_deref().expect("second attempt gets feedback");
+        assert!(retry.contains("E0425"));
+        assert!(retry.contains("cargo test failed"));
     }
 }
