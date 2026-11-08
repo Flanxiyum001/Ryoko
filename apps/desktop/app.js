@@ -330,7 +330,9 @@ function renderProposalFields() {
   const operation = $('operation').value;
   const host = $('proposalFields');
   host.replaceChildren();
-  if (operation === 'create_branch') {
+  if (operation === 'clone_repository') {
+    host.append(inputField('projectName', 'Local project folder prefix', { placeholder: 'ryoko-workspace' }));
+  } else if (operation === 'create_branch') {
     host.append(inputField('branch', 'New branch name', { placeholder: 'ryoko/feature-name' }));
   } else if (operation === 'commit_file') {
     host.append(
@@ -359,7 +361,8 @@ function readProposal() {
   const op = $('operation').value;
   const get = (id) => $(id)?.value || '';
   let params;
-  if (op === 'create_branch') params = { branch: get('branch') };
+  if (op === 'clone_repository') params = { projectName: get('projectName') };
+  else if (op === 'create_branch') params = { branch: get('branch') };
   else if (op === 'commit_file') {
     params = { branch: get('branch'), path: get('path'), content: get('content'), message: get('message') };
     if (get('expectedSha')) params.expectedSha = get('expectedSha');
@@ -371,7 +374,7 @@ function readProposal() {
 
 function prettyProposal(item) {
   const proposal = item.proposal;
-  const format = { create_branch: 'Create branch', commit_file: 'Commit file', open_pull_request: 'Open pull request', review_comment: 'Comment on PR' };
+  const format = { clone_repository: 'Clone repository', create_branch: 'Create branch', commit_file: 'Commit file', open_pull_request: 'Open pull request', review_comment: 'Comment on PR' };
   const root = node('article', 'proposal-card');
   const header = node('header');
   header.append(node('h4', '', format[proposal.operation] || proposal.operation));
