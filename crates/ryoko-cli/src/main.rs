@@ -1,13 +1,14 @@
 mod check;
+mod experience;
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ryoko_core::{
     AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, EventSink,
     ModelAgent, Orchestrator, OrchestratorConfig, OrchestratorEvent, ProjectContext,
@@ -16,6 +17,7 @@ use ryoko_core::{
 };
 use ryoko_models::{
     ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
+    ProviderProfile,
 };
 use ryoko_sandbox::SpecPolicy;
 use ryoko_worktree::{
@@ -26,6 +28,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::check::{CommandValidator, detect_check_command};
+use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -54,6 +57,60 @@ enum Commands {
     Run(RunArgs),
     /// Review published worktrees and accept, reject, or send feedback.
     Review(ReviewArgs),
+    /// Generate a safe provider configuration without writing credentials.
+    Init(InitArgs),
+    /// Check provider environment, models, and agent assignments offline.
+    Doctor(DoctorArgs),
+    /// List saved agent worktrees and their review status.
+    Sessions(SessionsArgs),
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    /// Refuses to overwrite an existing file.
+    #[arg(long, default_value = "ryoko.providers.json")]
+    output: PathBuf,
+    #[arg(long, default_value = "local")]
+    id: String,
+    #[arg(long, default_value = "http://127.0.0.1:11434/v1")]
+    base_url: String,
+    /// Name of the environment variable containing the key; never the key itself.
+    #[arg(long)]
+    api_key_env: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    #[arg(long)]
+    config: PathBuf,
+    #[arg(long)]
+    team_config: Option<PathBuf>,
+    #[arg(long)]
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SessionFilter {
+    Active,
+    Published,
+    Merged,
+    Abandoned,
+}
+
+#[derive(Debug, Args)]
+struct SessionsArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    state: Option<SessionFilter>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PreviewFormat {
+    Markdown,
+    Json,
 }
 
 #[derive(Debug, Args)]
@@ -75,7 +132,10 @@ struct AskArgs {
     #[arg(long)]
     model: String,
     #[arg(long)]
-    prompt: String,
+    prompt: Option<String>,
+    /// Read a multi-line prompt from a UTF-8 file, max 64 KiB.
+    #[arg(long, conflicts_with = "prompt")]
+    prompt_file: Option<PathBuf>,
     #[arg(long, default_value_t = 2048)]
     max_tokens: u32,
 }
@@ -84,12 +144,21 @@ struct AskArgs {
 struct TeamPreviewArgs {
     #[arg(long)]
     config: PathBuf,
+    /// Fallback model; individual role mappings override it.
     #[arg(long)]
-    model: String,
+    model: Option<String>,
+    /// Optional JSON file assigning each specialist its own provider/model.
+    #[arg(long)]
+    team_config: Option<PathBuf>,
     #[arg(long)]
     goal: String,
     #[arg(long, default_value_t = 1024)]
     max_tokens: u32,
+    /// Export a completed or partial report; never overwrites an existing path.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long, value_enum, default_value = "markdown")]
+    format: PreviewFormat,
 }
 
 #[derive(Debug, Args)]
@@ -117,6 +186,9 @@ struct RunArgs {
 
 #[derive(Debug, Args)]
 struct ReviewArgs {
+    /// Start with compact changed-file summary; press D to toggle full patch.
+    #[arg(long)]
+    compact: bool,
     /// Published task to review. Required when several are waiting.
     #[arg(long)]
     task: Option<Uuid>,
@@ -203,6 +275,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(args).await,
         Commands::Review(args) => review(args).await,
+        Commands::Init(args) => init(args).await,
+        Commands::Doctor(args) => doctor(args).await,
+        Commands::Sessions(args) => sessions(args).await,
     }
 }
 
