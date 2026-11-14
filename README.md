@@ -4,6 +4,8 @@
 
 > **Project status:** pre-alpha. The current CLI supports provider setup, chat, **review-only team previews**, and an isolated, human-reviewed file-generation workflow. It does not yet provide an editor UI, hardened project-specific build isolation or deployment. Do not use its previews as proof of successful implementation.
 
+The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. Contribution rules are in [`AGENTS.md`](AGENTS.md).
+
 ## Prerequisites
 
 - Rust 1.85+ with Cargo
