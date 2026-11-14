@@ -650,7 +650,7 @@ fn publish_task_findings(
             code: Some("ryoko.validation".to_owned()),
         })
         .collect();
-    sink.publish_task_findings(project_root, &findings);
+    sink.publish(project_root, &findings);
 }
 
 fn cap_feedback(feedback: &str) -> String {
@@ -1117,5 +1117,64 @@ mod tests {
         let retry = seen[1].as_deref().expect("second attempt gets feedback");
         assert!(retry.contains("E0425"));
         assert!(retry.contains("cargo test failed"));
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        published: StdMutex<Vec<(String, Vec<TaskDiagnostic>)>>,
+    }
+
+    impl TaskDiagnosticSink for RecordingSink {
+        fn publish(&self, project_root: &str, findings: &[TaskDiagnostic]) {
+            self.published
+                .lock()
+                .unwrap()
+                .push((project_root.to_owned(), findings.to_vec()));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_validation_publishes_nothing_and_retry_publishes_one_finding() {
+        let sink = Arc::new(RecordingSink::default());
+        let orchestrator = Orchestrator::new(
+            workspace(),
+            Arc::new(FailOnceValidator {
+                calls: AtomicU32::new(0),
+            }),
+            router(),
+        )
+        .with_diagnostic_sink(sink.clone());
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+                vec![Arc::new(SleepAgent {
+                    identity: dev(),
+                    delay: Duration::ZERO,
+                })],
+                ProjectContext {
+                    project_root: "/workspace/demo".to_owned(),
+                    ..ProjectContext::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.succeeded.len(), 1);
+        assert_eq!(report.succeeded[0].attempts, 2);
+
+        let published = sink.published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            1,
+            "the rejected attempt must publish nothing; only the passing attempt reports"
+        );
+        let (project_root, findings) = &published[0];
+        assert_eq!(project_root, "/workspace/demo");
+        assert_eq!(findings.len(), 1, "one finding per changed file");
+        assert_eq!(findings[0].file, "src/generated.rs");
+        assert_eq!(findings[0].level, DiagnosticLevel::Info);
+        assert_eq!(findings[0].code.as_deref(), Some("ryoko.validation"));
+        assert!(findings[0].message.contains("cargo test passed"));
     }
 }

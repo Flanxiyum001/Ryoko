@@ -33,5 +33,5 @@ pub struct TaskDiagnostic {
 /// editor must not propagate an error. An empty `project_root` means the run has
 /// no editor-addressable location and no findings should be published.
 pub trait TaskDiagnosticSink: Send + Sync {
-    fn publish_task_findings(&self, project_root: &str, findings: &[TaskDiagnostic]);
+    fn publish(&self, project_root: &str, findings: &[TaskDiagnostic]);
 }
