@@ -18,9 +18,11 @@ use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams, InitializeParams,
     InitializeResult, InitializedParams, MessageType, Position, Range, ServerCapabilities,
-    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
 };
 use tower_lsp::{Client, ClientSocket, LanguageServer, LspService, Server};
+
+pub use tower_lsp::lsp_types::Url;
 
 /// A finding produced by a Ryoko agent and addressed to an open editor document.
 #[derive(Debug, Clone, PartialEq)]
@@ -131,6 +133,59 @@ impl DiagnosticPublisher {
         uri: Url,
     ) -> std::result::Result<(), mpsc::error::SendError<PublishRequest>> {
         self.publish(uri, None, Vec::new())
+    }
+
+    /// Publishes one document-level finding at 0:0, replacing any findings this
+    /// publisher previously sent for `uri`. Diagnostics produced by a language
+    /// server belong to that server and are outside this channel.
+    pub fn publish_finding(
+        &self,
+        uri: Url,
+        level: ryoko_core::DiagnosticLevel,
+        message: impl Into<String>,
+        code: Option<&str>,
+    ) -> std::result::Result<(), mpsc::error::SendError<PublishRequest>> {
+        let message = message.into();
+        let mut finding = AgentDiagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            severity: severity(level),
+            message,
+            code: None,
+            source: Some("ryoko".to_owned()),
+            fix_title: None,
+        };
+        if let Some(code) = code {
+            finding = finding.with_code(code);
+        }
+        self.publish(uri, None, vec![finding])
+    }
+}
+
+impl ryoko_core::TaskDiagnosticSink for DiagnosticPublisher {
+    fn publish(&self, project_root: &str, findings: &[ryoko_core::TaskDiagnostic]) {
+        if project_root.is_empty() {
+            return;
+        }
+        let root = std::path::Path::new(project_root);
+        for finding in findings {
+            let Ok(uri) = Url::from_file_path(root.join(&finding.file)) else {
+                continue;
+            };
+            let _ = self.publish_finding(
+                uri,
+                finding.level,
+                finding.message.clone(),
+                finding.code.as_deref(),
+            );
+        }
+    }
+}
+
+fn severity(level: ryoko_core::DiagnosticLevel) -> DiagnosticSeverity {
+    match level {
+        ryoko_core::DiagnosticLevel::Info => DiagnosticSeverity::INFORMATION,
+        ryoko_core::DiagnosticLevel::Warning => DiagnosticSeverity::WARNING,
+        ryoko_core::DiagnosticLevel::Error => DiagnosticSeverity::ERROR,
     }
 }
 

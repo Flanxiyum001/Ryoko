@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::agent::{AgentRuntime, TaskContext};
 use crate::agents::RETRY_FEEDBACK_METADATA;
+use crate::diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 use crate::error::{CoreError, CoreResult};
 use crate::event::{EventSink, OrchestratorEvent};
 use crate::memory::SharedMemory;
@@ -110,6 +111,8 @@ pub struct Orchestrator {
     models: Arc<ModelRouter>,
     config: OrchestratorConfig,
     events: EventSink,
+    /// Optional editor channel; absent when no editor host is attached.
+    diagnostic_sink: Option<Arc<dyn TaskDiagnosticSink>>,
 }
 
 impl Orchestrator {
@@ -124,6 +127,7 @@ impl Orchestrator {
             models,
             config: OrchestratorConfig::default(),
             events: EventSink::default(),
+            diagnostic_sink: None,
         }
     }
 
@@ -134,6 +138,16 @@ impl Orchestrator {
 
     pub fn with_events(mut self, events: EventSink) -> Self {
         self.events = events;
+        self
+    }
+
+    /// Routes a task's validation result to a host-provided editor sink.
+    ///
+    /// The trait lives in this crate, so the orchestrator stays independent of
+    /// any particular editor or language-server library. `ryoko-native`
+    /// implements it over its LSP diagnostic channel.
+    pub fn with_diagnostic_sink(mut self, sink: Arc<dyn TaskDiagnosticSink>) -> Self {
+        self.diagnostic_sink = Some(sink);
         self
     }
 
@@ -195,6 +209,7 @@ impl Orchestrator {
             let agent = registry[&task.assigned_to].clone();
             let workspace = self.workspace.clone();
             let events = self.events.clone();
+            let diagnostic_sink = self.diagnostic_sink.clone();
             let semaphore = semaphore.clone();
             let mut dependencies = Vec::with_capacity(task.dependencies.len());
             for dependency in &task.dependencies {
@@ -242,6 +257,7 @@ impl Orchestrator {
                         workspace,
                         events.clone(),
                         max_attempts,
+                        diagnostic_sink,
                     )
                     .await;
                     drop(permit);
@@ -436,6 +452,7 @@ async fn execute_task(
     workspace_provider: Arc<dyn WorkspaceProvider>,
     events: EventSink,
     max_attempts: u32,
+    diagnostic_sink: Option<Arc<dyn TaskDiagnosticSink>>,
 ) -> (TaskOutcome, Option<TaskSuccess>) {
     let mut last_error = String::from("task did not run");
     let mut feedback: Option<String> = None;
@@ -574,6 +591,14 @@ async fn execute_task(
                     files: pr.files.clone(),
                     attempts: attempt,
                 };
+                if let Some(sink) = &diagnostic_sink {
+                    publish_task_findings(
+                        sink.as_ref(),
+                        &context.project.project_root,
+                        &pr.files,
+                        &report.summary,
+                    );
+                }
                 let _ = lease.discard().await;
                 events.emit(OrchestratorEvent::TaskSucceeded {
                     task_id: task.id,
@@ -600,6 +625,32 @@ async fn execute_task(
         },
         None,
     )
+}
+
+/// Sends one informational finding per changed file to the attached editor.
+/// Files stay relative to the project root the run was started from; the sink
+/// resolves them. A run without a root has no editor document to address, so
+/// nothing is published.
+fn publish_task_findings(
+    sink: &dyn TaskDiagnosticSink,
+    project_root: &str,
+    files: &[String],
+    summary: &str,
+) {
+    if project_root.is_empty() || files.is_empty() {
+        return;
+    }
+    let message = format!("Ryoko validation passed: {summary}");
+    let findings: Vec<TaskDiagnostic> = files
+        .iter()
+        .map(|file| TaskDiagnostic {
+            file: file.clone(),
+            level: DiagnosticLevel::Info,
+            message: message.clone(),
+            code: Some("ryoko.validation".to_owned()),
+        })
+        .collect();
+    sink.publish(project_root, &findings);
 }
 
 fn cap_feedback(feedback: &str) -> String {
@@ -1066,5 +1117,64 @@ mod tests {
         let retry = seen[1].as_deref().expect("second attempt gets feedback");
         assert!(retry.contains("E0425"));
         assert!(retry.contains("cargo test failed"));
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        published: StdMutex<Vec<(String, Vec<TaskDiagnostic>)>>,
+    }
+
+    impl TaskDiagnosticSink for RecordingSink {
+        fn publish(&self, project_root: &str, findings: &[TaskDiagnostic]) {
+            self.published
+                .lock()
+                .unwrap()
+                .push((project_root.to_owned(), findings.to_vec()));
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_validation_publishes_nothing_and_retry_publishes_one_finding() {
+        let sink = Arc::new(RecordingSink::default());
+        let orchestrator = Orchestrator::new(
+            workspace(),
+            Arc::new(FailOnceValidator {
+                calls: AtomicU32::new(0),
+            }),
+            router(),
+        )
+        .with_diagnostic_sink(sink.clone());
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+                vec![Arc::new(SleepAgent {
+                    identity: dev(),
+                    delay: Duration::ZERO,
+                })],
+                ProjectContext {
+                    project_root: "/workspace/demo".to_owned(),
+                    ..ProjectContext::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.succeeded.len(), 1);
+        assert_eq!(report.succeeded[0].attempts, 2);
+
+        let published = sink.published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            1,
+            "the rejected attempt must publish nothing; only the passing attempt reports"
+        );
+        let (project_root, findings) = &published[0];
+        assert_eq!(project_root, "/workspace/demo");
+        assert_eq!(findings.len(), 1, "one finding per changed file");
+        assert_eq!(findings[0].file, "src/generated.rs");
+        assert_eq!(findings[0].level, DiagnosticLevel::Info);
+        assert_eq!(findings[0].code.as_deref(), Some("ryoko.validation"));
+        assert!(findings[0].message.contains("cargo test passed"));
     }
 }
