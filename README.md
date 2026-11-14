@@ -2,17 +2,17 @@
 
 **Ryoko** is an experimental Rust foundation for a provider-neutral, multi-agent AI IDE. The target experience is a full engineering team—project manager, architect, senior UI/UX, backend, full-stack, security, QA and DevOps—collaborating on a user-defined application, with isolated worktrees and human-reviewed changes.
 
-> **Project status:** pre-alpha. The current CLI supports provider setup, chat, **review-only team previews**, and an isolated, human-reviewed file-generation workflow. It does not yet provide an editor UI, hardened project-specific build isolation or deployment. Do not use its previews as proof of successful implementation.
+> **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, WASI test execution and structural context extraction. It does not yet provide a full editor UI, hardened project-specific build isolation or deployment. Do not use its previews as proof of successful implementation.
 
 The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. Contribution rules are in [`AGENTS.md`](AGENTS.md).
 
 ## Prerequisites
 
 - Rust 1.85+ with Cargo
-- An OpenAI **chat-completions compatible** server, e.g. an Ollama /v1 endpoint, an OpenAI API endpoint, or another compatible model server
+- An OpenAI **chat-completions compatible** server, e.g. an Ollama /v1 endpoint, an OpenAI API endpoint, or another compatible model server, or an Anthropic Messages-compatible endpoint
 - An API key in an environment variable for authenticated providers
 
-A custom endpoint is not a universal protocol translator. Providers such as Anthropic or Gemini using their native wire APIs will need separate adapters; tools and streaming support differ by model.
+A custom endpoint is not a universal protocol translator. Anthropic Messages is supported natively; other provider-native wire APIs still need separate adapters, and tools, streaming and token accounting differ by model.
 
 ## Getting started
 
@@ -84,7 +84,8 @@ cargo run -p ryoko-cli -- review --repo .
   "default_provider": "local",
   "providers": [
     { "id": "local", "base_url": "http://127.0.0.1:11434/v1" },
-    { "id": "hosted", "base_url": "https://provider.example.com/v1", "api_key_env": "MY_PROVIDER_API_KEY" }
+    { "id": "hosted", "base_url": "https://provider.example.com/v1", "api_key_env": "MY_PROVIDER_API_KEY" },
+    { "id": "anthropic", "base_url": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY", "wire": "anthropic" }
   ]
 }
 ```
@@ -94,7 +95,8 @@ Models use the `provider/model-name` syntax. Model names can contain slashes aft
 - HTTPS is required for hosted providers using API keys. Keyless, non-loopback HTTP needs explicit `allow_insecure_http: true` and should only be used on trusted networks.
 - Loopback HTTP is allowed for local development. Requests do not follow redirects. Explicitly validate that any URL you add is one you trust; model content must not be allowed to set it.
 - Provider profiles are strict JSON and support an optional `chat_path` (default `/chat/completions`). Keys are loaded at runtime from the named environment variables.
-- The low-level `OpenAiCompatConfig` remains available to Rust callers. Those callers are responsible for trusting and validating their own endpoints.
+- Set `"wire": "anthropic"` for the native Anthropic Messages adapter. Omitting `wire` keeps OpenAI-compatible chat completions. Direct Anthropic URLs work through the adapter; Bedrock/Vertex request signing and cloud identity are not implemented yet.
+- The low-level `OpenAiCompatConfig` and `AnthropicConfig` remain available to Rust callers. Those callers are responsible for trusting and validating their own endpoints.
 
 ## Architecture
 
@@ -103,13 +105,27 @@ The root workspace is organized as follows:
 | Crate | Purpose |
 | --- | --- |
 | `ryoko-models` | Provider routing, normalized messages and streaming, usage accounting |
-| `ryoko-core` | Task DAG, agent lifecycle, IACP messages, memory and permissions abstractions |
+| `ryoko-core` | Task DAG, agent lifecycle, IACP messages, memory, permissions and tree-sitter context extraction |
 | `ryoko-worktree` | Isolated task Git worktrees and reviewable internal change proposals |
-| `ryoko-sandbox` | Capability-free WASM test artifact execution, not a general app runner |
+| `ryoko-sandbox` | WASI-enabled WASM test artifact execution with no host preopens, not a general app runner |
 | `ryoko-cli` | Terminal-facing provider setup, team preview, isolated generation and human review |
-| `ryoko-native`, `ryoko-scripting`, `ryoko-vfs` | Future native, plugin and virtual filesystem layers |
+| `ryoko-native` | `tower-lsp` language server and agent diagnostic publisher |
+| `ryoko-vfs` | Incremental virtual document store used by the language server |
+| `ryoko-scripting` | Future plugin layer |
 
 See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) and [IACP specification](docs/IACP.md).
+
+## Editor integration
+
+The `ryoko-native` crate provides `ryoko-lsp`, a standard LSP server over stdio. Point VS Code, Neovim, Zed or another LSP client at:
+
+```sh
+cargo run -p ryoko-native --bin ryoko-lsp
+```
+
+The server supports incremental document sync, diagnostics, code lenses, quick fixes and `ryoko.fix` / `ryoko.explain` / `ryoko.review` commands. An agent host can publish findings through `ryoko_native::diagnostic_channel()`; the server forwards those diagnostics to the editor. It does not start an editor UI or execute editor commands automatically.
+
+`ryoko_core::ContextExtractor` uses tree-sitter to return imports, a symbol outline and targeted Rust function bodies, keeping prompts to the code an agent actually needs.
 
 ## Development
 
@@ -136,3 +152,4 @@ Requirements: Node.js 22+, Git for server-side clones. After configuring environ
     node services/github-app/src/index.mjs
 
 Open http://127.0.0.1:4173 and connect your GitHub App installation. The initial UX is a browser shell, **not yet a packaged native desktop app or a Monaco/LSP editor**. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
+
