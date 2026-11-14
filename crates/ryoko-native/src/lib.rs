@@ -146,9 +146,9 @@ impl DiagnosticPublisher {
         self.publish(uri, None, Vec::new())
     }
 
-    /// Publishes one position-less finding for a whole document. The orchestrator
-    /// uses this after a task passes validation; the message starts at 0:0 and
-    /// leaves any language-server diagnostics for the same file untouched.
+    /// Publishes one document-level finding at 0:0, replacing any findings this
+    /// publisher previously sent for `uri`. Diagnostics produced by a language
+    /// server belong to that server and are outside this channel.
     pub fn publish_finding(
         &self,
         uri: Url,
@@ -169,6 +169,27 @@ impl DiagnosticPublisher {
             finding = finding.with_code(code);
         }
         self.publish(uri, None, vec![finding])
+    }
+}
+
+impl ryoko_core::TaskDiagnosticSink for DiagnosticPublisher {
+    fn publish_task_findings(&self, project_root: &str, findings: &[ryoko_core::TaskDiagnostic]) {
+        if project_root.is_empty() {
+            return;
+        }
+        let root = std::path::Path::new(project_root);
+        for finding in findings {
+            let Ok(uri) = Url::from_file_path(root.join(&finding.file)) else {
+                continue;
+            };
+            let level = match finding.level {
+                ryoko_core::DiagnosticLevel::Info => FindingLevel::Info,
+                ryoko_core::DiagnosticLevel::Warning => FindingLevel::Warning,
+                ryoko_core::DiagnosticLevel::Error => FindingLevel::Error,
+            };
+            let _ =
+                self.publish_finding(uri, level, finding.message.clone(), finding.code.as_deref());
+        }
     }
 }
 

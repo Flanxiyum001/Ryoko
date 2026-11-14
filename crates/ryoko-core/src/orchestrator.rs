@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::agent::{AgentRuntime, TaskContext};
 use crate::agents::RETRY_FEEDBACK_METADATA;
+use crate::diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 use crate::error::{CoreError, CoreResult};
 use crate::event::{EventSink, OrchestratorEvent};
 use crate::memory::SharedMemory;
@@ -25,7 +26,6 @@ use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::WorkspaceProvider;
 use ryoko_models::ModelRouter;
-use ryoko_native::{DiagnosticPublisher, FindingLevel, Url};
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorConfig {
@@ -111,8 +111,8 @@ pub struct Orchestrator {
     models: Arc<ModelRouter>,
     config: OrchestratorConfig,
     events: EventSink,
-    /// Optional editor channel; absent when no language server is attached.
-    diagnostic_publisher: Option<DiagnosticPublisher>,
+    /// Optional editor channel; absent when no editor host is attached.
+    diagnostic_sink: Option<Arc<dyn TaskDiagnosticSink>>,
 }
 
 impl Orchestrator {
@@ -127,7 +127,7 @@ impl Orchestrator {
             models,
             config: OrchestratorConfig::default(),
             events: EventSink::default(),
-            diagnostic_publisher: None,
+            diagnostic_sink: None,
         }
     }
 
@@ -141,16 +141,14 @@ impl Orchestrator {
         self
     }
 
-    /// Publishes a task's validation result to the editor that owns `publisher`.
-    /// The publisher comes from [`ryoko_native::diagnostic_channel`], so the
-    /// language server and the orchestrator share one findings store.
-    pub fn with_diagnostic_publisher(mut self, publisher: DiagnosticPublisher) -> Self {
-        self.diagnostic_publisher = Some(publisher);
+    /// Routes a task's validation result to a host-provided editor sink.
+    ///
+    /// The trait lives in this crate, so the orchestrator stays independent of
+    /// any particular editor or language-server library. `ryoko-native`
+    /// implements it over its LSP diagnostic channel.
+    pub fn with_diagnostic_sink(mut self, sink: Arc<dyn TaskDiagnosticSink>) -> Self {
+        self.diagnostic_sink = Some(sink);
         self
-    }
-
-    pub fn diagnostic_publisher(&self) -> Option<&DiagnosticPublisher> {
-        self.diagnostic_publisher.as_ref()
     }
 
     pub fn events(&self) -> EventSink {
@@ -211,7 +209,7 @@ impl Orchestrator {
             let agent = registry[&task.assigned_to].clone();
             let workspace = self.workspace.clone();
             let events = self.events.clone();
-            let diagnostic_publisher = self.diagnostic_publisher.clone();
+            let diagnostic_sink = self.diagnostic_sink.clone();
             let semaphore = semaphore.clone();
             let mut dependencies = Vec::with_capacity(task.dependencies.len());
             for dependency in &task.dependencies {
@@ -259,7 +257,7 @@ impl Orchestrator {
                         workspace,
                         events.clone(),
                         max_attempts,
-                        diagnostic_publisher,
+                        diagnostic_sink,
                     )
                     .await;
                     drop(permit);
@@ -454,7 +452,7 @@ async fn execute_task(
     workspace_provider: Arc<dyn WorkspaceProvider>,
     events: EventSink,
     max_attempts: u32,
-    diagnostic_publisher: Option<DiagnosticPublisher>,
+    diagnostic_sink: Option<Arc<dyn TaskDiagnosticSink>>,
 ) -> (TaskOutcome, Option<TaskSuccess>) {
     let mut last_error = String::from("task did not run");
     let mut feedback: Option<String> = None;
@@ -593,9 +591,9 @@ async fn execute_task(
                     files: pr.files.clone(),
                     attempts: attempt,
                 };
-                if let Some(publisher) = &diagnostic_publisher {
+                if let Some(sink) = &diagnostic_sink {
                     publish_task_findings(
-                        publisher,
+                        sink.as_ref(),
                         &context.project.project_root,
                         &pr.files,
                         &report.summary,
@@ -630,29 +628,29 @@ async fn execute_task(
 }
 
 /// Sends one informational finding per changed file to the attached editor.
-/// Files are resolved against the project root the run was started from; a run
-/// without a root has no editor document to address, so nothing is published.
+/// Files stay relative to the project root the run was started from; the sink
+/// resolves them. A run without a root has no editor document to address, so
+/// nothing is published.
 fn publish_task_findings(
-    publisher: &DiagnosticPublisher,
+    sink: &dyn TaskDiagnosticSink,
     project_root: &str,
     files: &[String],
     summary: &str,
 ) {
-    if project_root.is_empty() {
+    if project_root.is_empty() || files.is_empty() {
         return;
     }
-    let root = std::path::Path::new(project_root);
-    for file in files {
-        let Ok(uri) = Url::from_file_path(root.join(file)) else {
-            continue;
-        };
-        let _ = publisher.publish_finding(
-            uri,
-            FindingLevel::Info,
-            format!("Ryoko validation passed: {summary}"),
-            Some("ryoko.validation"),
-        );
-    }
+    let message = format!("Ryoko validation passed: {summary}");
+    let findings: Vec<TaskDiagnostic> = files
+        .iter()
+        .map(|file| TaskDiagnostic {
+            file: file.clone(),
+            level: DiagnosticLevel::Info,
+            message: message.clone(),
+            code: Some("ryoko.validation".to_owned()),
+        })
+        .collect();
+    sink.publish_task_findings(project_root, &findings);
 }
 
 fn cap_feedback(feedback: &str) -> String {

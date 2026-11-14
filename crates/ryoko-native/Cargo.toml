@@ -11,8 +11,14 @@ name = "ryoko-lsp"
 path = "src/main.rs"
 
 [dependencies]
+ryoko-core = { path = "../ryoko-core" }
 ryoko-vfs = { path = "../ryoko-vfs" }
 serde_json.workspace = true
 tokio.workspace = true
 tower-lsp.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+ryoko-models = { path = "../ryoko-models" }
+tempfile.workspace = true

@@ -127,12 +127,14 @@ async fn validated_task_diagnostic_reaches_lsp_client() {
     )
     .await;
 
+    // The host wires the LSP publisher into the orchestrator as a sink; core
+    // itself never names the language-server crate.
     let orchestrator = Orchestrator::new(
         Arc::new(InMemoryWorkspaceProvider::new("main")),
         Arc::new(AllowAllValidator),
         Arc::new(ModelRouter::new("mock")),
     )
-    .with_diagnostic_publisher(publisher.clone());
+    .with_diagnostic_sink(Arc::new(publisher.clone()));
 
     let identity = AgentIdentity::new(AgentRole::SeniorDeveloper, "validated-agent", "test agent");
     let task = Task::new("generate a module", AgentRole::SeniorDeveloper);
