@@ -58,17 +58,6 @@ impl AgentDiagnostic {
         }
     }
 
-    pub fn info(range: Range, message: impl Into<String>) -> Self {
-        Self {
-            range,
-            severity: DiagnosticSeverity::INFORMATION,
-            message: message.into(),
-            code: None,
-            source: Some("ryoko".to_owned()),
-            fix_title: None,
-        }
-    }
-
     pub fn with_code(mut self, code: impl Into<String>) -> Self {
         self.code = Some(code.into());
         self
@@ -152,14 +141,14 @@ impl DiagnosticPublisher {
     pub fn publish_finding(
         &self,
         uri: Url,
-        level: FindingLevel,
+        level: ryoko_core::DiagnosticLevel,
         message: impl Into<String>,
         code: Option<&str>,
     ) -> std::result::Result<(), mpsc::error::SendError<PublishRequest>> {
         let message = message.into();
         let mut finding = AgentDiagnostic {
             range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-            severity: level.to_lsp(),
+            severity: severity(level),
             message,
             code: None,
             source: Some("ryoko".to_owned()),
@@ -173,7 +162,7 @@ impl DiagnosticPublisher {
 }
 
 impl ryoko_core::TaskDiagnosticSink for DiagnosticPublisher {
-    fn publish_task_findings(&self, project_root: &str, findings: &[ryoko_core::TaskDiagnostic]) {
+    fn publish(&self, project_root: &str, findings: &[ryoko_core::TaskDiagnostic]) {
         if project_root.is_empty() {
             return;
         }
@@ -182,32 +171,21 @@ impl ryoko_core::TaskDiagnosticSink for DiagnosticPublisher {
             let Ok(uri) = Url::from_file_path(root.join(&finding.file)) else {
                 continue;
             };
-            let level = match finding.level {
-                ryoko_core::DiagnosticLevel::Info => FindingLevel::Info,
-                ryoko_core::DiagnosticLevel::Warning => FindingLevel::Warning,
-                ryoko_core::DiagnosticLevel::Error => FindingLevel::Error,
-            };
-            let _ =
-                self.publish_finding(uri, level, finding.message.clone(), finding.code.as_deref());
+            let _ = self.publish_finding(
+                uri,
+                finding.level,
+                finding.message.clone(),
+                finding.code.as_deref(),
+            );
         }
     }
 }
 
-/// Severity for a task-level finding published without an editor position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FindingLevel {
-    Info,
-    Warning,
-    Error,
-}
-
-impl FindingLevel {
-    fn to_lsp(self) -> DiagnosticSeverity {
-        match self {
-            Self::Info => DiagnosticSeverity::INFORMATION,
-            Self::Warning => DiagnosticSeverity::WARNING,
-            Self::Error => DiagnosticSeverity::ERROR,
-        }
+fn severity(level: ryoko_core::DiagnosticLevel) -> DiagnosticSeverity {
+    match level {
+        ryoko_core::DiagnosticLevel::Info => DiagnosticSeverity::INFORMATION,
+        ryoko_core::DiagnosticLevel::Warning => DiagnosticSeverity::WARNING,
+        ryoko_core::DiagnosticLevel::Error => DiagnosticSeverity::ERROR,
     }
 }
 
