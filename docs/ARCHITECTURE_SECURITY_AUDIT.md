@@ -6,12 +6,13 @@ Source review of all eight Rust workspace crates, the CI workflow, the model ada
 
 ## Current architecture
 
-- `ryoko-models`: normalized chat contracts, OpenAI-compatible streaming, provider routing and usage ledger. Local and hosted engines that implement chat completions can share the same adapter.
-- `ryoko-core`: agent runtime trait, project/task model, dependency DAG orchestration, events, memory, IACP validation, change validation and workspace abstraction.
+- `ryoko-models`: normalized chat contracts, OpenAI-compatible streaming, native Anthropic Messages streaming, provider routing and usage ledger. Local and hosted engines that implement either protocol can share the same router.
+- `ryoko-core`: agent runtime trait, project/task model, dependency DAG orchestration, events, memory, IACP validation, change validation, workspace abstraction and tree-sitter Rust context extraction.
 - `ryoko-worktree`: Git worktree isolation with reviewable internal pull requests and guarded merge APIs.
-- `ryoko-sandbox`: capability-free Wasmtime harness for WASM test artifacts; this **does not** prove the generated application itself is safe or working.
-- `ryoko-cli`: previously an empty entrypoint. The initial implementation adds provider checks, one-turn model requests, deterministic team plans and read-only multi-agent previews.
-- `ryoko-native`, `ryoko-scripting`, `ryoko-vfs`: currently placeholders. No operational desktop UI/editor or tool-execution layer exists.
+- `ryoko-sandbox`: Wasmtime harness with WASI imports backed by an empty context, no host preopens, and fuel/epoch/memory limits. This **does not** prove the generated application itself is safe or working.
+- `ryoko-cli`: provider checks, one-turn model requests, deterministic team plans and read-only multi-agent previews.
+- `ryoko-native`: `tower-lsp` server over stdio with a diagnostic publisher, code lenses, quick fixes and editor commands. It does not yet connect to a running multi-agent session by default.
+- `ryoko-vfs`: thread-safe incremental document store used by the language server; `ryoko-scripting` remains a placeholder. No operational desktop UI or general tool-execution layer exists.
 
 ### Intended control flow
 
@@ -36,9 +37,9 @@ Each worker uses `provider/model` from the model router; role contracts must not
 
 ## Design decisions for the IDE
 
-1. **Model adapters:** Keep core messages provider-neutral. Add OpenAI-compatible profiles first, then dedicated Anthropic, Gemini, Bedrock and other non-compatible adapters with contract tests. Never claim every API speaks the same protocol.
+1. **Model adapters:** Keep core messages provider-neutral. OpenAI-compatible and native Anthropic Messages adapters now exist; Gemini, Bedrock/Vertex signing and other non-compatible APIs still need dedicated adapters with contract tests. Never claim every API speaks the same protocol.
 2. **Agent workers:** Register role-specific prompts, model selection, granted capabilities and maximum token/cost budgets. Use deterministic DAG and IACP envelopes for handoffs, not free-form unsafe tool instructions.
-3. **Workbench:** Desktop app with Monaco/editor, file tree, diff/patch preview, logs, approvals and role timeline. Separately isolate the trusted desktop host from the untrusted model output renderer.
+3. **Workbench:** Desktop app with Monaco/editor, file tree, diff/patch preview, logs, approvals and role timeline. Separately isolate the trusted desktop host from the untrusted model output renderer. The LSP server is the first editor bridge, not a replacement for the desktop host.
 4. **Execution:** Run project builds and tests in restricted containers or ephemeral VMs with explicit allowlisted network and mounts. WASM is useful for narrowly defined plugins, not a generic guarantee about arbitrary generated applications.
 5. **Review:** Every change needs a diff, passed project-specific tests and an explicit human approve/merge action. Never conflate an internal worktree PR object with a hosted GitHub PR.
 6. **Provider UX:** Endpoint, protocol type, model ID, key storage, latency/health tests, streaming/tools capability tests and per-role binding. Remote HTTP without TLS is not suitable for secrets.

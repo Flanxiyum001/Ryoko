@@ -9,7 +9,16 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelError, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider};
+use crate::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::{ModelError, ModelProvider, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireProtocol {
+    #[default]
+    OpenAi,
+    Anthropic,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +35,9 @@ pub struct ProviderProfile {
     /// Use only on a trusted network; TLS is mandatory when sending API keys.
     #[serde(default)]
     pub allow_insecure_http: bool,
+    /// Native wire protocol. Omit for OpenAI-compatible endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire: Option<WireProtocol>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,28 +133,46 @@ impl ProviderProfile {
         Ok(())
     }
 
-    fn to_provider(&self) -> Result<OpenAiCompatProvider, ModelError> {
+    fn to_provider(&self) -> Result<Arc<dyn ModelProvider>, ModelError> {
         self.validate()?;
-        let mut config = OpenAiCompatConfig::new(&self.id, &self.base_url);
-        if let Some(path) = &self.chat_path {
-            config.chat_path = path.clone();
-        }
-        if let Some(var) = &self.api_key_env {
-            let key = std::env::var(var).map_err(|_| {
-                invalid(format!(
-                    "provider {} requires the environment variable {var}",
-                    self.id
-                ))
-            })?;
-            if key.trim().is_empty() {
-                return Err(invalid(format!(
-                    "provider {} has an empty API key environment variable",
-                    self.id
-                )));
+        let api_key = match &self.api_key_env {
+            Some(var) => {
+                let key = std::env::var(var).map_err(|_| {
+                    invalid(format!(
+                        "provider {} requires the environment variable {var}",
+                        self.id
+                    ))
+                })?;
+                if key.trim().is_empty() {
+                    return Err(invalid(format!(
+                        "provider {} has an empty API key environment variable",
+                        self.id
+                    )));
+                }
+                Some(key)
             }
-            config = config.with_api_key(key);
+            None => None,
+        };
+
+        match self.wire.unwrap_or_default() {
+            WireProtocol::OpenAi => {
+                let mut config = OpenAiCompatConfig::new(&self.id, &self.base_url);
+                if let Some(path) = &self.chat_path {
+                    config.chat_path = path.clone();
+                }
+                if let Some(key) = api_key {
+                    config = config.with_api_key(key);
+                }
+                Ok(Arc::new(OpenAiCompatProvider::new(config)?))
+            }
+            WireProtocol::Anthropic => {
+                let mut config = AnthropicConfig::new(&self.id, &self.base_url);
+                if let Some(key) = api_key {
+                    config = config.with_api_key(key);
+                }
+                Ok(Arc::new(AnthropicProvider::new(config)?))
+            }
         }
-        OpenAiCompatProvider::new(config)
     }
 }
 
@@ -211,7 +241,7 @@ impl ProviderCatalog {
         let mut router = ModelRouter::new(&self.default_provider);
         for profile in &self.providers {
             if required.contains(&profile.id) {
-                router.register(Arc::new(profile.to_provider()?));
+                router.register(profile.to_provider()?);
             }
         }
         Ok(router)
@@ -221,7 +251,7 @@ impl ProviderCatalog {
         self.validate()?;
         let mut router = ModelRouter::new(&self.default_provider);
         for profile in &self.providers {
-            router.register(Arc::new(profile.to_provider()?));
+            router.register(profile.to_provider()?);
         }
         Ok(router)
     }
@@ -240,6 +270,7 @@ mod tests {
                 api_key_env: None,
                 chat_path: None,
                 allow_insecure_http: false,
+                wire: None,
             }],
         }
     }
@@ -250,6 +281,15 @@ mod tests {
         catalog.validate().unwrap();
         let router = catalog.build_router().unwrap();
         assert_eq!(router.default_provider(), "local");
+        assert_eq!(router.providers().count(), 1);
+    }
+
+    #[test]
+    fn builds_anthropic_profiles() {
+        let mut catalog = example();
+        catalog.providers[0].base_url = "https://api.anthropic.com".into();
+        catalog.providers[0].wire = Some(WireProtocol::Anthropic);
+        let router = catalog.build_router().unwrap();
         assert_eq!(router.providers().count(), 1);
     }
 
@@ -305,6 +345,7 @@ mod tests {
             api_key_env: Some("RYOKO_UNCONFIGURED_TEST_KEY_994301".into()),
             chat_path: None,
             allow_insecure_http: false,
+            wire: None,
         });
         let router = catalog
             .build_router_for_models(["local/test-model"])
