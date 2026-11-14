@@ -5,6 +5,7 @@
 //! Agents never see vendor-specific payloads, and all token expenditure flows
 //! through a single [`UsageLedger`].
 
+mod anthropic;
 mod config;
 mod ledger;
 mod mock;
@@ -12,7 +13,8 @@ mod openai;
 mod router;
 mod types;
 
-pub use config::{ProviderCatalog, ProviderProfile};
+pub use anthropic::{AnthropicConfig, AnthropicProvider, anthropic_wire_body};
+pub use config::{ProviderCatalog, ProviderProfile, WireProtocol};
 pub use ledger::{Budget, LedgerSnapshot, UsageLedger};
 pub use mock::{MockProvider, ScriptedTurn};
 pub use openai::{OpenAiCompatConfig, OpenAiCompatProvider};

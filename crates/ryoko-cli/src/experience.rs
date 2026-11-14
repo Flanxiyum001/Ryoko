@@ -213,6 +213,7 @@ mod tests {
                     api_key_env: None,
                     chat_path: None,
                     allow_insecure_http: false,
+                    wire: None,
                 },
                 ProviderProfile {
                     id: "cloud".to_owned(),
@@ -220,6 +221,7 @@ mod tests {
                     api_key_env: Some("RYOKO_KEY".to_owned()),
                     chat_path: None,
                     allow_insecure_http: false,
+                    wire: None,
                 },
             ],
         }

@@ -263,6 +263,7 @@ impl ModelArgs {
             api_key_env: None,
             chat_path: None,
             allow_insecure_http: false,
+            wire: None,
         }
         .validate()?;
         let mut config = OpenAiCompatConfig::new(provider_id, base_url);
@@ -329,6 +330,7 @@ async fn init(args: InitArgs) -> Result<(), Box<dyn Error>> {
             api_key_env: args.api_key_env,
             chat_path: None,
             allow_insecure_http: false,
+            wire: None,
         }],
     };
     catalog.validate()?;

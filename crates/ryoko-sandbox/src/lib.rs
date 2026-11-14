@@ -1,10 +1,12 @@
 //! WASM execution guardrail for agent-proposed changes.
 //!
-//! Test artifacts run in a fresh wasmtime store with no filesystem, network,
-//! environment or WASI imports. Fuel bounds CPU, an epoch deadline bounds wall
-//! time, and a `StoreLimits` cap bounds linear memory. Only a clean `_start`
-//! return counts as a pass. [`SandboxSpecValidator`] additionally refuses
-//! proposals that do not carry tests, so source-only changes never reach review.
+//! Test artifacts run in a fresh wasmtime store with no filesystem, network or
+//! environment preopens. WASI imports are available, but the empty context
+//! denies host resources by default. Fuel bounds CPU, an epoch deadline bounds
+//! wall time, and a `StoreLimits` cap bounds linear memory. Only a clean
+//! `_start` return counts as a pass. [`SandboxSpecValidator`] additionally
+//! refuses proposals that do not carry tests, so source-only changes never
+//! reach review.
 
 mod spec;
 
@@ -16,7 +18,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ryoko_core::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use ryoko_core::{CoreError, CoreResult};
-use wasmtime::{Config, Engine, Module, Store, StoreLimitsBuilder};
+use wasmtime::{
+    Config, Engine, Linker, Module, ResourceLimiter, Store, StoreLimits, StoreLimitsBuilder,
+};
+use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 
 #[derive(Debug, Clone)]
 pub struct SandboxLimits {
@@ -63,7 +69,44 @@ impl From<SandboxError> for CoreError {
     }
 }
 
-/// A reusable, capability-free wasmtime engine.
+struct SandboxState {
+    wasi: WasiP1Ctx,
+    limits: StoreLimits,
+}
+
+impl ResourceLimiter for SandboxState {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.limits.memory_growing(current, desired, maximum)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.limits.table_growing(current, desired, maximum)
+    }
+
+    fn instances(&self) -> usize {
+        self.limits.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.limits.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.limits.memories()
+    }
+}
+
+/// A reusable wasmtime engine with empty WASI state and no host preopens.
 #[derive(Clone)]
 pub struct WasmSandbox {
     engine: Engine,
@@ -118,14 +161,24 @@ impl WasmSandbox {
                 .instances(16)
                 .tables(16)
                 .build();
-            let mut store = Store::new(&engine, store_limits);
-            store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
+            let mut store = Store::new(
+                &engine,
+                SandboxState {
+                    wasi: WasiCtxBuilder::new().build_p1(),
+                    limits: store_limits,
+                },
+            );
+            store.limiter(|state| state as &mut dyn ResourceLimiter);
             store
                 .set_fuel(limits.fuel)
                 .map_err(|err| SandboxError::Engine(err.to_string()))?;
             store.set_epoch_deadline(1);
 
-            let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            let mut linker = Linker::new(&engine);
+            preview1::add_to_linker_sync(&mut linker, |state: &mut SandboxState| &mut state.wasi)
+                .map_err(|err| SandboxError::Instantiate(err.to_string()))?;
+            let instance = linker
+                .instantiate(&mut store, &module)
                 .map_err(|err| SandboxError::Instantiate(err.to_string()))?;
             let start = instance
                 .get_typed_func::<(), ()>(&mut store, "_start")
@@ -303,5 +356,28 @@ mod tests {
         let report = validator.validate(&changes()).await.unwrap();
         assert!(report.passed);
         assert!(report.duration_ms < 5_000);
+    }
+
+    #[tokio::test]
+    async fn wasi_imports_are_available_without_host_preopens() {
+        let sandbox = WasmSandbox::new(SandboxLimits {
+            fuel: 1_000_000,
+            timeout: Duration::from_secs(2),
+            max_memory_bytes: 1024 * 1024,
+        })
+        .unwrap();
+        let outcome = sandbox
+            .execute(
+                br#"(module
+                    (import "wasi_snapshot_preview1" "random_get"
+                        (func $random_get (param i32 i32) (result i32)))
+                    (memory (export "memory") 1)
+                    (func (export "_start")
+                        (drop (call $random_get (i32.const 0) (i32.const 8))))
+                )"#,
+            )
+            .await
+            .unwrap();
+        assert!(outcome.passed);
     }
 }

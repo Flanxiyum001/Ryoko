@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod agents;
+pub mod context;
 pub mod error;
 pub mod event;
 pub mod iacp;
@@ -25,6 +26,7 @@ pub use agents::{
     CODEGEN_SYSTEM_PROMPT, CONTEXT_METADATA, ModelAgent, RETRY_FEEDBACK_METADATA,
     StructuredProposal, parse_structured_proposal,
 };
+pub use context::{ContextError, ContextExtractor, ContextSnippet, FileContext, Symbol};
 pub use error::{CoreError, CoreResult};
 pub use event::{EventSink, OrchestratorEvent};
 pub use iacp::{
