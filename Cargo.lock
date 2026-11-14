@@ -1808,13 +1808,11 @@ dependencies = [
  "chrono",
  "futures",
  "ryoko-models",
- "ryoko-native",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tower-lsp",
  "tracing",
  "tree-sitter",
  "tree-sitter-rust",
@@ -1841,8 +1839,12 @@ dependencies = [
 name = "ryoko-native"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "ryoko-core",
+ "ryoko-models",
  "ryoko-vfs",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower-lsp",
  "tracing",
