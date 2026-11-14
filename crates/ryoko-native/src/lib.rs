@@ -18,9 +18,11 @@ use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, ExecuteCommandOptions, ExecuteCommandParams, InitializeParams,
     InitializeResult, InitializedParams, MessageType, Position, Range, ServerCapabilities,
-    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
 };
 use tower_lsp::{Client, ClientSocket, LanguageServer, LspService, Server};
+
+pub use tower_lsp::lsp_types::Url;
 
 /// A finding produced by a Ryoko agent and addressed to an open editor document.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +51,17 @@ impl AgentDiagnostic {
         Self {
             range,
             severity: DiagnosticSeverity::WARNING,
+            message: message.into(),
+            code: None,
+            source: Some("ryoko".to_owned()),
+            fix_title: None,
+        }
+    }
+
+    pub fn info(range: Range, message: impl Into<String>) -> Self {
+        Self {
+            range,
+            severity: DiagnosticSeverity::INFORMATION,
             message: message.into(),
             code: None,
             source: Some("ryoko".to_owned()),
@@ -131,6 +144,49 @@ impl DiagnosticPublisher {
         uri: Url,
     ) -> std::result::Result<(), mpsc::error::SendError<PublishRequest>> {
         self.publish(uri, None, Vec::new())
+    }
+
+    /// Publishes one position-less finding for a whole document. The orchestrator
+    /// uses this after a task passes validation; the message starts at 0:0 and
+    /// leaves any language-server diagnostics for the same file untouched.
+    pub fn publish_finding(
+        &self,
+        uri: Url,
+        level: FindingLevel,
+        message: impl Into<String>,
+        code: Option<&str>,
+    ) -> std::result::Result<(), mpsc::error::SendError<PublishRequest>> {
+        let message = message.into();
+        let mut finding = AgentDiagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            severity: level.to_lsp(),
+            message,
+            code: None,
+            source: Some("ryoko".to_owned()),
+            fix_title: None,
+        };
+        if let Some(code) = code {
+            finding = finding.with_code(code);
+        }
+        self.publish(uri, None, vec![finding])
+    }
+}
+
+/// Severity for a task-level finding published without an editor position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+impl FindingLevel {
+    fn to_lsp(self) -> DiagnosticSeverity {
+        match self {
+            Self::Info => DiagnosticSeverity::INFORMATION,
+            Self::Warning => DiagnosticSeverity::WARNING,
+            Self::Error => DiagnosticSeverity::ERROR,
+        }
     }
 }
 
