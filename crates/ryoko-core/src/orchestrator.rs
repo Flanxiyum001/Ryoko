@@ -25,6 +25,7 @@ use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::WorkspaceProvider;
 use ryoko_models::ModelRouter;
+use ryoko_native::{DiagnosticPublisher, FindingLevel, Url};
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorConfig {
@@ -110,6 +111,8 @@ pub struct Orchestrator {
     models: Arc<ModelRouter>,
     config: OrchestratorConfig,
     events: EventSink,
+    /// Optional editor channel; absent when no language server is attached.
+    diagnostic_publisher: Option<DiagnosticPublisher>,
 }
 
 impl Orchestrator {
@@ -124,6 +127,7 @@ impl Orchestrator {
             models,
             config: OrchestratorConfig::default(),
             events: EventSink::default(),
+            diagnostic_publisher: None,
         }
     }
 
@@ -135,6 +139,18 @@ impl Orchestrator {
     pub fn with_events(mut self, events: EventSink) -> Self {
         self.events = events;
         self
+    }
+
+    /// Publishes a task's validation result to the editor that owns `publisher`.
+    /// The publisher comes from [`ryoko_native::diagnostic_channel`], so the
+    /// language server and the orchestrator share one findings store.
+    pub fn with_diagnostic_publisher(mut self, publisher: DiagnosticPublisher) -> Self {
+        self.diagnostic_publisher = Some(publisher);
+        self
+    }
+
+    pub fn diagnostic_publisher(&self) -> Option<&DiagnosticPublisher> {
+        self.diagnostic_publisher.as_ref()
     }
 
     pub fn events(&self) -> EventSink {
@@ -195,6 +211,7 @@ impl Orchestrator {
             let agent = registry[&task.assigned_to].clone();
             let workspace = self.workspace.clone();
             let events = self.events.clone();
+            let diagnostic_publisher = self.diagnostic_publisher.clone();
             let semaphore = semaphore.clone();
             let mut dependencies = Vec::with_capacity(task.dependencies.len());
             for dependency in &task.dependencies {
@@ -242,6 +259,7 @@ impl Orchestrator {
                         workspace,
                         events.clone(),
                         max_attempts,
+                        diagnostic_publisher,
                     )
                     .await;
                     drop(permit);
@@ -436,6 +454,7 @@ async fn execute_task(
     workspace_provider: Arc<dyn WorkspaceProvider>,
     events: EventSink,
     max_attempts: u32,
+    diagnostic_publisher: Option<DiagnosticPublisher>,
 ) -> (TaskOutcome, Option<TaskSuccess>) {
     let mut last_error = String::from("task did not run");
     let mut feedback: Option<String> = None;
@@ -574,6 +593,14 @@ async fn execute_task(
                     files: pr.files.clone(),
                     attempts: attempt,
                 };
+                if let Some(publisher) = &diagnostic_publisher {
+                    publish_task_findings(
+                        publisher,
+                        &context.project.project_root,
+                        &pr.files,
+                        &report.summary,
+                    );
+                }
                 let _ = lease.discard().await;
                 events.emit(OrchestratorEvent::TaskSucceeded {
                     task_id: task.id,
@@ -600,6 +627,32 @@ async fn execute_task(
         },
         None,
     )
+}
+
+/// Sends one informational finding per changed file to the attached editor.
+/// Files are resolved against the project root the run was started from; a run
+/// without a root has no editor document to address, so nothing is published.
+fn publish_task_findings(
+    publisher: &DiagnosticPublisher,
+    project_root: &str,
+    files: &[String],
+    summary: &str,
+) {
+    if project_root.is_empty() {
+        return;
+    }
+    let root = std::path::Path::new(project_root);
+    for file in files {
+        let Ok(uri) = Url::from_file_path(root.join(file)) else {
+            continue;
+        };
+        let _ = publisher.publish_finding(
+            uri,
+            FindingLevel::Info,
+            format!("Ryoko validation passed: {summary}"),
+            Some("ryoko.validation"),
+        );
+    }
 }
 
 fn cap_feedback(feedback: &str) -> String {
