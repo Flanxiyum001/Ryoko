@@ -11,6 +11,7 @@
 pub mod agent;
 pub mod agents;
 pub mod context;
+pub mod diagnostic;
 pub mod error;
 pub mod event;
 pub mod iacp;
@@ -27,6 +28,7 @@ pub use agents::{
     StructuredProposal, parse_structured_proposal,
 };
 pub use context::{ContextError, ContextExtractor, ContextSnippet, FileContext, Symbol};
+pub use diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 pub use error::{CoreError, CoreResult};
 pub use event::{EventSink, OrchestratorEvent};
 pub use iacp::{
