@@ -10,6 +10,7 @@ serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 
 [dev-dependencies]
 uuid.workspace = true
