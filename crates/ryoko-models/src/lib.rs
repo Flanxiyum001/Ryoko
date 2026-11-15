@@ -7,6 +7,7 @@
 
 mod anthropic;
 mod config;
+mod gemini;
 mod ledger;
 mod local;
 mod mock;
@@ -16,6 +17,7 @@ mod types;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider, anthropic_wire_body};
 pub use config::{ProviderCatalog, ProviderProfile, WireProtocol};
+pub use gemini::{GeminiConfig, GeminiProvider, gemini_wire_body, parse_gemini_response};
 pub use ledger::{Budget, LedgerSnapshot, UsageLedger};
 pub use local::{LocalModel, discover_local_models};
 pub use mock::{MockProvider, ScriptedTurn};
