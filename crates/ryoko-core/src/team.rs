@@ -114,7 +114,9 @@ pub fn application_plan(goal: &str) -> Vec<Task> {
 /// the validated parent commit without implicitly merging unrelated branches.
 pub fn engineering_execution_plan(goal: &str) -> Vec<Task> {
     let architect = Task::new(
-        format!("ARCHITECT: Implement a narrow, testable architecture/interface slice for: {goal}. Produce working code and regression tests, not only advice."),
+        format!(
+            "ARCHITECT: Implement a narrow, testable architecture/interface slice for: {goal}. Produce working code and regression tests, not only advice."
+        ),
         AgentRole::Custom("software-architect".into()),
     );
     let backend = Task::new(
