@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ryoko_core::mcp::{McpApprovalGate, McpClient, McpError, McpTransport};
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
