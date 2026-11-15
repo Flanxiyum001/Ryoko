@@ -55,14 +55,19 @@ impl GeminiConfig {
     fn endpoint(&self, model: &str) -> Result<String, ModelError> {
         if model.is_empty()
             || model.len() > 128
-            || !model.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
-            })
+            || !model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
             || model.contains("..")
         {
-            return Err(ModelError::Configuration("invalid Gemini model identifier".into()));
+            return Err(ModelError::Configuration(
+                "invalid Gemini model identifier".into(),
+            ));
         }
-        Ok(format!("{}/models/{model}:generateContent", self.base_url.trim_end_matches('/')))
+        Ok(format!(
+            "{}/models/{model}:generateContent",
+            self.base_url.trim_end_matches('/')
+        ))
     }
 }
 
@@ -73,13 +78,19 @@ pub struct GeminiProvider {
 
 impl std::fmt::Debug for GeminiProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GeminiProvider").field("config", &self.config).finish()
+        f.debug_struct("GeminiProvider")
+            .field("config", &self.config)
+            .finish()
     }
 }
 
 impl GeminiProvider {
     pub fn new(config: GeminiConfig) -> Result<Self, ModelError> {
-        if config.api_key.as_ref().is_none_or(|key| key.trim().is_empty()) {
+        if config
+            .api_key
+            .as_ref()
+            .is_none_or(|key| key.trim().is_empty())
+        {
             return Err(ModelError::Configuration(
                 "Gemini API requires an API key supplied through an environment variable".into(),
             ));
@@ -116,9 +127,11 @@ impl ModelProvider for GeminiProvider {
     async fn stream(&self, request: ChatRequest) -> Result<ModelStream, ModelError> {
         let endpoint = self.config.endpoint(&request.model)?;
         let body = gemini_wire_body(&request)?;
-        let key = self.config.api_key.as_deref().ok_or_else(|| {
-            ModelError::Configuration("Gemini API key is missing".into())
-        })?;
+        let key = self
+            .config
+            .api_key
+            .as_deref()
+            .ok_or_else(|| ModelError::Configuration("Gemini API key is missing".into()))?;
         let response = self
             .client
             .post(endpoint)
@@ -170,13 +183,23 @@ pub fn gemini_wire_body(request: &ChatRequest) -> Result<Value, ModelError> {
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => parts.push(json!({"text":text})),
-                ContentBlock::ToolCall { id, name, arguments } => {
+                ContentBlock::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => {
                     tools_by_call.insert(id, name);
                     parts.push(json!({"functionCall": {"id":id, "name":name, "args":arguments}}));
                 }
-                ContentBlock::ToolResult { tool_call_id, content, is_error } => {
+                ContentBlock::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error,
+                } => {
                     let name = tools_by_call.get(tool_call_id.as_str()).ok_or_else(|| {
-                        ModelError::Configuration("Gemini tool result has no preceding tool call".into())
+                        ModelError::Configuration(
+                            "Gemini tool result has no preceding tool call".into(),
+                        )
                     })?;
                     let response = if *is_error {
                         json!({"error":content})
@@ -195,7 +218,9 @@ pub fn gemini_wire_body(request: &ChatRequest) -> Result<Value, ModelError> {
         }
     }
     if contents.is_empty() {
-        return Err(ModelError::Configuration("Gemini prompt cannot be empty".into()));
+        return Err(ModelError::Configuration(
+            "Gemini prompt cannot be empty".into(),
+        ));
     }
     let mut body = json!({"contents": contents});
     if !system.is_empty() {
@@ -219,17 +244,21 @@ pub fn parse_gemini_response(model: &str, value: &Value) -> Result<Vec<StreamEve
         .as_array()
         .and_then(|entries| entries.first())
         .ok_or_else(|| ModelError::Decode("Gemini returned no candidate".into()))?;
-    let mut events = vec![StreamEvent::Start { model: model.to_owned() }];
+    let mut events = vec![StreamEvent::Start {
+        model: model.to_owned(),
+    }];
     let parts = candidate["content"]["parts"]
         .as_array()
         .ok_or_else(|| ModelError::Decode("Gemini candidate has no content parts".into()))?;
     for (index, part) in parts.iter().enumerate() {
         if let Some(text) = part.get("text").and_then(Value::as_str) {
-            events.push(StreamEvent::TextDelta { text: text.to_owned() });
+            events.push(StreamEvent::TextDelta {
+                text: text.to_owned(),
+            });
         } else if let Some(call) = part.get("functionCall") {
-            let name = call["name"]
-                .as_str()
-                .ok_or_else(|| ModelError::Decode("Gemini function call is missing its name".into()))?;
+            let name = call["name"].as_str().ok_or_else(|| {
+                ModelError::Decode("Gemini function call is missing its name".into())
+            })?;
             let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
             let id = call["id"]
                 .as_str()
@@ -247,7 +276,9 @@ pub fn parse_gemini_response(model: &str, value: &Value) -> Result<Vec<StreamEve
         events.push(StreamEvent::Usage(Usage {
             input_tokens: usage["promptTokenCount"].as_u64().unwrap_or_default(),
             output_tokens: usage["candidatesTokenCount"].as_u64().unwrap_or_default(),
-            cached_input_tokens: usage["cachedContentTokenCount"].as_u64().unwrap_or_default(),
+            cached_input_tokens: usage["cachedContentTokenCount"]
+                .as_u64()
+                .unwrap_or_default(),
         }));
     }
     let stop_reason = match candidate["finishReason"].as_str() {
@@ -276,9 +307,15 @@ mod tests {
                 json!({"type":"object","properties":{"id":{"type":"string"}}}),
             )]);
         let body = gemini_wire_body(&request).unwrap();
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "Explain carefully");
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "Explain carefully"
+        );
         assert_eq!(body["contents"][0]["parts"][0]["text"], "Hello");
-        assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "lookup");
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "lookup"
+        );
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 2048);
     }
 
@@ -290,27 +327,59 @@ mod tests {
         });
         let events = parse_gemini_response("gemini-test", &response).unwrap();
         assert!(matches!(&events[1], StreamEvent::TextDelta { text } if text == "checking"));
-        assert!(matches!(&events[2], StreamEvent::ToolCallDelta { name: Some(name), .. } if name == "lookup"));
-        assert!(matches!(&events[3], StreamEvent::Usage(Usage { input_tokens: 10, output_tokens: 7, .. })));
+        assert!(
+            matches!(&events[2], StreamEvent::ToolCallDelta { name: Some(name), .. } if name == "lookup")
+        );
+        assert!(matches!(
+            &events[3],
+            StreamEvent::Usage(Usage {
+                input_tokens: 10,
+                output_tokens: 7,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn rejects_invalid_names_and_missing_keys() {
-        assert!(GeminiConfig::new("gemini", "https://generativelanguage.googleapis.com/v1beta").endpoint("../evil").is_err());
-        assert!(GeminiProvider::new(GeminiConfig::new("gemini", "https://generativelanguage.googleapis.com/v1beta")).is_err());
+        assert!(
+            GeminiConfig::new("gemini", "https://generativelanguage.googleapis.com/v1beta")
+                .endpoint("../evil")
+                .is_err()
+        );
+        assert!(
+            GeminiProvider::new(GeminiConfig::new(
+                "gemini",
+                "https://generativelanguage.googleapis.com/v1beta"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
     fn maps_model_tool_roundtrip_without_losing_call_identity() {
         let request = ChatRequest::new("gemini")
             .with_user("Query")
-            .with_message(Message::new(Role::Assistant, vec![
-                ContentBlock::ToolCall { id: "call-3".into(), name:"lookup".into(), arguments:json!({"x":1}) }
-            ]))
-            .with_message(Message::new(Role::Tool, vec![
-                ContentBlock::ToolResult { tool_call_id: "call-3".into(), content:"OK".into(), is_error:false }
-            ]));
+            .with_message(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolCall {
+                    id: "call-3".into(),
+                    name: "lookup".into(),
+                    arguments: json!({"x":1}),
+                }],
+            ))
+            .with_message(Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_call_id: "call-3".into(),
+                    content: "OK".into(),
+                    is_error: false,
+                }],
+            ));
         let body = gemini_wire_body(&request).unwrap();
-        assert_eq!(body["contents"][2]["parts"][0]["functionResponse"]["name"], "lookup");
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["name"],
+            "lookup"
+        );
     }
 }
