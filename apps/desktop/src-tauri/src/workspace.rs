@@ -24,7 +24,7 @@ pub struct WorkspaceInfo {
     pub name: String,
 }
 
-fn current_root(state: &State<'_, WorkspaceState>) -> Result<PathBuf, String> {
+pub(crate) fn current_root(state: &State<'_, WorkspaceState>) -> Result<PathBuf, String> {
     state
         .root
         .lock()
@@ -151,7 +151,16 @@ pub fn write_file(
         .unwrap_or_default();
     let temp = real_parent.join(format!(".ryoko-save-{}-{stamp}.tmp", std::process::id()));
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&temp)?;
+        // Do not follow a pre-existing symlink or clobber a sibling temp file
+        // if timestamps collide across saves or a malicious process races us.
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()
     })();
