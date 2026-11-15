@@ -111,7 +111,8 @@ impl ModelRouter {
     }
 
     pub async fn stream(&self, request: ChatRequest) -> Result<ModelStream, ModelError> {
-        self.ledger.check_budget()?;
+        let scope = request.scope.clone();
+        self.ledger.check_budget_for(scope.as_deref())?;
         let (entry, bare_model) = self.resolve(&request.model)?;
 
         let mut provider_request = request;
@@ -127,7 +128,7 @@ impl ModelRouter {
         let stream = entry.provider.stream(provider_request).await?;
         let mapped = stream.map(move |item| {
             if let Ok(StreamEvent::Usage(usage)) = &item {
-                ledger.record(&provider_id, &bare_model, *usage, pricing);
+                ledger.record_for(scope.as_deref(), &provider_id, &bare_model, *usage, pricing);
             }
             item
         });
@@ -136,12 +137,29 @@ impl ModelRouter {
 
     pub async fn complete(&self, request: ChatRequest) -> Result<Completion, ModelError> {
         let requested_model = request.model.clone();
+        let scope = request.scope.clone();
         let stream = self.stream(request).await?;
         let mut completion = Completion {
             model: requested_model,
             ..Completion::default()
         };
-        collect_stream(stream, &mut completion).await?;
+        if let Some(remaining) = self.ledger.remaining_time_for(scope.as_deref()) {
+            match tokio::time::timeout(remaining, collect_stream(stream, &mut completion)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(ModelError::LatencyBudgetExceeded {
+                        budget_secs: self
+                            .ledger
+                            .budget()
+                            .and_then(|budget| budget.limit_seconds)
+                            .unwrap_or(0),
+                        elapsed_ms: self.ledger.elapsed().as_millis() as u64,
+                    });
+                }
+            }
+        } else {
+            collect_stream(stream, &mut completion).await?;
+        }
         Ok(completion)
     }
 
