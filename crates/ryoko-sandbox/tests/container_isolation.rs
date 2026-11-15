@@ -40,6 +40,12 @@ async fn container_blocks_host_escape_and_network_but_writes_worktree() {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr),
     );
-    assert_eq!(fs::read_to_string(worktree.join("generated")).unwrap(), "allowed\n");
-    assert_eq!(fs::read_to_string(outside).unwrap(), "outside-worktree-secret");
+    assert_eq!(
+        fs::read_to_string(worktree.join("generated")).unwrap(),
+        "allowed\n"
+    );
+    assert_eq!(
+        fs::read_to_string(outside).unwrap(),
+        "outside-worktree-secret"
+    );
 }
