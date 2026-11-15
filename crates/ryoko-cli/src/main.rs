@@ -19,9 +19,9 @@ use ryoko_core::{
 };
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
-    ProviderProfile, UsageLedger,
+    ProviderProfile, UsageLedger, discover_local_models,
 };
-use ryoko_sandbox::SpecPolicy;
+use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 use ryoko_worktree::{
     GitWorktreeManager, WorktreeDiff, WorktreeRecord, WorktreeSession, WorktreeState,
 };
@@ -56,6 +56,8 @@ enum Commands {
     Plan(PlanArgs),
     /// Validate provider profiles without contacting any endpoint or reading keys.
     Providers(ProvidersArgs),
+    /// Probe only fixed loopback Ollama and LM Studio endpoints, with no keys.
+    DiscoverLocal,
     /// Ask one configured model a question (no tools or filesystem changes).
     Ask(AskArgs),
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
@@ -189,6 +191,8 @@ struct RunArgs {
     /// Timeout for the pre-flight command.
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
+    #[command(flatten)]
+    isolation: IsolationArgs,
 }
 
 #[derive(Debug, Args)]
@@ -216,6 +220,55 @@ struct ReviewArgs {
     check_command: Option<String>,
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
+    #[command(flatten)]
+    isolation: IsolationArgs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    Auto,
+    Docker,
+    Podman,
+}
+
+#[derive(Debug, Clone, Args)]
+struct IsolationArgs {
+    /// OCI isolation backend. Auto tries Docker then Podman, never the host.
+    #[arg(long, value_enum, default_value = "auto")]
+    sandbox_backend: SandboxBackendArg,
+    /// Operator-built OCI image with offline build tools and dependencies.
+    #[arg(long)]
+    sandbox_image: Option<String>,
+    /// DANGEROUS: explicitly run pre-flight commands on this machine.
+    #[arg(long)]
+    unsafe_host_check: bool,
+}
+
+fn resolve_sandbox(args: &IsolationArgs) -> Result<BuildSandbox, Box<dyn Error>> {
+    if args.unsafe_host_check {
+        if args.sandbox_image.is_some() || !matches!(args.sandbox_backend, SandboxBackendArg::Auto)
+        {
+            return Err(cli_error(
+                "--unsafe-host-check cannot be combined with sandbox options",
+            ));
+        }
+        eprintln!("WARNING: --unsafe-host-check runs untrusted project code on the host");
+        return Ok(BuildSandbox::new(BuildBackend::UnsafeHost, None));
+    }
+    let image = args.sandbox_image.as_ref().ok_or_else(|| {
+        cli_error("pre-flight checks require --sandbox-image (or explicit --unsafe-host-check)")
+    })?;
+    if image.trim().is_empty() || image.starts_with('-') {
+        return Err(cli_error(
+            "--sandbox-image must be a valid OCI image reference",
+        ));
+    }
+    let backend = match args.sandbox_backend {
+        SandboxBackendArg::Auto => BuildBackend::Auto,
+        SandboxBackendArg::Docker => BuildBackend::Docker,
+        SandboxBackendArg::Podman => BuildBackend::Podman,
+    };
+    Ok(BuildSandbox::new(backend, Some(image.clone())))
 }
 
 #[derive(Debug, Clone, Args)]
@@ -362,6 +415,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Roles => roles().await,
         Commands::Plan(args) => plan(args).await,
         Commands::Providers(args) => providers(args).await,
+        Commands::DiscoverLocal => discover_local().await,
         Commands::Ask(args) => ask(args).await,
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(args).await,
@@ -396,6 +450,19 @@ async fn providers(args: ProvidersArgs) -> Result<(), Box<dyn Error>> {
         println!("{}: {}", provider.id, provider.base_url);
     }
     println!("Profiles validated; endpoints and credentials not tested.");
+    Ok(())
+}
+
+async fn discover_local() -> Result<(), Box<dyn Error>> {
+    let models = discover_local_models().await;
+    if models.is_empty() {
+        println!("No Ollama or LM Studio models found on their default loopback ports.");
+        return Ok(());
+    }
+    for model in models {
+        println!("{} ({})", model.selection(), model.base_url);
+    }
+    println!("Discovery does not configure credentials or select models for execution.");
     Ok(())
 }
 
@@ -671,11 +738,15 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let check_command = resolve_check_command(&root, args.check_command.as_deref())?;
     let (model, router) = args.model.load()?;
     let manager = GitWorktreeManager::new(&root);
-    let validator: Arc<dyn ChangeValidator> = Arc::new(CommandValidator::new(
-        check_command,
-        SpecPolicy::default(),
-        Duration::from_secs(args.timeout_secs),
-    ));
+    let sandbox = resolve_sandbox(&args.isolation)?;
+    let validator: Arc<dyn ChangeValidator> = Arc::new(
+        CommandValidator::new(
+            check_command,
+            SpecPolicy::default(),
+            Duration::from_secs(args.timeout_secs),
+        )
+        .with_sandbox(sandbox),
+    );
     let agent: Arc<dyn AgentRuntime> = Arc::new(
         ModelAgent::new(AgentIdentity::new(
             AgentRole::SeniorDeveloper,
@@ -764,11 +835,15 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         .clone()
         .unwrap_or_else(|| default_target(&session));
     let check_command = resolve_check_command(&root, args.check_command.as_deref())?;
-    let validator: Arc<dyn ChangeValidator> = Arc::new(CommandValidator::new(
-        check_command,
-        SpecPolicy::default(),
-        Duration::from_secs(args.timeout_secs),
-    ));
+    let sandbox = resolve_sandbox(&args.isolation)?;
+    let validator: Arc<dyn ChangeValidator> = Arc::new(
+        CommandValidator::new(
+            check_command,
+            SpecPolicy::default(),
+            Duration::from_secs(args.timeout_secs),
+        )
+        .with_sandbox(sandbox),
+    );
     let project = ProjectContext {
         project_root: root.display().to_string(),
         active_branch: current_branch(&root).await,
