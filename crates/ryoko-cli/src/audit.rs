@@ -476,13 +476,15 @@ mod tests {
     async fn refuses_to_skip_secret_scans_for_oversized_proposals() {
         let dir = tempfile::TempDir::new().unwrap();
         let oversized = "a".repeat(MAX_SCAN_BYTES + 1);
-        let report = run_security_audit(
-            dir.path(),
-            &staged(&[("src/config.rs", &oversized)]),
-        )
-        .await;
+        let report =
+            run_security_audit(dir.path(), &staged(&[("src/config.rs", &oversized)])).await;
         assert!(!report.passed());
-        assert!(report.findings.iter().any(|finding| finding.message.contains("exceeds")));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("exceeds"))
+        );
     }
 
     #[test]
