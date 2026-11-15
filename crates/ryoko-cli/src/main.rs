@@ -1024,7 +1024,9 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                     }
                 };
                 if parsed.hunks().is_empty() {
-                    eprintln!("No selectable text hunks; binary, rename and mode changes are excluded.");
+                    eprintln!(
+                        "No selectable text hunks; binary, rename and mode changes are excluded."
+                    );
                     continue;
                 }
                 println!("\nChoose text hunks to stage on a NEW review branch:");
@@ -1066,11 +1068,16 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                     session.branch_name
                 );
                 if selected_report.passed {
-                    println!("Type MERGE to accept this validated selection into {target}; any other input keeps it:");
+                    println!(
+                        "Type MERGE to accept this validated selection into {target}; any other input keeps it:"
+                    );
                     print!("> ");
                     std::io::Write::flush(&mut std::io::stdout())?;
                     if read_line(&mut reader).await? == "MERGE" {
-                        match manager.merge_worktree(&selected, &target, &selected_report).await {
+                        match manager
+                            .merge_worktree(&selected, &target, &selected_report)
+                            .await
+                        {
                             Ok(receipt) => {
                                 println!("Merged selected hunks at {}", receipt.merge_commit);
                                 manager.clean_worktree(&selected).await?;
