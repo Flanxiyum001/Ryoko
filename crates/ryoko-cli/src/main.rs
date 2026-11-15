@@ -1,3 +1,4 @@
+mod audit;
 mod check;
 mod context_window;
 mod experience;
