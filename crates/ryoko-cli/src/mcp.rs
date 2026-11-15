@@ -33,7 +33,9 @@ impl StdioMcpTransport {
         pass_env: &[String],
     ) -> Result<Self, McpError> {
         if args.len() > 64 || pass_env.len() > 32 {
-            return Err(McpError::Transport("server argument/environment limit exceeded".into()));
+            return Err(McpError::Transport(
+                "server argument/environment limit exceeded".into(),
+            ));
         }
         let mut command = Command::new(executable);
         command.args(args);
@@ -49,8 +51,9 @@ impl StdioMcpTransport {
             if !valid_env_name(name) {
                 return Err(McpError::Transport("invalid --allow-env name".into()));
             }
-            let value = std::env::var_os(name)
-                .ok_or_else(|| McpError::Transport(format!("environment variable {name} not set")))?;
+            let value = std::env::var_os(name).ok_or_else(|| {
+                McpError::Transport(format!("environment variable {name} not set"))
+            })?;
             command.env(name, value);
         }
         command
@@ -111,14 +114,17 @@ async fn read_frame(reader: &mut BufReader<ChildStdout>) -> Result<Value, McpErr
             break;
         }
     }
-    serde_json::from_slice(&bytes).map_err(|_| McpError::InvalidResponse("invalid server JSON".into()))
+    serde_json::from_slice(&bytes)
+        .map_err(|_| McpError::InvalidResponse("invalid server JSON".into()))
 }
 
 async fn write_payload(state: &mut McpProcess, payload: &Value) -> Result<(), McpError> {
-    let mut bytes = serde_json::to_vec(payload)
-        .map_err(|error| McpError::Transport(error.to_string()))?;
+    let mut bytes =
+        serde_json::to_vec(payload).map_err(|error| McpError::Transport(error.to_string()))?;
     if bytes.len() > MAX_REQUEST_BYTES {
-        return Err(McpError::InvalidResponse("MCP request exceeds 64 KiB".into()));
+        return Err(McpError::InvalidResponse(
+            "MCP request exceeds 64 KiB".into(),
+        ));
     }
     bytes.push(b'\n');
     state
@@ -146,7 +152,9 @@ impl McpTransport for StdioMcpTransport {
                     return Ok(reply);
                 }
             }
-            Err(McpError::InvalidResponse("too many server notifications".into()))
+            Err(McpError::InvalidResponse(
+                "too many server notifications".into(),
+            ))
         })
         .await
         .map_err(|_| McpError::Transport("MCP server timed out".into()))?
@@ -172,23 +180,28 @@ impl McpApprovalGate for TerminalApproval {
         let mut answer = String::new();
         let input = tokio::io::stdin();
         let mut reader = BufReader::new(input);
-        match tokio::time::timeout(Duration::from_secs(90), tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut answer)).await {
+        match tokio::time::timeout(
+            Duration::from_secs(90),
+            tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut answer),
+        )
+        .await
+        {
             Ok(Ok(_)) => answer.trim() == "YES",
             _ => false,
         }
     }
 }
 
-pub async fn tools(
-    server: &Path,
-    args: &[String],
-    pass_env: &[String],
-) -> Result<(), McpError> {
+pub async fn tools(server: &Path, args: &[String], pass_env: &[String]) -> Result<(), McpError> {
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
     let client = McpClient::new(transport, Arc::new(TerminalApproval));
     client.initialize().await?;
     let tools = client.list_tools().await?;
-    println!("{}", serde_json::to_string_pretty(&tools).map_err(|error| McpError::Transport(error.to_string()))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&tools)
+            .map_err(|error| McpError::Transport(error.to_string()))?
+    );
     Ok(())
 }
 
@@ -202,17 +215,25 @@ pub async fn call(
     let arguments: Value = serde_json::from_str(arguments)
         .map_err(|_| McpError::InvalidResponse("tool arguments must be valid JSON".into()))?;
     if !arguments.is_object() {
-        return Err(McpError::InvalidResponse("tool arguments must be a JSON object".into()));
+        return Err(McpError::InvalidResponse(
+            "tool arguments must be a JSON object".into(),
+        ));
     }
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
     let client = McpClient::new(transport, Arc::new(TerminalApproval));
     client.initialize().await?;
     let available = client.list_tools().await?;
     if !available.iter().any(|entry| entry.name == tool) {
-        return Err(McpError::InvalidResponse("tool not advertised by the MCP server".into()));
+        return Err(McpError::InvalidResponse(
+            "tool not advertised by the MCP server".into(),
+        ));
     }
     let result = client.call_tool(tool, arguments).await?;
-    println!("{}", serde_json::to_string_pretty(&result).map_err(|error| McpError::Transport(error.to_string()))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result)
+            .map_err(|error| McpError::Transport(error.to_string()))?
+    );
     Ok(())
 }
 
