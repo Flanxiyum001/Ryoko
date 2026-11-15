@@ -14,13 +14,24 @@ pub fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
     if trimmed.contains('\0') {
         return Err("file path contains a NUL byte".to_owned());
     }
+    // Apply one cross-platform policy even when developing on Unix. Windows
+    // drive-relative paths and backslashes must never become alternate escapes.
+    if trimmed.contains('\\') || trimmed.contains(':') {
+        return Err("cross-platform unsafe file path".to_owned());
+    }
     let candidate = Path::new(trimmed);
     if candidate.is_absolute() {
         return Err(format!("absolute paths are not allowed: {trimmed}"));
     }
     for component in candidate.components() {
         match component {
-            Component::Normal(_) | Component::CurDir => {}
+            Component::Normal(part) => {
+                let name = part.to_string_lossy();
+                if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".ryoko") {
+                    return Err("workspace metadata cannot be edited".to_owned());
+                }
+            }
+            Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(format!("unsafe file path: {trimmed}"));
             }
@@ -99,6 +110,26 @@ mod tests {
         assert!(safe_join(root, "src/../../escape.rs").is_err());
         assert!(safe_join(root, "/etc/passwd").is_err());
         assert!(safe_join(root, "  ").is_err());
+    }
+
+    #[test]
+    fn rejects_workspace_metadata_and_cross_platform_escapes() {
+        let root = Path::new("/repo");
+        for path in [
+            ".git/config",
+            "src/.ryoko/session.json",
+            "src/.GiT/hooks/post-commit",
+            "src\\..\\secrets.txt",
+            "C:relative.txt",
+            "src/C:config.txt",
+        ] {
+            assert!(
+                safe_join(root, path).is_err(),
+                "unexpectedly accepted {path}"
+            );
+        }
+        assert!(safe_join(root, "src/.gitignore").is_ok());
+        assert!(safe_join(root, "src/.env.example").is_ok());
     }
 
     #[test]

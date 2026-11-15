@@ -171,18 +171,29 @@ async function loadFiles(): Promise<void> {
 async function openFolder(): Promise<void> {
   const selected = await open({ directory: true, multiple: false });
   if (typeof selected !== 'string') return;
-  openFiles.clear();
-  diagnostics.clear();
-  state.current = null;
-  missionLogs = [];
-  missionSnapshot = null;
-  missionSelection = null;
-  missionLogSelect.replaceChildren();
-  missionGraph.replaceChildren();
-  missionDetail.replaceChildren();
-  clearProblems();
+  if ([...openFiles.values()].some((file) => file.dirty)
+    && !window.confirm('Switch workspaces and discard unsaved edits?')) {
+    return;
+  }
   try {
     const info = await invoke<WorkspaceInfo>('open_workspace', { path: selected });
+    // Open the new workspace successfully before discarding any old editor
+    // buffers. Changing a folder must not erase unsaved content on failure.
+    await lsp.stop();
+    for (const timer of changeTimers.values()) window.clearTimeout(timer);
+    changeTimers.clear();
+    for (const file of openFiles.values()) file.model.dispose();
+    openFiles.clear();
+    diagnostics.clear();
+    state.current = null;
+    missionLogs = [];
+    missionSnapshot = null;
+    missionSelection = null;
+    missionLogSelect.replaceChildren();
+    missionGraph.replaceChildren();
+    missionDetail.replaceChildren();
+    editor.setModel(null);
+    clearProblems();
     state.root = info.root;
     workspaceName.textContent = info.name;
     workspaceName.title = info.root;
@@ -447,7 +458,7 @@ async function saveCurrent(): Promise<void> {
   if (!file || !file.dirty) return;
   try {
     const content = file.model.getValue();
-    await invoke('write_file', { path: file.path, content });
+    await invoke('write_file', { path: file.path, content, expectedContent: file.savedText });
     file.savedText = content;
     file.version += 1;
     markDirty(file);
