@@ -273,9 +273,17 @@ pub fn parse_gemini_response(model: &str, value: &Value) -> Result<Vec<StreamEve
         }
     }
     if let Some(usage) = value.get("usageMetadata") {
+        let input = usage["promptTokenCount"].as_u64().unwrap_or_default();
+        let visible_output = usage["candidatesTokenCount"].as_u64().unwrap_or_default();
+        let thinking = usage["thoughtsTokenCount"].as_u64().unwrap_or_default();
+        let output = usage["totalTokenCount"]
+            .as_u64()
+            .map(|total| total.saturating_sub(input))
+            .unwrap_or_default()
+            .max(visible_output.saturating_add(thinking));
         events.push(StreamEvent::Usage(Usage {
-            input_tokens: usage["promptTokenCount"].as_u64().unwrap_or_default(),
-            output_tokens: usage["candidatesTokenCount"].as_u64().unwrap_or_default(),
+            input_tokens: input,
+            output_tokens: output,
             cached_input_tokens: usage["cachedContentTokenCount"]
                 .as_u64()
                 .unwrap_or_default(),
@@ -323,7 +331,7 @@ mod tests {
     fn parses_function_calls_and_usage() {
         let response = json!({
             "candidates":[{"content":{"parts":[{"text":"checking"},{"functionCall":{"id":"abc","name":"lookup","args":{"id":"2"}}}]},"finishReason":"STOP"}],
-            "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"cachedContentTokenCount":3}
+            "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":7,"cachedContentTokenCount":3,"thoughtsTokenCount":2,"totalTokenCount":19}
         });
         let events = parse_gemini_response("gemini-test", &response).unwrap();
         assert!(matches!(&events[1], StreamEvent::TextDelta { text } if text == "checking"));
@@ -334,7 +342,7 @@ mod tests {
             &events[3],
             StreamEvent::Usage(Usage {
                 input_tokens: 10,
-                output_tokens: 7,
+                output_tokens: 9,
                 ..
             })
         ));
