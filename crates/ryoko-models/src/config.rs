@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::gemini::{GeminiConfig, GeminiProvider};
 use crate::{ModelError, ModelProvider, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +19,7 @@ pub enum WireProtocol {
     #[default]
     OpenAi,
     Anthropic,
+    Gemini,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +118,17 @@ impl ProviderProfile {
                 )));
             }
         }
+        if self.wire == Some(WireProtocol::Gemini) {
+            if self.api_key_env.is_none() || self.chat_path.is_some() {
+                return Err(invalid(format!(
+                    "provider {} requires api_key_env and must not set chat_path for native Gemini",
+                    self.id
+                )));
+            }
+            if url.scheme() != "https" {
+                return Err(invalid("native Gemini requires HTTPS"));
+            }
+        }
         if let Some(path) = &self.chat_path {
             if !path.starts_with('/')
                 || path.starts_with("//")
@@ -171,6 +184,13 @@ impl ProviderProfile {
                     config = config.with_api_key(key);
                 }
                 Ok(Arc::new(AnthropicProvider::new(config)?))
+            }
+            WireProtocol::Gemini => {
+                let mut config = GeminiConfig::new(&self.id, &self.base_url);
+                if let Some(key) = api_key {
+                    config = config.with_api_key(key);
+                }
+                Ok(Arc::new(GeminiProvider::new(config)?))
             }
         }
     }
@@ -273,6 +293,21 @@ mod tests {
                 wire: None,
             }],
         }
+    }
+
+    #[test]
+    fn native_gemini_profiles_require_credential_reference_and_https() {
+        let mut catalog = example();
+        catalog.providers[0].wire = Some(WireProtocol::Gemini);
+        catalog.providers[0].base_url = "https://generativelanguage.googleapis.com/v1beta".into();
+        assert!(catalog.validate().is_err());
+        catalog.providers[0].api_key_env = Some("GEMINI_API_KEY".into());
+        assert!(catalog.validate().is_ok());
+        catalog.providers[0].base_url = "http://api.example/v1beta".into();
+        assert!(catalog.validate().is_err());
+        catalog.providers[0].base_url = "https://generativelanguage.googleapis.com/v1beta".into();
+        catalog.providers[0].chat_path = Some("/chat/completions".into());
+        assert!(catalog.validate().is_err());
     }
 
     #[test]
