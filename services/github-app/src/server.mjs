@@ -81,6 +81,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
   const events = [];
   const deliveries = new Map();
   const subscribers = new Set();
+  const desktopPairings = new Map();
+  const desktopSessions = new Map();
   const isSecure = new URL(settings.origin).protocol === 'https:';
 
   function sessionFor(req) {
@@ -128,6 +130,42 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       if (client.installations.has(event.installationId)) {
         client.res.write('event: github\n' + 'data: ' + JSON.stringify(event) + '\n\n');
       }
+    }
+  }
+
+  // Native desktop pairing is a deliberately read-only bridge. GitHub OAuth
+  // credentials remain in the Node broker, never in Tauri's webview.
+  function requireLoopback(req) {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+      throw bad('desktop bridge accepts loopback connections only', 403);
+    }
+  }
+  function requireDesktop(req) {
+    requireLoopback(req);
+    const auth = String(req.headers.authorization || '');
+    const match = /^Bearer ([A-Za-z0-9_-]{32,128})$/.exec(auth);
+    if (!match) throw bad('desktop pairing required', 401);
+    const desktop = desktopSessions.get(match[1]);
+    if (!desktop || Date.now() > desktop.expires) {
+      desktopSessions.delete(match[1]);
+      throw bad('desktop session expired', 401);
+    }
+    const session = sessions.get(desktop.sessionId);
+    if (!session || Date.now() > session.expires || !session.user || !session.token) {
+      desktopSessions.delete(match[1]);
+      throw bad('desktop GitHub sign-in expired', 401);
+    }
+    if (!settings.allowedUsers.includes(session.user.login.toLowerCase())) {
+      throw bad('desktop user not permitted', 403);
+    }
+    return session;
+  }
+  function expireDesktopEntries() {
+    for (const [code, item] of desktopPairings) {
+      if (item.expires <= Date.now() || !sessions.has(item.sessionId)) desktopPairings.delete(code);
+    }
+    for (const [token, item] of desktopSessions) {
+      if (item.expires <= Date.now() || !sessions.has(item.sessionId)) desktopSessions.delete(token);
     }
   }
 
@@ -234,6 +272,70 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       csrf(req, session);
       sessions.delete(cookieId(req));
       return json(res, 200, { connected: false });
+    }
+    // Creating a pairing code requires the signed-in browser cookie AND
+    // anti-CSRF header. Pairing codes never appear in URLs or logs.
+    if (req.method === 'POST' && path === '/api/desktop/pair') {
+      requireLoopback(req);
+      const session = requireUser(req);
+      csrf(req, session);
+      expireDesktopEntries();
+      if (desktopPairings.size >= 20) throw bad('too many pending desktop pairings', 429);
+      const code = random();
+      desktopPairings.set(code, { sessionId: cookieId(req), expires: Date.now() + 5 * 60_000 });
+      return json(res, 201, { code, expiresSeconds: 300 });
+    }
+    if (req.method === 'POST' && path === '/api/desktop/exchange') {
+      requireLoopback(req);
+      const body = await jsonBody(req);
+      if (typeof body?.code !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.code)) {
+        throw bad('invalid desktop pairing code', 401);
+      }
+      expireDesktopEntries();
+      const item = desktopPairings.get(body.code);
+      desktopPairings.delete(body.code); // single use, including denied attempts
+      if (!item || Date.now() > item.expires) throw bad('desktop code expired', 401);
+      const session = sessions.get(item.sessionId);
+      if (!session || !session.token || !session.user
+        || Date.now() > session.expires
+        || !settings.allowedUsers.includes(session.user.login.toLowerCase())) {
+        throw bad('desktop session unavailable', 401);
+      }
+      if (desktopSessions.size >= 50) throw bad('desktop session limit reached', 429);
+      const token = random();
+      desktopSessions.set(token, { sessionId: item.sessionId, expires: Date.now() + 30 * 60_000 });
+      return json(res, 200, { token, expiresSeconds: 1800 });
+    }
+    if (req.method === 'GET' && path === '/api/desktop/repositories') {
+      const session = requireDesktop(req);
+      const installations = (await client.installations(session.token)).slice(0, 10);
+      const repositories = [];
+      for (const installation of installations) {
+        const owned = (await client.repositories(session.token, installation.id)).slice(0, 30);
+        for (const repo of owned) {
+          repositories.push({
+            installationId: installation.id,
+            repoId: repo.id,
+            name: String(repo.full_name || '').slice(0, 180),
+          });
+        }
+      }
+      return json(res, 200, { repositories: repositories.slice(0, 100) });
+    }
+    if (req.method === 'GET' && path === '/api/desktop/queue') {
+      const session = requireDesktop(req);
+      const installationId = url.searchParams.get('installationId');
+      const repoId = url.searchParams.get('repoId');
+      const authorized = await client.authorizedRepo(session.token, installationId, repoId);
+      const [pulls, issues] = await Promise.all([
+        client.view(session.token, installationId, repoId, 'pulls'),
+        client.view(session.token, installationId, repoId, 'issues'),
+      ]);
+      return json(res, 200, {
+        repository: String(authorized.full_name || '').slice(0, 180),
+        pulls: Array.isArray(pulls) ? pulls.slice(0, 30) : [],
+        issues: Array.isArray(issues) ? issues.slice(0, 30) : [],
+      });
     }
     if (req.method === 'GET' && path === '/api/installations') {
       const session = requireUser(req);
