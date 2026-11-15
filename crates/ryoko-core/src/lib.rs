@@ -15,8 +15,8 @@ pub mod diagnostic;
 pub mod error;
 pub mod event;
 pub mod iacp;
-pub mod memory;
 pub mod mcp;
+pub mod memory;
 pub mod model;
 pub mod orchestrator;
 pub mod team;
@@ -38,8 +38,8 @@ pub use iacp::{
     AuditEntry, IacpEnvelope, IacpError, IacpPayload, IacpPolicy, IacpRouter, IacpService,
     RoutedMessage,
 };
-pub use memory::SharedMemory;
 pub use mcp::{McpApprovalGate, McpClient, McpError, McpTool, McpTransport};
+pub use memory::SharedMemory;
 pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
 pub use orchestrator::{
     OrchestrationReport, Orchestrator, OrchestratorConfig, SkippedTask, TaskFailure, TaskSuccess,
