@@ -141,7 +141,23 @@ impl ModelRouter {
             model: requested_model,
             ..Completion::default()
         };
-        collect_stream(stream, &mut completion).await?;
+        if let Some(remaining) = self.ledger.remaining_time() {
+            match tokio::time::timeout(remaining, collect_stream(stream, &mut completion)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(ModelError::LatencyBudgetExceeded {
+                        budget_secs: self
+                            .ledger
+                            .budget()
+                            .and_then(|budget| budget.limit_seconds)
+                            .unwrap_or(0),
+                        elapsed_ms: self.ledger.elapsed().as_millis() as u64,
+                    });
+                }
+            }
+        } else {
+            collect_stream(stream, &mut completion).await?;
+        }
         Ok(completion)
     }
 

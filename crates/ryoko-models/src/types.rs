@@ -348,8 +348,17 @@ pub enum ModelError {
     #[error("provider `{provider}` reported an error: {message}")]
     Provider { provider: String, message: String },
 
-    #[error("token budget of ${budget_usd:.4} exhausted (spent ${spent_usd:.4})")]
+    #[error("dollar budget of ${budget_usd:.4} exhausted (spent ${spent_usd:.4})")]
     BudgetExceeded { budget_usd: f64, spent_usd: f64 },
+
+    #[error("token budget of {budget_tokens} exhausted (spent {spent_tokens})")]
+    TokenBudgetExceeded {
+        budget_tokens: u64,
+        spent_tokens: u64,
+    },
+
+    #[error("latency budget of {budget_secs}s exhausted (elapsed {elapsed_ms}ms)")]
+    LatencyBudgetExceeded { budget_secs: u64, elapsed_ms: u64 },
 
     #[error("model request was cancelled")]
     Cancelled,
