@@ -27,13 +27,21 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
                 if header_bytes == 0 && line.is_empty() {
                     return Ok(None);
                 }
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete LSP header"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "incomplete LSP header",
+                ));
             }
-            let n = available.iter().position(|byte| *byte == b'\n')
+            let n = available
+                .iter()
+                .position(|byte| *byte == b'\n')
                 .map_or(available.len(), |i| i + 1);
             header_bytes += n;
             if header_bytes > MAX_HEADERS_BYTES {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "LSP headers exceed the limit"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "LSP headers exceed the limit",
+                ));
             }
             line.extend_from_slice(&available[..n]);
             reader.consume(n);
@@ -50,7 +58,10 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
         let lower = header.to_ascii_lowercase();
         if let Some(value) = lower.strip_prefix("content-length:") {
             if length.is_some() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "duplicate Content-Length"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "duplicate Content-Length",
+                ));
             }
             let parsed = value.trim().parse::<usize>().map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "invalid Content-Length")
@@ -61,7 +72,10 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     let length = length
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length"))?;
     if length > MAX_FRAME_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "LSP frame exceeds size limit"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "LSP frame exceeds size limit",
+        ));
     }
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
