@@ -87,6 +87,20 @@ cargo run -p ryoko-cli -- run --repo . --sandbox-backend docker \
 
 The intentionally dangerous `--unsafe-host-check` escape hatch is restricted to trusted projects and emits a warning; it is never chosen automatically. Use the same flags for `ryoko review` when revising a task. The container image is not pulled during validation; build it before running Ryoko. See `docs/security/EXECUTION_SANDBOX.md` for known limitations and outstanding security gates. Before acceptance, every proposal is also secret-scanned; `cargo audit` and `npm audit` run when their manifests, lockfiles and tools are available. Findings block the merge, while missing audit tools are reported as skipped rather than clean. Pass `--budget-usd`, `--budget-tokens` or `--budget-secs` for an overall run cap, and `--task-budget-usd`, `--task-budget-tokens` or `--task-budget-secs` to cap each DAG task independently. The ledger checks before dispatch; one in-flight request can still cross a cap because its size and price are unknown until the response arrives.
 
+## Executable multi-agent DAG (experimental)
+
+Pass `--team` to `ryoko run` to execute Architect → Backend → (QA and Security in parallel) using the existing task DAG, with `--max-concurrency 1..4`. Each role makes a real model call, proposes code and tests, runs a container-backed pre-flight check, and publishes an independently reviewable Git branch. Backend inherits Architect's *validated published commit*; QA and Security inherit Backend. Failed dependencies are skipped rather than rerun from stale source. The original checkout is never edited automatically.
+
+Run with an explicit reviewed OCI image and configured model, for example:
+```sh
+ryoko run --team --max-concurrency 2 --repo . \
+  --config ryoko.providers.json --model local/qwen2.5-coder \
+  --sandbox-image reviewed-offline-toolchain:latest \
+  --event-log .ryoko/events/team.jsonl "Implement rate-limited authentication"
+```
+
+**Review boundary:** QA and Security are separate sibling branches. Ryoko does not silently combine their changes or automatically merge to `main`; use `ryoko review --task <id>` and resolve any overlapping edits. Multiple independent dependency branches fail closed until an explicit integration step exists. Mission Control displays per-task ledger token totals and validation logs, but raw provider prompts and verified charges are deliberately *not* stored in the event log.
+
 ## Desktop Mission Control
 
 The desktop app can inspect local agent orchestration events recorded as JSONL.
