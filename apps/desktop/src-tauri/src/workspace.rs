@@ -115,11 +115,15 @@ pub fn read_file(path: String, state: State<'_, WorkspaceState>) -> Result<Strin
 pub fn write_file(
     path: String,
     content: String,
+    expected_content: String,
     state: State<'_, WorkspaceState>,
 ) -> Result<(), String> {
     let root = current_root(&state)?;
     if content.len() as u64 > MAX_FILE_BYTES {
         return Err(format!("refusing to write more than 2 MiB: {path}"));
+    }
+    if expected_content.len() as u64 > MAX_FILE_BYTES {
+        return Err("expected file version exceeds 2 MiB".to_owned());
     }
     let candidate = safe_join(&root, &path)?;
     let parent = candidate
@@ -145,6 +149,17 @@ pub fn write_file(
         }
     }
 
+    // Never silently replace edits made outside Ryoko since the file was
+    // opened. This is a best-effort optimistic-concurrency guard; robust
+    // multi-process atomic compare-and-swap needs OS-specific primitives.
+    let current = fs::read_to_string(&target)
+        .map_err(|error| format!("cannot verify current file {path}: {error}"))?;
+    if current != expected_content {
+        return Err(format!(
+            "file changed on disk since it was opened; reload or compare before saving: {path}"
+        ));
+    }
+
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -168,13 +183,9 @@ pub fn write_file(
         let _ = fs::remove_file(&temp);
         return Err(format!("cannot save {path}: {error}"));
     }
-    // Windows cannot rename over an existing file; Unix gets an atomic replace.
-    if cfg!(windows) && target.exists() {
-        if let Err(error) = fs::remove_file(&target) {
-            let _ = fs::remove_file(&temp);
-            return Err(format!("cannot replace {path}: {error}"));
-        }
-    }
+    // Avoid the destructive delete-before-rename fallback on Windows: a failed
+    // rename must never remove the existing document. Windows native atomic
+    // replacement will need a dedicated implementation for full parity.
     fs::rename(&temp, &target).map_err(|error| {
         let _ = fs::remove_file(&temp);
         format!("cannot save {path}: {error}")
