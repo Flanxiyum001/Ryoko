@@ -88,3 +88,13 @@ process, not in the browser.
   external binary next to the app executable.
 - Builds are unsigned until certificate secrets are configured; do not present
   unsigned artifacts as release-ready.
+
+
+## Mission Control event logs
+
+The desktop exposes read-only `list_mission_logs` and `read_mission_log`
+commands. They access only `.ryoko/events/*.jsonl` in the currently opened
+workspace, reject path traversal, disallow symlinks outside the workspace,
+and bound log reads to 4 MiB. The panel never executes event payloads or
+accepts agent-supplied executable paths. Enable optional logging with
+`ryoko run --event-log .ryoko/events/run.jsonl`.
