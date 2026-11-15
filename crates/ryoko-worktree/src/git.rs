@@ -1239,10 +1239,56 @@ impl WorkspaceProvider for GitWorktreeManager {
         task: &Task,
         agent: &AgentIdentity,
     ) -> CoreResult<Arc<dyn WorkspaceLease>> {
+        // A dependent task must fork the validated parent commit. Failing
+        // closed on multiple parents avoids silently dropping sibling edits.
+        if task.dependencies.len() > 1 {
+            return Err(CoreError::Workspace(
+                "multiple worktree dependencies need an explicit integration branch".into(),
+            ));
+        }
+        let parent_head = if let Some(parent_id) = task.dependencies.first() {
+            let record = self
+                .load_session(*parent_id)
+                .map_err(CoreError::from)?
+                .ok_or_else(|| CoreError::Workspace("dependency worktree missing".into()))?;
+            if record.state != WorktreeState::Published {
+                return Err(CoreError::Workspace(
+                    "dependency has not published validated changes".into(),
+                ));
+            }
+            let head = record.head_commit.ok_or_else(|| {
+                CoreError::Workspace("dependency has no published commit".into())
+            })?;
+            let current = self
+                .checked(
+                    "verify dependency ref",
+                    &["rev-parse", &format!("refs/heads/{}", record.session.branch_name)],
+                    &self.base_project_path,
+                )
+                .await
+                .map_err(CoreError::from)?;
+            if head != current {
+                return Err(CoreError::Workspace(
+                    "dependency branch changed since validation".into(),
+                ));
+            }
+            Some(head)
+        } else {
+            None
+        };
         let session = self
             .create_worktree(&agent.name, task.id)
             .await
             .map_err(CoreError::from)?;
+        if let Some(head) = parent_head {
+            if let Err(error) = self
+                .checked("inherit validated parent", &["reset", "--hard", &head], &session.path)
+                .await
+            {
+                let _ = self.abandon_worktree(&session).await;
+                return Err(CoreError::from(error));
+            }
+        }
         let root = tokio::fs::canonicalize(&session.path)
             .await
             .unwrap_or_else(|_| session.path.clone());
@@ -1601,6 +1647,41 @@ mod tests {
         assert_eq!(sanitize_agent_id("senior dev/01").unwrap(), "senior-dev-01");
         assert_eq!(sanitize_agent_id("../../etc").unwrap(), "etc");
         assert!(sanitize_agent_id("").is_err());
+    }
+
+    #[tokio::test]
+    async fn dependent_agent_inherits_published_parent_commit() {
+        let (_dir, manager) = repo().await;
+        let parent = Task::new("architecture", AgentRole::SeniorDeveloper);
+        let session = manager.create_worktree("architect", parent.id).await.unwrap();
+        tokio::fs::write(session.path.join("architecture.txt"), "contract")
+            .await
+            .unwrap();
+        manager.publish_worktree(&session, "architecture").await.unwrap();
+        manager.clean_worktree(&session).await.unwrap();
+
+        let task = Task::new("tests", AgentRole::QaEngineer).depends_on(&parent);
+        let identity = AgentIdentity::new(AgentRole::QaEngineer, "qa", "tests");
+        let lease = manager.allocate(&task, &identity).await.unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(lease.root().join("architecture.txt"))
+                .await
+                .unwrap(),
+            "contract"
+        );
+        lease.discard().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unpublished_dependency_is_rejected_without_new_worktree() {
+        let (_dir, manager) = repo().await;
+        let parent = Task::new("architecture", AgentRole::SeniorDeveloper);
+        let session = manager.create_worktree("architect", parent.id).await.unwrap();
+        let child = Task::new("tests", AgentRole::QaEngineer).depends_on(&parent);
+        let identity = AgentIdentity::new(AgentRole::QaEngineer, "qa", "tests");
+        assert!(manager.allocate(&child, &identity).await.is_err());
+        assert!(manager.load_session(child.id).unwrap().is_none());
+        manager.abandon_worktree(&session).await.unwrap();
     }
 
     #[tokio::test]
