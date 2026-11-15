@@ -1283,18 +1283,17 @@ impl WorkspaceProvider for GitWorktreeManager {
             .create_worktree(&agent.name, task.id)
             .await
             .map_err(CoreError::from)?;
-        if let Some(head) = parent_head {
-            if let Err(error) = self
+        if let Some(head) = parent_head
+            && let Err(error) = self
                 .checked(
                     "inherit validated parent",
                     &["reset", "--hard", &head],
                     &session.path,
                 )
                 .await
-            {
-                let _ = self.abandon_worktree(&session).await;
-                return Err(CoreError::from(error));
-            }
+        {
+            let _ = self.abandon_worktree(&session).await;
+            return Err(CoreError::from(error));
         }
         let root = tokio::fs::canonicalize(&session.path)
             .await
