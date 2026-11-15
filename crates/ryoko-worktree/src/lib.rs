@@ -8,8 +8,11 @@
 //! a patch, and merging requires a passed validation report.
 
 pub mod git;
+pub mod hunks;
 
 pub use git::{
     GitWorktreeManager, MergeReceipt, WorktreeDiff, WorktreeError, WorktreePullRequest,
     WorktreeRecord, WorktreeSession, WorktreeState,
 };
+
+pub use hunks::{HunkPatch, ReviewHunk};
