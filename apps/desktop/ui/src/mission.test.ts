@@ -43,7 +43,7 @@ describe('mission event log', () => {
 
   it('tracks per-task token usage', () => {
     const usage = '{"type":"task_usage","task_id":"b","requests":2,"input_tokens":420,"output_tokens":125,"ledger_cost_usd":0.03}';
-    const task = reduceMissionEvents(parseMissionLog(log + '\\n' + usage)).tasks[1];
+    const task = reduceMissionEvents(parseMissionLog([log, usage].join(String.fromCharCode(10)))).tasks[1];
     expect(task.usage).toEqual({
       requests: 2,
       inputTokens: 420,
