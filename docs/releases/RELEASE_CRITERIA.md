@@ -71,3 +71,45 @@ unverifiable attestation path, or a documented boundary without a regression tes
 
 No merge, publish, deploy or release step happens automatically from an agent
 proposal.
+
+
+## Desktop installer signing gate (workflow-ready, credentials not supplied)
+
+The \`Desktop installers\` Actions workflow now requires real platform signing
+material and refuses to emit macOS or Windows installer artifacts if credentials
+are missing. This is a release gate; it is **not evidence that a certificate
+has been installed or that installers have been signed**.
+
+Configure GitHub Actions secrets using the repository's encrypted Secrets and
+Variables controls. Do **not** add certificates/passwords to source files:
+
+| Platform | Secret | Meaning |
+| --- | --- | --- |
+| macOS | \`APPLE_CERTIFICATE\` | Base64 Developer ID Application \`.p12\` |
+| macOS | \`APPLE_CERTIFICATE_PASSWORD\` | P12 export password |
+| macOS | \`APPLE_SIGNING_IDENTITY\` | Verified Developer ID signing identity |
+| macOS | \`APPLE_ID\` | Notarization Apple ID |
+| macOS | \`APPLE_PASSWORD\` | App-specific Apple notarization password |
+| macOS | \`APPLE_TEAM_ID\` | Apple developer team |
+| macOS | \`KEYCHAIN_PASSWORD\` | Ephemeral runner keychain password |
+| Windows | \`WINDOWS_CERTIFICATE\` | Base64 signing \`.pfx\` |
+| Windows | \`WINDOWS_CERTIFICATE_PASSWORD\` | PFX export password |
+
+On macOS the workflow imports the signing certificate into a temporary
+keychain, invokes Tauri with notarization credentials and requires both
+\`codesign --verify\` and Gatekeeper \`spctl --assess\` to pass. On Windows it
+imports the PFX, constructs an ephemeral Tauri configuration containing the
+certificate thumbprint, signs installers and verifies Authenticode on the MSI
+and EXE outputs. The build stops instead of publishing unsigned artifacts.
+
+**Before triggering a release:** protect the signing credentials using a
+GitHub Environment with required reviewers, validate the requested
+\`desktop-v*\` tag/version and run the installer build matrix on actual Windows
+and macOS runners. A certificate does not guarantee the absence of all
+Windows SmartScreen warnings (publisher reputation still matters).
+
+**Updater not enabled yet.** Tauri's updater requires an operator-generated
+public update-signing key and controlled HTTPS update feed, plus compatible
+dependency lockfiles and runtime wiring. Never bundle a placeholder public key
+or generate update signatures with unrelated ephemeral keys. Configure and
+test key rotation, signed manifests and rollback before enabling auto-update.
