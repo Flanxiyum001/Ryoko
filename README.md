@@ -117,7 +117,7 @@ See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) a
 
 ## Desktop app
 
-`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` over a stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server.
+`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` over a stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server. Writes to sensitive paths (`.env*`, CI workflows, credential files) additionally require an OS-native, one-time confirmation before any filesystem mutation; cancellation denies the write. This does not yet gate arbitrary agent shell/network actions, which are not exposed through the current desktop IPC.
 
     cargo build -p ryoko-native --bin ryoko-lsp
     cd apps/desktop
