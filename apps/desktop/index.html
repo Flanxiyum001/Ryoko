@@ -119,7 +119,10 @@ Write operations are reviewed through the Approval Queue.</pre>
         <section class="view" id="view-settings" aria-label="GitHub App setup">
           <div class="section-title"><div><h2>Connection and permissions</h2><p>Security first. GitHub credentials never belong in frontend source code.</p></div></div>
           <div class="settings-grid">
-            <article class="panel"><h3>Connection</h3><div id="accountDetails" class="subtle">Not connected</div><p class="permission-note">Access is limited to repositories selected during GitHub App installation and granted by that user.</p></article>
+            <article class="panel"><h3>Connection</h3><div id="accountDetails" class="subtle">Not connected</div>
+              <button id="pairDesktop" class="button ghost hidden" type="button">Pair native desktop (read-only)…</button>
+              <p id="pairDesktopCode" class="subtle" aria-live="polite">Pairing codes expire after five minutes; never share them.</p>
+              <p class="permission-note">Access is limited to repositories selected during GitHub App installation and granted by that user.</p></article>
             <article class="panel"><h3>Getting started</h3><ol class="setup-steps"><li>Register Ryoko as a GitHub App with selected repositories.</li><li>Configure App ID, client ID, client secret, webhook secret and server-side private key.</li><li>Sign in and choose an installation.</li><li>Inspect repositories, agent worktrees and pending approvals here.</li></ol><p class="subtle">See docs/GITHUB_APP.md for exact permissions and deployment requirements.</p></article>
             <article class="panel"><h3>Permission model</h3><div class="permission-list"><span>Repository metadata</span><b>Read</b><span>Contents</span><b>Read / approved write</b><span>Issues & PRs</span><b>Read / approved write</b><span>Checks & Actions</span><b>Read</b><span>Workflows & admin</span><b>Not requested</b></div></article>
             <article class="panel"><h3>Workbench appearance</h3><p class="subtle">Dark by default with a light theme and reduced-motion support. No analytics or personal project data is sent from this UI outside its selected GitHub integration.</p></article>
