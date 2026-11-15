@@ -56,6 +56,24 @@
             <p class="hint">Select a task to inspect its brief, validation and output.</p>
           </div>
         </section>
+        <details class="github-queue">
+          <summary>GITHUB PR / ISSUE QUEUE <span id="githubQueueCount" class="counter">not connected</span></summary>
+          <div class="github-pair">
+            <p class="hint">Sign in to the local GitHub App workbench, select “Pair native desktop”, then paste its single-use code here. OAuth secrets stay server-side.</p>
+            <label class="sr-only" for="githubPairCode">Single-use GitHub desktop code</label>
+            <input id="githubPairCode" type="password" autocomplete="off" spellcheck="false" placeholder="Single-use pairing code">
+            <button id="githubPair" class="button ghost compact" type="button">Pair read-only</button>
+          </div>
+          <div class="github-queue-toolbar">
+            <label class="sr-only" for="githubRepo">Authorized GitHub repository</label>
+            <select id="githubRepo" aria-label="Authorized GitHub repository"></select>
+            <button id="githubRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="githubUnpair" class="button ghost compact" type="button">Disconnect</button>
+          </div>
+          <div id="githubQueueList" class="github-queue-list">
+            <p class="hint">No repository queue loaded.</p>
+          </div>
+        </details>
         <div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
         <div id="problemList" class="problem-list">
           <p class="hint">No diagnostics yet.</p>
