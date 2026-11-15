@@ -21,6 +21,7 @@ Copy `configs/providers.example.json` to your own file, then edit the provider I
 ```sh
 export RYOKO_OPENAI_API_KEY="your-key-from-provider"
 cargo run -p ryoko-cli -- providers --config configs/providers.example.json
+cargo run -p ryoko-cli -- discover-local  # probes only local Ollama / LM Studio
 cargo run -p ryoko-cli -- roles
 cargo run -p ryoko-cli -- plan --goal "Build a collaborative task manager"
 cargo run -p ryoko-cli -- ask --config configs/providers.example.json --model ollama/qwen2.5-coder --prompt "Design a REST API for tasks"
@@ -75,7 +76,26 @@ cargo run -p ryoko-cli -- run \
 cargo run -p ryoko-cli -- review --repo .
 ```
 
-`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust. Before acceptance, every proposal is also secret-scanned; `cargo audit` and `npm audit` run when their manifests, lockfiles and tools are available. Findings block the merge, while missing audit tools are reported as skipped rather than clean. Pass `--budget-usd`, `--budget-tokens` or `--budget-secs` for an overall run cap, and `--task-budget-usd`, `--task-budget-tokens` or `--task-budget-secs` to cap each DAG task independently. The ledger checks before dispatch; one in-flight request can still cross a cap because its size and price are unknown until the response arrives. Pass `--event-log .ryoko/events/run.jsonl` to record orchestrator events for the desktop Mission Control panel; the log stays inside the repository and contains task descriptions and agent output.
+`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. Pre-flight commands now run in a Docker or Podman Linux container by default, **never directly on the host**. The operator must provide an offline-ready OCI image with the project's compiler and dependencies using `--sandbox-image`; otherwise validation refuses to run. Containers get only the worktree bind mount (read/write for build outputs), no network, no inherited secrets, a read-only root filesystem, dropped Linux capabilities and CPU/memory/process/time limits. For example:
+
+```sh
+# Prepare and review the image separately. Test dependencies must be baked in:
+cargo run -p ryoko-cli -- run --repo . --sandbox-backend docker \
+  --sandbox-image my-reviewed-test-image:2026-11 --config configs/providers.example.json \
+  --model ollama/qwen2.5-coder "Fix the parser tests"
+```
+
+The intentionally dangerous `--unsafe-host-check` escape hatch is restricted to trusted projects and emits a warning; it is never chosen automatically. Use the same flags for `ryoko review` when revising a task. The container image is not pulled during validation; build it before running Ryoko. See `docs/security/EXECUTION_SANDBOX.md` for known limitations and outstanding security gates. Before acceptance, every proposal is also secret-scanned; `cargo audit` and `npm audit` run when their manifests, lockfiles and tools are available. Findings block the merge, while missing audit tools are reported as skipped rather than clean. Pass `--budget-usd`, `--budget-tokens` or `--budget-secs` for an overall run cap, and `--task-budget-usd`, `--task-budget-tokens` or `--task-budget-secs` to cap each DAG task independently. The ledger checks before dispatch; one in-flight request can still cross a cap because its size and price are unknown until the response arrives.
+
+## Desktop Mission Control
+
+The desktop app can inspect local agent orchestration events recorded as JSONL.
+Use the optional `--event-log .ryoko/events/run.jsonl` flag with a sandboxed
+`ryoko run` invocation (and a reviewed `--sandbox-image`). The Mission
+Control panel displays task dependencies, attempts, validation results, and
+outputs. Logging is disabled by default; logs can contain task descriptions
+and should remain private. The desktop reader rejects log files that escape
+the selected workspace and limits each displayed log to 4 MiB.
 
 ## Provider configuration
 
@@ -107,7 +127,7 @@ The root workspace is organized as follows:
 | `ryoko-models` | Provider routing, normalized messages and streaming, usage accounting |
 | `ryoko-core` | Task DAG, agent lifecycle, IACP messages, memory, permissions and tree-sitter context extraction |
 | `ryoko-worktree` | Isolated task Git worktrees and reviewable internal change proposals |
-| `ryoko-sandbox` | WASI-enabled WASM test artifact execution with no host preopens, not a general app runner |
+| `ryoko-sandbox` | WASI guardrail plus restricted Docker/Podman pre-flight execution; not a VM |
 | `ryoko-cli` | Terminal-facing provider setup, team preview, isolated generation and human review |
 | `ryoko-native` | `tower-lsp` language server and agent diagnostic publisher |
 | `ryoko-vfs` | Incremental virtual document store used by the language server |
@@ -117,7 +137,7 @@ See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) a
 
 ## Desktop app
 
-`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` over a stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server.
+`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` over a stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server. Writes to sensitive paths (`.env*`, CI workflows, credential files) additionally require an OS-native, one-time confirmation before any filesystem mutation; cancellation denies the write. This does not yet gate arbitrary agent shell/network actions, which are not exposed through the current desktop IPC.
 
     cargo build -p ryoko-native --bin ryoko-lsp
     cd apps/desktop
