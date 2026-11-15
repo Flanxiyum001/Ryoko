@@ -501,7 +501,13 @@ async fn execute_task(
             Ok(result) => result,
             Err(err) => TaskResult::failure(task.id, err.to_string()),
         };
-        if let Some(usage) = ctx.models.ledger().snapshot().by_task.get(&task.id.to_string()) {
+        if let Some(usage) = ctx
+            .models
+            .ledger()
+            .snapshot()
+            .by_task
+            .get(&task.id.to_string())
+        {
             events.emit(OrchestratorEvent::TaskUsage {
                 task_id: task.id,
                 requests: usage.requests,
