@@ -25,8 +25,8 @@ desktop shell builds independently while the sidecar reuses the domain crates.
 
 | Part | Owns |
 | --- | --- |
-| `src-tauri` | Window lifetime, workspace file commands, Mission Control event-log reads, `ryoko-lsp` process lifecycle and framing, capability scopes |
-| `ui/` | Monaco models, explorer, editor keybindings, LSP JSON-RPC client, problems view, Mission Control graph |
+| `src-tauri` | Window lifetime, workspace file commands, `ryoko-lsp` process lifecycle and framing, capability scopes |
+| `ui/` | Monaco models, explorer, editor keybindings, LSP JSON-RPC client, problems view |
 
 ### Commands
 
@@ -38,8 +38,6 @@ write_file(path, content)       atomic save, max 2 MiB, refuses symlink escapes
 lsp_start(root)                 spawns ryoko-lsp with piped stdio
 lsp_send(message)               validates JSON, writes one Content-Length frame
 lsp_stop()                      terminates the language server
-list_mission_logs()             bounded .ryoko/events/*.jsonl list, newest first
-read_mission_log(name)          reads one log by plain filename, max 4 MiB
 ```
 
 `lsp_start` resolves the server from `RYOKO_LSP_BIN`, then a sibling
@@ -51,20 +49,6 @@ The frontend sends `initialize` / `initialized`, `didOpen`, `didChange` and
 `didClose`, and turns `textDocument/publishDiagnostics` into Monaco markers and
 a problems list. Documents therefore live in `ryoko-vfs` inside the server
 process, not in the browser.
-
-### Mission Control
-
-`ryoko run --event-log .ryoko/events/run.jsonl` writes `OrchestratorEvent`
-values as one JSON object per line. The panel polls the newest log in that
-directory, reduces the events into task nodes, and lays dependencies out in
-columns. Selecting a node shows its brief, attempts, agent, validation summary
-and logs, pull request, output and error. The event log is written beneath the
-repository root, is created exclusively with private permissions, and is
-capped at 8 MiB; the shell reads plain `.jsonl` names only, capped at 4 MiB.
-
-This first milestone is deliberately read-only. Pause, reroute, and live control
-of a running orchestrator require an authenticated control channel and are not
-implemented yet.
 
 ### Security
 
@@ -89,7 +73,8 @@ implemented yet.
 
 ## Not implemented yet
 
-- Mission Control pause/reroute controls and per-agent token telemetry.
+- Task DAG visualizer and per-agent token telemetry (requires persisted
+  orchestrator events).
 - Side-by-side worktree hunk review (the CLI still accepts or rejects a whole
   patch).
 - Signing/notarisation credentials and automatic release publishing.
@@ -103,3 +88,13 @@ implemented yet.
   external binary next to the app executable.
 - Builds are unsigned until certificate secrets are configured; do not present
   unsigned artifacts as release-ready.
+
+
+## Mission Control event logs
+
+The desktop exposes read-only `list_mission_logs` and `read_mission_log`
+commands. They access only `.ryoko/events/*.jsonl` in the currently opened
+workspace, reject path traversal, disallow symlinks outside the workspace,
+and bound log reads to 4 MiB. The panel never executes event payloads or
+accepts agent-supplied executable paths. Enable optional logging with
+`ryoko run --event-log .ryoko/events/run.jsonl`.
