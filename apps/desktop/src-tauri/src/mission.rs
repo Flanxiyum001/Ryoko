@@ -170,7 +170,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!("ryoko-mission-{}-{stamp}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("ryoko-mission-{}-{stamp}", std::process::id()));
         let outside = base.with_extension("outside");
         std::fs::create_dir_all(base.join(".ryoko")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
