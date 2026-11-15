@@ -1,5 +1,6 @@
-//! End-to-end test: a task that passes validation is published to an LSP
-//! client over the same byte-stream framing `ryoko-lsp` uses on stdio.
+//! End-to-end tests: a task that passes validation, and a task whose validation
+//! never passes, are published to an LSP client over the same byte-stream
+//! framing `ryoko-lsp` uses on stdio.
 //!
 //! The server side is `ryoko_native::lsp_service` driven by `tower_lsp::Server`
 //! on a duplex stream pair, so the assertions are made against real
@@ -13,7 +14,10 @@ use ryoko_core::agent::{AgentRuntime, TaskContext};
 use ryoko_core::model::{
     AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult,
 };
-use ryoko_core::{AllowAllValidator, InMemoryWorkspaceProvider, Orchestrator};
+use ryoko_core::{
+    AllowAllValidator, ChangeValidator, CoreResult, InMemoryWorkspaceProvider, Orchestrator,
+    OrchestratorConfig, StagedChanges, ValidationReport,
+};
 use ryoko_models::ModelRouter;
 use ryoko_native::{Url, diagnostic_channel, lsp_service};
 use serde_json::{Value, json};
@@ -176,6 +180,123 @@ async fn validated_task_diagnostic_reaches_lsp_client() {
     assert_eq!(
         finding["range"]["start"],
         json!({ "line": 0, "character": 0 })
+    );
+
+    send(
+        &mut client_write,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "shutdown" }),
+    )
+    .await;
+    let shutdown = receive(&mut client).await;
+    assert_eq!(shutdown["id"], json!(2));
+    send(
+        &mut client_write,
+        json!({ "jsonrpc": "2.0", "method": "exit" }),
+    )
+    .await;
+    drop(client_write);
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+}
+
+struct RejectingValidator;
+
+#[async_trait]
+impl ChangeValidator for RejectingValidator {
+    async fn validate(&self, _changes: &StagedChanges) -> CoreResult<ValidationReport> {
+        Ok(ValidationReport::failed(
+            "cargo test failed",
+            vec!["assertion failed".to_owned()],
+            Duration::from_millis(1),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn exhausted_validation_reaches_lsp_client_as_an_error() {
+    let project = tempfile::tempdir().expect("temp project");
+    let uri = Url::from_file_path(project.path().join("src/generated.rs")).expect("file uri");
+
+    let (publisher, inbox) = diagnostic_channel();
+    let (_retained, service, socket) = lsp_service(publisher.clone(), inbox);
+
+    let (mut client_write, server_read) = tokio::io::duplex(64 * 1024);
+    let (server_write, client_read) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        Server::new(BufReader::new(server_read), server_write, socket)
+            .serve(service)
+            .await;
+    });
+    let mut client = BufReader::new(client_read);
+
+    send(
+        &mut client_write,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {}, "processId": null, "rootUri": null }
+        }),
+    )
+    .await;
+    let initialize = receive(&mut client).await;
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "ryoko-lsp");
+    send(
+        &mut client_write,
+        json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+    )
+    .await;
+
+    let orchestrator = Orchestrator::new(
+        Arc::new(InMemoryWorkspaceProvider::new("main")),
+        Arc::new(RejectingValidator),
+        Arc::new(ModelRouter::new("mock")),
+    )
+    .with_diagnostic_sink(Arc::new(publisher.clone()))
+    .with_config(OrchestratorConfig {
+        max_concurrency: 1,
+        max_attempts: 2,
+    });
+
+    let identity = AgentIdentity::new(AgentRole::SeniorDeveloper, "rejected-agent", "test agent");
+    let report = orchestrator
+        .run(
+            vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+            vec![Arc::new(ValidatedAgent { identity })],
+            ProjectContext {
+                project_root: project.path().to_string_lossy().into_owned(),
+                ..ProjectContext::default()
+            },
+        )
+        .await
+        .expect("orchestrator run");
+    assert_eq!(report.failed.len(), 1, "every attempt is rejected");
+    assert_eq!(report.failed[0].attempts, 2);
+
+    let published = receive_until(&mut client, |message| {
+        message["method"] == "textDocument/publishDiagnostics"
+            && message["params"]["uri"] == uri.as_str()
+            && message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+    })
+    .await;
+
+    let diagnostics = published["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert_eq!(diagnostics.len(), 1, "one error per rejected file");
+    let finding = &diagnostics[0];
+    assert_eq!(finding["severity"], json!(1), "LSP error severity");
+    assert_eq!(finding["code"], "ryoko.validation.failed");
+    assert_eq!(finding["source"], "ryoko");
+    let message = finding["message"].as_str().expect("message text");
+    assert!(
+        message.contains("validation never passed"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("cargo test failed"),
+        "unexpected message: {message}"
     );
 
     send(
