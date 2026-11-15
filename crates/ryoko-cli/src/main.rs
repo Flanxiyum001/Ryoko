@@ -1,4 +1,6 @@
+mod audit;
 mod check;
+mod context_window;
 mod experience;
 
 use std::collections::HashMap;
@@ -16,8 +18,8 @@ use ryoko_core::{
     team::{application_plan, standard_team},
 };
 use ryoko_models::{
-    ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
-    ProviderProfile,
+    Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
+    ProviderProfile, UsageLedger,
 };
 use ryoko_sandbox::SpecPolicy;
 use ryoko_worktree::{
@@ -29,6 +31,11 @@ use uuid::Uuid;
 
 use crate::check::{CommandValidator, detect_check_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
+
+/// Outline budget shared by the run and review agent contexts.
+const STRUCTURAL_CONTEXT_BYTES: usize = 5_000;
+/// Changed-file body budget for revisions; leaves room for the shared outline.
+const WORKTREE_CONTEXT_BYTES: usize = 6_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -225,10 +232,47 @@ struct ModelArgs {
     /// Prefer RYOKO_API_KEY or OPENAI_API_KEY over passing this flag.
     #[arg(long)]
     api_key: Option<String>,
+    /// Hard USD cap for model calls in this command.
+    #[arg(long)]
+    budget_usd: Option<f64>,
+    /// Hard token cap (input + output) for model calls in this command.
+    #[arg(long)]
+    budget_tokens: Option<u64>,
+    /// Hard wall-clock cap in seconds for this command's model work.
+    #[arg(long)]
+    budget_secs: Option<u64>,
 }
 
 impl ModelArgs {
+    fn ledger(&self) -> Result<UsageLedger, Box<dyn Error>> {
+        let mut budget = Budget::unlimited();
+        let mut limited = false;
+        if let Some(limit) = self.budget_usd {
+            if !limit.is_finite() || limit <= 0.0 {
+                return Err(cli_error("--budget-usd must be a positive finite number"));
+            }
+            budget.limit_usd = limit;
+            limited = true;
+        }
+        if let Some(limit) = self.budget_tokens {
+            if limit == 0 {
+                return Err(cli_error("--budget-tokens must be greater than zero"));
+            }
+            budget.limit_tokens = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.budget_secs {
+            if limit == 0 {
+                return Err(cli_error("--budget-secs must be greater than zero"));
+            }
+            budget.limit_seconds = Some(limit);
+            limited = true;
+        }
+        Ok(UsageLedger::new(limited.then_some(budget)))
+    }
+
     fn load(&self) -> Result<(String, Arc<ModelRouter>), Box<dyn Error>> {
+        let ledger = self.ledger()?;
         let model = self
             .model
             .clone()
@@ -236,7 +280,9 @@ impl ModelArgs {
             .ok_or_else(|| cli_error("set RYOKO_MODEL or pass --model"))?;
         if let Some(config) = &self.config {
             let catalog = load_catalog(config)?;
-            let router = catalog.build_router_for_models([model.as_str()])?;
+            let router = catalog
+                .build_router_for_models([model.as_str()])?
+                .with_ledger(ledger);
             return Ok((model, Arc::new(router)));
         }
         let base_url = self
@@ -272,7 +318,7 @@ impl ModelArgs {
         }
         let provider = OpenAiCompatProvider::new(config)
             .map_err(|error| cli_error(format!("could not configure model provider: {error}")))?;
-        let mut router = ModelRouter::new(provider_id);
+        let mut router = ModelRouter::new(provider_id).with_ledger(ledger);
         router.register(Arc::new(provider));
         Ok((model, Arc::new(router)))
     }
@@ -1001,11 +1047,22 @@ async fn worktree_context(session: &WorktreeSession, diff: &WorktreeDiff) -> Str
         context.push_str(&format!("\n--- {path} ---\n"));
         context.push_str(&truncate(&content, 4_000));
         context.push('\n');
-        if context.len() >= 12_000 {
+        if context.len() >= WORKTREE_CONTEXT_BYTES {
             break;
         }
     }
+    append_structural_outline(&mut context, &session.path);
     context
+}
+
+fn append_structural_outline(context: &mut String, root: &Path) {
+    let structure = context_window::structural_context(root);
+    if structure.is_empty() {
+        return;
+    }
+    context.push_str("\n--- structural outline ---\n");
+    context.push_str(&truncate(&structure, STRUCTURAL_CONTEXT_BYTES));
+    context.push('\n');
 }
 
 fn print_diff(diff: &WorktreeDiff, show_patch: bool) {
@@ -1099,10 +1156,11 @@ async fn project_brief(root: &Path) -> String {
         brief.push_str(&format!("\n--- {name} ---\n"));
         brief.push_str(&truncate(&content, 3_000));
         brief.push('\n');
-        if brief.len() >= 10_000 {
+        if brief.len() >= 5_000 {
             break;
         }
     }
+    append_structural_outline(&mut brief, root);
     if brief.trim().is_empty() {
         "No project manifest was found.".to_owned()
     } else {
@@ -1139,4 +1197,95 @@ fn env(name: &str) -> Option<String> {
 
 fn cli_error(message: impl Into<String>) -> Box<dyn Error> {
     Box::new(IoError::other(message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn project_brief_includes_structural_outline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/App.tsx"),
+            "export function Greeting() {\n  return <h1>Hello</h1>;\n}\n",
+        )
+        .unwrap();
+
+        let brief = project_brief(dir.path()).await;
+        assert!(brief.contains("structural outline"));
+        assert!(brief.contains("### src/App.tsx (tsx)"));
+        assert!(brief.contains("function Greeting"));
+    }
+
+    #[tokio::test]
+    async fn worktree_context_includes_changed_files_and_structural_outline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/App.tsx"),
+            "export function Greeting() {\n  return <h1>Hello</h1>;\n}\n",
+        )
+        .unwrap();
+        let session = WorktreeSession {
+            id: Uuid::new_v4(),
+            agent_id: "test".to_owned(),
+            branch_name: "ryoko/test".to_owned(),
+            path: dir.path().to_path_buf(),
+            base_commit: "0".repeat(40),
+            base_branch: "main".to_owned(),
+        };
+        let diff = WorktreeDiff {
+            files: vec!["src/App.tsx".to_owned()],
+            patch: String::new(),
+        };
+
+        let context = worktree_context(&session, &diff).await;
+        assert!(context.contains("--- src/App.tsx ---"));
+        assert!(context.contains("structural outline"));
+        assert!(context.contains("function Greeting"));
+    }
+
+    fn model_args(usd: Option<f64>, tokens: Option<u64>, secs: Option<u64>) -> ModelArgs {
+        ModelArgs {
+            config: None,
+            model: None,
+            base_url: None,
+            api_key: None,
+            budget_usd: usd,
+            budget_tokens: tokens,
+            budget_secs: secs,
+        }
+    }
+
+    #[test]
+    fn budget_flags_build_a_ledger() {
+        let ledger = model_args(Some(0.5), Some(1_000), Some(30))
+            .ledger()
+            .unwrap();
+        let budget = ledger.budget().unwrap();
+        assert_eq!(budget.limit_usd, 0.5);
+        assert_eq!(budget.limit_tokens, Some(1_000));
+        assert_eq!(budget.limit_seconds, Some(30));
+    }
+
+    #[test]
+    fn no_budget_flags_disable_limits() {
+        assert!(
+            model_args(None, None, None)
+                .ledger()
+                .unwrap()
+                .budget()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_budget_flags() {
+        assert!(model_args(Some(0.0), None, None).ledger().is_err());
+        assert!(model_args(Some(f64::NAN), None, None).ledger().is_err());
+        assert!(model_args(None, Some(0), None).ledger().is_err());
+        assert!(model_args(None, None, Some(0)).ledger().is_err());
+    }
 }

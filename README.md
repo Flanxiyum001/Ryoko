@@ -2,7 +2,7 @@
 
 **Ryoko** is an experimental Rust foundation for a provider-neutral, multi-agent AI IDE. The target experience is a full engineering team—project manager, architect, senior UI/UX, backend, full-stack, security, QA and DevOps—collaborating on a user-defined application, with isolated worktrees and human-reviewed changes.
 
-> **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, WASI test execution and structural context extraction. It does not yet provide a full editor UI, hardened project-specific build isolation or deployment. Do not use its previews as proof of successful implementation.
+> **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, a Tauri desktop shell with a Monaco editor wired to `ryoko-lsp`, WASI test execution and structural context extraction. It does not yet provide a task-DAG visualizer, hunk-level review, hardened project-specific build isolation, signed installers or deployment. Do not use its previews as proof of successful implementation.
 
 The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. Contribution rules are in [`AGENTS.md`](AGENTS.md).
 
@@ -75,7 +75,7 @@ cargo run -p ryoko-cli -- run \
 cargo run -p ryoko-cli -- review --repo .
 ```
 
-`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust.
+`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust. Before acceptance, every proposal is also secret-scanned; `cargo audit` and `npm audit` run when their manifests, lockfiles and tools are available. Findings block the merge, while missing audit tools are reported as skipped rather than clean. Pass `--budget-usd`, `--budget-tokens` or `--budget-secs` to cap model spending and wall-clock time for the command; the ledger checks before dispatch and after each completion, though one in-flight request can still cross a cap because its size and price are unknown until the response arrives.
 
 ## Provider configuration
 
@@ -115,6 +115,19 @@ The root workspace is organized as follows:
 
 See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) and [IACP specification](docs/IACP.md).
 
+## Desktop app
+
+`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` over a stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server.
+
+    cargo build -p ryoko-native --bin ryoko-lsp
+    cd apps/desktop
+    npm ci
+    npm test
+    npm run build
+    RYOKO_LSP_BIN="$PWD/../../target/debug/ryoko-lsp" npm run tauri dev
+
+Without `RYOKO_LSP_BIN`, the shell looks for a `ryoko-lsp` binary next to the app executable (the bundled sidecar); it never resolves the language server from `PATH`. Installers are built by the `Desktop installers` workflow on macOS, Windows and Linux runners; they are unsigned until signing secrets are configured. The browser GitHub workbench at `http://127.0.0.1:4173` is unchanged and still served from the files at the desktop root.
+
 ## Editor integration
 
 The `ryoko-native` crate provides `ryoko-lsp`, a standard LSP server over stdio. Point VS Code, Neovim, Zed or another LSP client at:
@@ -125,7 +138,7 @@ cargo run -p ryoko-native --bin ryoko-lsp
 
 The server supports incremental document sync, diagnostics, code lenses, quick fixes and `ryoko.fix` / `ryoko.explain` / `ryoko.review` commands. An agent host can publish findings through `ryoko_native::diagnostic_channel()`; the server forwards those diagnostics to the editor. It does not start an editor UI or execute editor commands automatically.
 
-`ryoko_core::ContextExtractor` uses tree-sitter to return imports, a symbol outline and targeted Rust function bodies, keeping prompts to the code an agent actually needs.
+`ryoko_core::ContextExtractor` uses tree-sitter to return imports, a symbol outline, intra-file call edges and targeted bodies for Rust, TypeScript/TSX, JavaScript, Python, Go and C/C++. `ryoko run` scans supported source files under the repository root and injects a bounded structural outline into the developer agent's context; the review revise flow includes the same outline alongside the changed file contents.
 
 ## Development
 
