@@ -1,11 +1,43 @@
 # Execution sandbox
 
-Status: `ryoko-sandbox` validates WASM artifacts under fuel, time and memory limits
-with no host filesystem or network preopens. Project build/test commands run on the
-host. A hardened project runner is planned.
+Status: Ryoko has two independent execution paths: WASM artifact validation
+with no host preopens, and a Docker/Podman **container-backed** project
+pre-flight runner. The project runner fails closed if the operator has not
+selected an image or an available runtime. There is no automatic host fallback.
 
-Do not confuse the two. The WASM guardrail validates a submitted artifact; it does
-not isolate `cargo test` against a real project.
+## Container-backed pre-flight checks
+
+An operator supplies an offline-ready image via `--sandbox-image` and can select
+`--sandbox-backend auto|docker|podman`. Ryoko invokes the runtime without
+shell interpretation of runtime arguments. The untrusted test command itself
+runs in `/bin/sh -c` **inside** the container. The runtime does not pull images.
+
+- Only the canonical task worktree is bind-mounted, at `/workspace`, with write access
+  so compilers can emit local build outputs.
+- No host home directory, SSH agent, Docker socket or credential environment
+  variables are passed through.
+- Container networking is disabled; the container root is read-only.
+- All Linux capabilities are dropped and privilege escalation is disabled.
+- PID, memory, CPU, output and timeout limits are applied.
+- The container is named per attempt and forcibly removed after the check.
+- On Unix, the container process uses the invoking user's UID and GID.
+- `--unsafe-host-check` is an explicit escape hatch, intended only for trusted
+  repositories. It is never selected by backend auto-discovery.
+
+**Security boundary and limitations:** This is an initial OCI isolation backend,
+not a disposable VM. Docker/Podman daemon and image supply-chain trust remain
+critical. Worktree bind mounts are writable and not immutable snapshots;
+there is no image digest attestation, disk quota, automatic dependency cache,
+per-task network allowlist or isolated dependency-audit runner yet.
+Windows Docker Desktop bind-mount permissions may require image-specific
+configuration. There is no protection against another host process changing
+the worktree while validation runs. Treat cross-tenant malicious builds as
+requiring a stronger VM-based runner.
+
+Prepare an image with all required Cargo/npm/Python/Go compilers and offline
+dependencies outside of untrusted validation. For reproducibility, pin the
+exact image digest and project lockfiles. Absent dependencies make the check
+fail; the pre-flight runner never enables network access to fetch them.
 
 ## Current guardrail
 
@@ -75,11 +107,11 @@ mount, or the required network or secret access was not approved.
 Worktree acceptance secret-scans every proposed file (matched values are
 redacted) and runs `cargo audit` and `npm audit` when the matching manifest,
 lockfile and tool are present. Findings fail the validation report and therefore
-block merge. Missing audit tools are recorded as skipped, not as clean. This
-does not isolate the pre-flight command, which still runs locally.
+block merge. Missing audit tools are recorded as skipped, not as clean. These audit tool invocations are still host-side and may use network access;
+use a trusted repository or arrange to run them separately in controlled CI.
 
 ## Remaining work
 
-Container/VM backend, runner image build and pinning, artifact export rules, secret
+VM backend, runner image build and pinning, artifact export rules, secret
 injection interface, cancellation that terminates the process tree, and a hostile
 test suite covering escape attempts, symlink tricks, fork bombs and output floods.
