@@ -70,6 +70,14 @@ Refuse to run when: the source hash cannot be computed, the runner image digest 
 unknown, the task has no acceptance command, the command would modify the source
 mount, or the required network or secret access was not approved.
 
+## Pre-merge audits
+
+Worktree acceptance secret-scans every proposed file (matched values are
+redacted) and runs `cargo audit` and `npm audit` when the matching manifest,
+lockfile and tool are present. Findings fail the validation report and therefore
+block merge. Missing audit tools are recorded as skipped, not as clean. This
+does not isolate the pre-flight command, which still runs locally.
+
 ## Remaining work
 
 Container/VM backend, runner image build and pinning, artifact export rules, secret

@@ -69,9 +69,8 @@ impl ChangeValidator for CommandValidator {
                 ));
             }
         };
-        let logs = summarize_output(&output);
+        let mut logs = summarize_output(&output);
         if output.status.success() {
-            let mut logs = logs;
             logs.insert(
                 0,
                 format!(
@@ -80,8 +79,33 @@ impl ChangeValidator for CommandValidator {
                     self.command
                 ),
             );
+            let audit = crate::audit::run_security_audit(root, changes).await;
+            logs.push(format!("security audit: {}", audit.summary()));
+            logs.extend(
+                audit
+                    .notes
+                    .iter()
+                    .map(|note| format!("security audit: {note}")),
+            );
+            if !audit.passed() {
+                for finding in &audit.findings {
+                    logs.push(format!(
+                        "security audit: {} [{}] {}",
+                        finding.source, finding.severity, finding.message
+                    ));
+                }
+                return Ok(ValidationReport::failed(
+                    format!("security audit failed for {}", self.command),
+                    logs,
+                    started.elapsed(),
+                ));
+            }
             Ok(ValidationReport::passed(
-                format!("pre-flight passed: {}", self.command),
+                format!(
+                    "pre-flight passed: {}; security audit: {}",
+                    self.command,
+                    audit.summary()
+                ),
                 logs,
                 started.elapsed(),
             ))
@@ -229,6 +253,33 @@ mod tests {
         assert!(!report.passed);
         assert!(report.summary.contains("exit 7"));
         assert!(report.logs.iter().any(|line| line.contains("E0425")));
+    }
+
+    #[tokio::test]
+    async fn passing_command_still_fails_on_secret() {
+        let dir = TempDir::new().unwrap();
+        // Built at runtime so the source does not contain a token-shaped string
+        // that repository secret scanners would flag.
+        let token = format!("ghp_{}", "a".repeat(36));
+        let task = Task::new("check", AgentRole::SeniorDeveloper);
+        let staged = StagedChanges::new(
+            task.id,
+            vec![
+                ProposedChange::new(
+                    "src/lib.rs",
+                    format!("pub const TOKEN: &str = \"{token}\";\n"),
+                ),
+                ProposedChange::new("tests/lib.rs", "#[test]\nfn value() { assert!(true); }\n"),
+            ],
+        )
+        .with_root(dir.path());
+        let validator =
+            CommandValidator::new("true", SpecPolicy::default(), Duration::from_secs(5));
+        let report = validator.validate(&staged).await.unwrap();
+        assert!(!report.passed);
+        assert!(report.summary.contains("security audit"));
+        assert!(report.logs.iter().any(|line| line.contains("GitHub token")));
+        assert!(!report.logs.iter().any(|line| line.contains(&token)));
     }
 
     #[tokio::test]
