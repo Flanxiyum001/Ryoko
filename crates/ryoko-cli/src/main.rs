@@ -1,4 +1,5 @@
 mod check;
+mod context_window;
 mod experience;
 
 use std::collections::HashMap;
@@ -29,6 +30,11 @@ use uuid::Uuid;
 
 use crate::check::{CommandValidator, detect_check_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
+
+/// Outline budget shared by the run and review agent contexts.
+const STRUCTURAL_CONTEXT_BYTES: usize = 5_000;
+/// Changed-file body budget for revisions; leaves room for the shared outline.
+const WORKTREE_CONTEXT_BYTES: usize = 6_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -225,6 +231,24 @@ struct ModelArgs {
     /// Prefer RYOKO_API_KEY or OPENAI_API_KEY over passing this flag.
     #[arg(long)]
     api_key: Option<String>,
+    /// Hard USD cap for model calls in this command.
+    #[arg(long)]
+    budget_usd: Option<f64>,
+    /// Hard token cap (input + output) for model calls in this command.
+    #[arg(long)]
+    budget_tokens: Option<u64>,
+    /// Hard wall-clock cap in seconds for this command's model work.
+    #[arg(long)]
+    budget_secs: Option<u64>,
+    /// Per-DAG-task USD cap, applied independently to each task.
+    #[arg(long)]
+    task_budget_usd: Option<f64>,
+    /// Per-DAG-task token cap (input + output).
+    #[arg(long)]
+    task_budget_tokens: Option<u64>,
+    /// Per-DAG-task wall-clock cap in seconds.
+    #[arg(long)]
+    task_budget_secs: Option<u64>,
 }
 
 impl ModelArgs {
@@ -1001,11 +1025,22 @@ async fn worktree_context(session: &WorktreeSession, diff: &WorktreeDiff) -> Str
         context.push_str(&format!("\n--- {path} ---\n"));
         context.push_str(&truncate(&content, 4_000));
         context.push('\n');
-        if context.len() >= 12_000 {
+        if context.len() >= WORKTREE_CONTEXT_BYTES {
             break;
         }
     }
+    append_structural_outline(&mut context, &session.path);
     context
+}
+
+fn append_structural_outline(context: &mut String, root: &Path) {
+    let structure = context_window::structural_context(root);
+    if structure.is_empty() {
+        return;
+    }
+    context.push_str("\n--- structural outline ---\n");
+    context.push_str(&truncate(&structure, STRUCTURAL_CONTEXT_BYTES));
+    context.push('\n');
 }
 
 fn print_diff(diff: &WorktreeDiff, show_patch: bool) {
@@ -1099,10 +1134,11 @@ async fn project_brief(root: &Path) -> String {
         brief.push_str(&format!("\n--- {name} ---\n"));
         brief.push_str(&truncate(&content, 3_000));
         brief.push('\n');
-        if brief.len() >= 10_000 {
+        if brief.len() >= 5_000 {
             break;
         }
     }
+    append_structural_outline(&mut brief, root);
     if brief.trim().is_empty() {
         "No project manifest was found.".to_owned()
     } else {
@@ -1139,4 +1175,53 @@ fn env(name: &str) -> Option<String> {
 
 fn cli_error(message: impl Into<String>) -> Box<dyn Error> {
     Box::new(IoError::other(message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn project_brief_includes_structural_outline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/App.tsx"),
+            "export function Greeting() {\n  return <h1>Hello</h1>;\n}\n",
+        )
+        .unwrap();
+
+        let brief = project_brief(dir.path()).await;
+        assert!(brief.contains("structural outline"));
+        assert!(brief.contains("### src/App.tsx (tsx)"));
+        assert!(brief.contains("function Greeting"));
+    }
+
+    #[tokio::test]
+    async fn worktree_context_includes_changed_files_and_structural_outline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/App.tsx"),
+            "export function Greeting() {\n  return <h1>Hello</h1>;\n}\n",
+        )
+        .unwrap();
+        let session = WorktreeSession {
+            id: Uuid::new_v4(),
+            agent_id: "test".to_owned(),
+            branch_name: "ryoko/test".to_owned(),
+            path: dir.path().to_path_buf(),
+            base_commit: "0".repeat(40),
+            base_branch: "main".to_owned(),
+        };
+        let diff = WorktreeDiff {
+            files: vec!["src/App.tsx".to_owned()],
+            patch: String::new(),
+        };
+
+        let context = worktree_context(&session, &diff).await;
+        assert!(context.contains("--- src/App.tsx ---"));
+        assert!(context.contains("structural outline"));
+        assert!(context.contains("function Greeting"));
+    }
 }
