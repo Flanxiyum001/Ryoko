@@ -19,7 +19,7 @@ use ryoko_core::{
 };
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
-    ProviderProfile, UsageLedger,
+    ProviderProfile, UsageLedger, discover_local_models,
 };
 use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 use ryoko_worktree::{
@@ -56,6 +56,8 @@ enum Commands {
     Plan(PlanArgs),
     /// Validate provider profiles without contacting any endpoint or reading keys.
     Providers(ProvidersArgs),
+    /// Probe only fixed loopback Ollama and LM Studio endpoints, with no keys.
+    DiscoverLocal,
     /// Ask one configured model a question (no tools or filesystem changes).
     Ask(AskArgs),
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
@@ -413,6 +415,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Roles => roles().await,
         Commands::Plan(args) => plan(args).await,
         Commands::Providers(args) => providers(args).await,
+        Commands::DiscoverLocal => discover_local().await,
         Commands::Ask(args) => ask(args).await,
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(args).await,
@@ -447,6 +450,19 @@ async fn providers(args: ProvidersArgs) -> Result<(), Box<dyn Error>> {
         println!("{}: {}", provider.id, provider.base_url);
     }
     println!("Profiles validated; endpoints and credentials not tested.");
+    Ok(())
+}
+
+async fn discover_local() -> Result<(), Box<dyn Error>> {
+    let models = discover_local_models().await;
+    if models.is_empty() {
+        println!("No Ollama or LM Studio models found on their default loopback ports.");
+        return Ok(());
+    }
+    for model in models {
+        println!("{} ({})", model.selection(), model.base_url);
+    }
+    println!("Discovery does not configure credentials or select models for execution.");
     Ok(())
 }
 
