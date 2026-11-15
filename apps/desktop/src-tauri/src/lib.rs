@@ -1,5 +1,6 @@
 mod lsp;
 mod lsp_frame;
+mod mission;
 mod paths;
 mod workspace;
 
@@ -18,6 +19,8 @@ pub fn run() {
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop,
+            mission::list_mission_logs,
+            mission::read_mission_log,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Ryoko desktop shell");
