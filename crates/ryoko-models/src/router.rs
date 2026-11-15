@@ -135,30 +135,36 @@ impl ModelRouter {
     }
 
     pub async fn complete(&self, request: ChatRequest) -> Result<Completion, ModelError> {
-        let requested_model = request.model.clone();
-        let stream = self.stream(request).await?;
-        let mut completion = Completion {
-            model: requested_model,
-            ..Completion::default()
+        let remaining = self.ledger.remaining_time();
+        let limit_seconds = self
+            .ledger
+            .budget()
+            .and_then(|budget| budget.limit_seconds)
+            .unwrap_or(0);
+        let work = async {
+            let requested_model = request.model.clone();
+            // The time budget must include connection setup and provider
+            // stream construction, not just aggregating an established stream.
+            let stream = self.stream(request).await?;
+            let mut completion = Completion {
+                model: requested_model,
+                ..Completion::default()
+            };
+            collect_stream(stream, &mut completion).await?;
+            self.ledger.check_budget()?;
+            Ok(completion)
         };
-        if let Some(remaining) = self.ledger.remaining_time() {
-            match tokio::time::timeout(remaining, collect_stream(stream, &mut completion)).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    return Err(ModelError::LatencyBudgetExceeded {
-                        budget_secs: self
-                            .ledger
-                            .budget()
-                            .and_then(|budget| budget.limit_seconds)
-                            .unwrap_or(0),
-                        elapsed_ms: self.ledger.elapsed().as_millis() as u64,
-                    });
-                }
+        if let Some(duration) = remaining {
+            match tokio::time::timeout(duration, work).await {
+                Ok(result) => result,
+                Err(_) => Err(ModelError::LatencyBudgetExceeded {
+                    budget_secs: limit_seconds,
+                    elapsed_ms: self.ledger.elapsed().as_millis() as u64,
+                }),
             }
         } else {
-            collect_stream(stream, &mut completion).await?;
+            work.await
         }
-        Ok(completion)
     }
 
     pub fn snapshot(&self) -> crate::ledger::LedgerSnapshot {
@@ -170,6 +176,10 @@ pub async fn collect_stream(
     mut stream: ModelStream,
     completion: &mut Completion,
 ) -> Result<(), ModelError> {
+    // Bound model-controlled completion content independently of HTTP event caps.
+    const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_TOOL_CALLS: usize = 128;
+    const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
     let mut partial_calls: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
     let mut provider_seen = false;
 
@@ -179,18 +189,35 @@ pub async fn collect_stream(
                 completion.model = model;
                 provider_seen = true;
             }
-            StreamEvent::TextDelta { text } => completion.text.push_str(&text),
+            StreamEvent::TextDelta { text } => {
+                if completion.text.len().saturating_add(text.len()) > MAX_TEXT_BYTES {
+                    return Err(ModelError::Decode("model text exceeded completion size limit".into()));
+                }
+                completion.text.push_str(&text);
+            }
             StreamEvent::ToolCallDelta {
                 index,
                 id,
                 name,
                 arguments_delta,
             } => {
+                if !partial_calls.contains_key(&index) && partial_calls.len() >= MAX_TOOL_CALLS {
+                    return Err(ModelError::Decode("too many streamed tool calls".into()));
+                }
                 let entry = partial_calls.entry(index).or_default();
+                if arguments_delta.len().saturating_add(entry.2.len()) > MAX_TOOL_ARGUMENT_BYTES {
+                    return Err(ModelError::Decode("streamed tool arguments exceeded size limit".into()));
+                }
                 if let Some(id) = id {
+                    if id.len() > 512 {
+                        return Err(ModelError::Decode("streamed tool call id too long".into()));
+                    }
                     entry.0 = id;
                 }
                 if let Some(name) = name {
+                    if name.len() > 512 {
+                        return Err(ModelError::Decode("streamed tool name too long".into()));
+                    }
                     entry.1 = name;
                 }
                 entry.2.push_str(&arguments_delta);
@@ -223,6 +250,29 @@ mod tests {
     use super::*;
     use crate::mock::{MockProvider, ScriptedToolCall, ScriptedTurn};
     use crate::types::{Message, Role};
+
+    #[tokio::test]
+    async fn aggregate_rejects_excess_model_text_and_tool_arguments() {
+        let text_stream = futures::stream::iter([Ok(StreamEvent::TextDelta {
+            text: "a".repeat(4 * 1024 * 1024 + 1),
+        })]);
+        let mut completion = Completion::default();
+        assert!(matches!(
+            collect_stream(Box::pin(text_stream), &mut completion).await,
+            Err(ModelError::Decode(_))
+        ));
+
+        let tool_stream = futures::stream::iter([Ok(StreamEvent::ToolCallDelta {
+            index: 1,
+            id: Some("id".into()),
+            name: Some("tool".into()),
+            arguments_delta: "b".repeat(1024 * 1024 + 1),
+        })]);
+        assert!(matches!(
+            collect_stream(Box::pin(tool_stream), &mut Completion::default()).await,
+            Err(ModelError::Decode(_))
+        ));
+    }
 
     #[tokio::test]
     async fn aggregates_stream_and_records_usage() {
