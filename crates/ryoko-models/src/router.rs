@@ -201,7 +201,9 @@ pub async fn collect_stream(
             }
             StreamEvent::TextDelta { text } => {
                 if completion.text.len().saturating_add(text.len()) > MAX_TEXT_BYTES {
-                    return Err(ModelError::Decode("model text exceeded completion size limit".into()));
+                    return Err(ModelError::Decode(
+                        "model text exceeded completion size limit".into(),
+                    ));
                 }
                 completion.text.push_str(&text);
             }
@@ -216,7 +218,9 @@ pub async fn collect_stream(
                 }
                 let entry = partial_calls.entry(index).or_default();
                 if arguments_delta.len().saturating_add(entry.2.len()) > MAX_TOOL_ARGUMENT_BYTES {
-                    return Err(ModelError::Decode("streamed tool arguments exceeded size limit".into()));
+                    return Err(ModelError::Decode(
+                        "streamed tool arguments exceeded size limit".into(),
+                    ));
                 }
                 if let Some(id) = id {
                     if id.len() > 512 {
@@ -351,7 +355,10 @@ mod tests {
         let mut router = ModelRouter::new("mock").with_ledger(ledger);
         router.register(mock);
 
-        let first = router.complete(ChatRequest::new("mock-1")).await.unwrap_err();
+        let first = router
+            .complete(ChatRequest::new("mock-1"))
+            .await
+            .unwrap_err();
         assert!(matches!(first, ModelError::BudgetExceeded { .. }));
 
         let err = router
