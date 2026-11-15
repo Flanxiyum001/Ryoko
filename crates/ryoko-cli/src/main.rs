@@ -16,7 +16,7 @@ use ryoko_core::{
     AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, EventSink,
     ModelAgent, Orchestrator, OrchestratorConfig, OrchestratorEvent, ProjectContext,
     ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory, StagedChanges, Task, TaskContext,
-    team::{application_plan, standard_team},
+    team::{application_plan, engineering_execution_plan, standard_team},
 };
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
@@ -227,6 +227,12 @@ struct RunArgs {
     /// Write agent events to a private JSONL file beneath the repository.
     #[arg(long, value_name = "PATH")]
     event_log: Option<PathBuf>,
+    /// Execute a four-role code/test DAG instead of a single developer.
+    #[arg(long)]
+    team: bool,
+    /// Number of concurrent agents in team mode, between 1 and 4.
+    #[arg(long, default_value_t = 2)]
+    max_concurrency: usize,
 }
 
 #[derive(Debug, Args)]
@@ -799,14 +805,38 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         )
         .with_sandbox(sandbox),
     );
-    let agent: Arc<dyn AgentRuntime> = Arc::new(
-        ModelAgent::new(AgentIdentity::new(
-            AgentRole::SeniorDeveloper,
-            args.agent,
-            "structured code-generation agent",
-        ))
-        .with_model(model),
-    );
+    if args.team && !(1..=4).contains(&args.max_concurrency) {
+        return Err(cli_error("--max-concurrency must be between 1 and 4"));
+    }
+    let agents: Vec<Arc<dyn AgentRuntime>> = if args.team {
+        standard_team()
+            .into_iter()
+            .filter(|member| {
+                matches!(member.role, AgentRole::QaEngineer)
+                    || matches!(&member.role, AgentRole::Custom(name)
+                        if matches!(name.as_str(), "software-architect" | "backend-engineer" | "security-engineer"))
+            })
+            .map(|member| {
+                Arc::new(
+                    ModelAgent::new(AgentIdentity::new(
+                        member.role.clone(),
+                        member.role.label(),
+                        member.instructions,
+                    ))
+                    .with_model(model.clone()),
+                ) as Arc<dyn AgentRuntime>
+            })
+            .collect()
+    } else {
+        vec![Arc::new(
+            ModelAgent::new(AgentIdentity::new(
+                AgentRole::SeniorDeveloper,
+                args.agent,
+                "structured code-generation agent",
+            ))
+            .with_model(model),
+        )]
+    };
     let event_log = args
         .event_log
         .as_deref()
@@ -821,11 +851,20 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         active_branch: current_branch(&root).await,
         shared_memory: HashMap::new(),
     };
-    let task = Task::new(args.goal, AgentRole::SeniorDeveloper)
-        .with_metadata(CONTEXT_METADATA, project_brief(&root).await);
-    let task_id = task.id;
-
-    println!("Creating an isolated worktree for task {task_id}...");
+    let mut tasks = if args.team {
+        engineering_execution_plan(&args.goal)
+    } else {
+        vec![Task::new(args.goal, AgentRole::SeniorDeveloper)]
+    };
+    let project_outline = project_brief(&root).await;
+    for task in &mut tasks {
+        task.metadata
+            .insert(CONTEXT_METADATA.to_owned(), project_outline.clone());
+    }
+    println!(
+        "Creating isolated worktrees for {} agent task(s)...",
+        tasks.len()
+    );
     let events = EventSink::default();
     let mut receiver = events.subscribe();
     let event_writer =
@@ -848,11 +887,11 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     });
     let orchestrator = Orchestrator::new(Arc::new(manager), validator, router)
         .with_config(OrchestratorConfig {
-            max_concurrency: 1,
+            max_concurrency: if args.team { args.max_concurrency } else { 1 },
             max_attempts: args.attempts.max(1),
         })
         .with_events(events);
-    let report = orchestrator.run(vec![task], vec![agent], project).await?;
+    let report = orchestrator.run(tasks, agents, project).await?;
     drop(orchestrator);
     let _ = validation_logs.await;
     if let Some(writer) = event_writer {
@@ -885,7 +924,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         eprintln!("Task {} skipped: {}", skipped.task_id, skipped.reason);
     }
     if !report.all_succeeded() {
-        return Err(cli_error("agent run did not publish a reviewable change"));
+        return Err(cli_error("one or more agent tasks failed to publish a reviewable change"));
     }
     Ok(())
 }
