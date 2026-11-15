@@ -244,8 +244,11 @@ struct IsolationArgs {
 
 fn resolve_sandbox(args: &IsolationArgs) -> Result<BuildSandbox, Box<dyn Error>> {
     if args.unsafe_host_check {
-        if args.sandbox_image.is_some() || !matches!(args.sandbox_backend, SandboxBackendArg::Auto) {
-            return Err(cli_error("--unsafe-host-check cannot be combined with sandbox options"));
+        if args.sandbox_image.is_some() || !matches!(args.sandbox_backend, SandboxBackendArg::Auto)
+        {
+            return Err(cli_error(
+                "--unsafe-host-check cannot be combined with sandbox options",
+            ));
         }
         eprintln!("WARNING: --unsafe-host-check runs untrusted project code on the host");
         return Ok(BuildSandbox::new(BuildBackend::UnsafeHost, None));
@@ -254,7 +257,9 @@ fn resolve_sandbox(args: &IsolationArgs) -> Result<BuildSandbox, Box<dyn Error>>
         cli_error("pre-flight checks require --sandbox-image (or explicit --unsafe-host-check)")
     })?;
     if image.trim().is_empty() || image.starts_with('-') {
-        return Err(cli_error("--sandbox-image must be a valid OCI image reference"));
+        return Err(cli_error(
+            "--sandbox-image must be a valid OCI image reference",
+        ));
     }
     let backend = match args.sandbox_backend {
         SandboxBackendArg::Auto => BuildBackend::Auto,
