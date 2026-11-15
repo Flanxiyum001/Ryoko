@@ -29,7 +29,7 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
                 }
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "incomplete LSP header"));
             }
-            let n = available.iter().position(|byte| *byte == b'\\n')
+            let n = available.iter().position(|byte| *byte == b'\n')
                 .map_or(available.len(), |i| i + 1);
             header_bytes += n;
             if header_bytes > MAX_HEADERS_BYTES {
@@ -37,13 +37,13 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
             }
             line.extend_from_slice(&available[..n]);
             reader.consume(n);
-            if line.last() == Some(&b'\\n') {
+            if line.last() == Some(&b'\n') {
                 break;
             }
         }
         let header = std::str::from_utf8(&line)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 LSP header"))?
-            .trim_end_matches(['\\r', '\\n']);
+            .trim_end_matches(['\r', '\n']);
         if header.is_empty() {
             break;
         }
@@ -92,11 +92,11 @@ mod tests {
 
     #[test]
     fn rejects_overlong_headers_and_duplicate_lengths() {
-        let too_long = format!("X-Header: {}\\r\\n\\r\\n", "x".repeat(MAX_HEADERS_BYTES));
+        let too_long = format!("X-Header: {}\r\n\r\n", "x".repeat(MAX_HEADERS_BYTES));
         assert!(read_frame(&mut Cursor::new(too_long.into_bytes())).is_err());
-        let duplicate = b"Content-Length: 1\\r\\nContent-Length: 2\\r\\n\\r\\nok".to_vec();
+        let duplicate = b"Content-Length: 1\r\nContent-Length: 2\r\n\r\nok".to_vec();
         assert!(read_frame(&mut Cursor::new(duplicate)).is_err());
-        let incomplete = b"Content-Length: 2\\r\\n".to_vec();
+        let incomplete = b"Content-Length: 2\r\n".to_vec();
         assert!(read_frame(&mut Cursor::new(incomplete)).is_err());
     }
 
