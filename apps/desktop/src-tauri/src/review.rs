@@ -30,6 +30,23 @@ pub struct ReviewSnapshot {
 }
 
 fn git_diff(root: &Path) -> Result<String, String> {
+    let top = Command::new("git")
+        .current_dir(root)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("cannot locate Git repository: {error}"))?;
+    if !top.status.success() {
+        return Err("open a Git repository to stage hunks".into());
+    }
+    let top_path = String::from_utf8(top.stdout)
+        .map_err(|_| "invalid Git repository path".to_owned())?;
+    let canonical = Path::new(top_path.trim())
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve Git root: {error}"))?;
+    if canonical != root {
+        return Err("open the repository root to review Git hunks".into());
+    }
     let mut child = Command::new("git")
         .current_dir(root)
         .args([
