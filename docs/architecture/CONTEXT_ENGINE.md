@@ -1,14 +1,19 @@
 # Context engine and project memory
 
-Status: `ryoko-core` provides tree-sitter Rust context extraction (imports, symbol
-outline, focused bodies). `SharedMemory` is an in-process blackboard. Durable
-indexing, retrieval and memory do not exist yet.
+Status: `ryoko-core` provides tree-sitter context extraction for Rust,
+TypeScript/TSX, JavaScript, Python, Go and C/C++ (imports, symbol outline,
+intra-file call edges and focused bodies). `ryoko run` scans supported source
+files with bounded size/depth limits and injects their outlines into the
+developer agent's prompt; the review revise flow injects the same outline
+alongside the changed file contents. `SharedMemory` is an in-process
+blackboard. Durable indexing, semantic retrieval and persistent memory do not
+exist yet.
 
 ## Indexing pipeline
 
 ```text
 filesystem → discovery → ignore rules → language detection
-  → tree-sitter parse → symbol extraction → LSP semantics
+  → tree-sitter parse → symbol extraction → call edges → LSP semantics
   → dependency edges → search indexes → retrieval
 ```
 
