@@ -7,8 +7,8 @@ only when its first real consumer exists.
 
 | Crate | Owns | Does not own |
 | --- | --- | --- |
-| `ryoko-cli` | Argument parsing, terminal workflows, provider/team configuration, run and review commands | Domain rules, provider payloads |
-| `ryoko-core` | Domain types (`Task`, `TaskResult`, `AgentRole`), agent runtime contract, `ModelAgent`, orchestrator, IACP, in-process memory blackboard, tree-sitter context extraction | HTTP, process spawning, editor UI |
+| `ryoko-cli` | Argument parsing, terminal workflows, MCP stdio process transport and operator prompts, provider/team configuration, run and review commands | Domain rules, provider payloads |
+| `ryoko-core` | Domain types (`Task`, `TaskResult`, `AgentRole`), agent runtime contract, `ModelAgent`, orchestrator, IACP, MCP protocol and approval gate, in-process memory blackboard, tree-sitter context extraction | HTTP, process spawning, editor UI |
 | `ryoko-models` | Provider adapters, provider catalogue, model routing, streaming events, usage and budget ledger | Task planning, file access |
 | `ryoko-native` | LSP server over stdio, diagnostics publishing, code lenses, quick fixes, execute commands | Workspace lifetime, model calls |
 | `ryoko-vfs` | Virtual document store, incremental text edits, UTF-16 positions, snapshots | LSP transport, persistence |
