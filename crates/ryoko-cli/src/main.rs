@@ -26,7 +26,7 @@ use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 use ryoko_worktree::{
     GitWorktreeManager, WorktreeDiff, WorktreeRecord, WorktreeSession, WorktreeState,
 };
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -224,6 +224,9 @@ struct RunArgs {
     timeout_secs: u64,
     #[command(flatten)]
     isolation: IsolationArgs,
+    /// Write agent events to a private JSONL file beneath the repository.
+    #[arg(long, value_name = "PATH")]
+    event_log: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -804,6 +807,15 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         ))
         .with_model(model),
     );
+    let event_log = args
+        .event_log
+        .as_deref()
+        .map(|path| resolve_event_log(&root, path))
+        .transpose()?;
+    if let Some(path) = &event_log {
+        create_private_file(path, "")?;
+        println!("Recording Mission Control events to {}", path.display());
+    }
     let project = ProjectContext {
         project_root: root.display().to_string(),
         active_branch: current_branch(&root).await,
@@ -816,6 +828,8 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     println!("Creating an isolated worktree for task {task_id}...");
     let events = EventSink::default();
     let mut receiver = events.subscribe();
+    let event_writer =
+        event_log.map(|path| tokio::spawn(write_event_log(events.subscribe(), path)));
     let validation_logs = tokio::spawn(async move {
         while let Ok(event) = receiver.recv().await {
             if let OrchestratorEvent::ValidationFinished {
@@ -841,6 +855,13 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let report = orchestrator.run(vec![task], vec![agent], project).await?;
     drop(orchestrator);
     let _ = validation_logs.await;
+    if let Some(writer) = event_writer {
+        match writer.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("warning: incomplete Mission Control log: {error}"),
+            Err(error) => eprintln!("warning: Mission Control log writer task failed: {error}"),
+        }
+    }
 
     for success in &report.succeeded {
         println!(
@@ -1283,6 +1304,77 @@ fn canonical_root(path: &Path) -> Result<PathBuf, Box<dyn Error>> {
         .map_err(|error| cli_error(format!("cannot open {}: {error}", path.display())))
 }
 
+const MAX_EVENT_LOG_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Emit bounded JSONL event records. The file is created with private
+/// permissions before this task starts; never overwrite an existing log.
+async fn write_event_log(
+    mut receiver: tokio::sync::broadcast::Receiver<OrchestratorEvent>,
+    path: PathBuf,
+) -> std::io::Result<()> {
+    let file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .await?;
+    let mut writer = BufWriter::new(file);
+    let mut written = 0u64;
+    loop {
+        let event = match receiver.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                eprintln!("warning: Mission Control skipped {skipped} event(s)");
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
+        let mut line = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
+        line.push(b'\n');
+        if written.saturating_add(line.len() as u64) > MAX_EVENT_LOG_BYTES {
+            eprintln!("warning: Mission Control log reached the 4 MiB limit");
+            break;
+        }
+        written += line.len() as u64;
+        writer.write_all(&line).await?;
+        writer.flush().await?;
+    }
+    writer.flush().await
+}
+
+/// Reject absolute paths, traversal, and symlink escapes before creating a log.
+fn resolve_event_log(root: &Path, path: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    if path.as_os_str().is_empty() {
+        return Err(cli_error("--event-log cannot be empty"));
+    }
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => clean.push(part),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(cli_error(
+                    "--event-log must be a relative path inside the repository",
+                ));
+            }
+        }
+    }
+    let target = root.join(&clean);
+    let parent = target
+        .parent()
+        .ok_or_else(|| cli_error("--event-log has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let parent = parent.canonicalize()?;
+    if !parent.starts_with(root) {
+        return Err(cli_error("--event-log escapes the repository"));
+    }
+    if target
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(cli_error("--event-log must not be a symlink"));
+    }
+    Ok(target)
+}
+
 async fn current_branch(root: &Path) -> String {
     let output = Command::new("git")
         .current_dir(root)
@@ -1460,5 +1552,43 @@ mod tests {
         assert!(model_args(Some(f64::NAN), None, None).ledger().is_err());
         assert!(model_args(None, Some(0), None).ledger().is_err());
         assert!(model_args(None, None, Some(0)).ledger().is_err());
+    }
+    #[tokio::test]
+    async fn event_log_writer_records_bounded_jsonl() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("events.jsonl");
+        create_private_file(&path, "").unwrap();
+        let events = EventSink::default();
+        let receiver = events.subscribe();
+        let writer = tokio::spawn(write_event_log(receiver, path.clone()));
+        let run_id = Uuid::new_v4();
+        events.emit(OrchestratorEvent::RunStarted {
+            run_id,
+            task_count: 1,
+        });
+        events.emit(OrchestratorEvent::RunFinished {
+            run_id,
+            succeeded: 1,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 20,
+        });
+        drop(events);
+        writer.await.unwrap().unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"type\":\"run_started\""));
+        assert!(lines[1].contains("\"type\":\"run_finished\""));
+    }
+
+    #[test]
+    fn event_log_path_rejects_workspace_escape() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let safe = resolve_event_log(&root, Path::new(".ryoko/events/run.jsonl")).unwrap();
+        assert!(safe.starts_with(&root));
+        assert!(resolve_event_log(&root, Path::new("../outside.jsonl")).is_err());
+        assert!(resolve_event_log(&root, Path::new("/tmp/outside.jsonl")).is_err());
     }
 }

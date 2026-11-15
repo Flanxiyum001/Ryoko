@@ -87,6 +87,16 @@ cargo run -p ryoko-cli -- run --repo . --sandbox-backend docker \
 
 The intentionally dangerous `--unsafe-host-check` escape hatch is restricted to trusted projects and emits a warning; it is never chosen automatically. Use the same flags for `ryoko review` when revising a task. The container image is not pulled during validation; build it before running Ryoko. See `docs/security/EXECUTION_SANDBOX.md` for known limitations and outstanding security gates. Before acceptance, every proposal is also secret-scanned; `cargo audit` and `npm audit` run when their manifests, lockfiles and tools are available. Findings block the merge, while missing audit tools are reported as skipped rather than clean. Pass `--budget-usd`, `--budget-tokens` or `--budget-secs` for an overall run cap, and `--task-budget-usd`, `--task-budget-tokens` or `--task-budget-secs` to cap each DAG task independently. The ledger checks before dispatch; one in-flight request can still cross a cap because its size and price are unknown until the response arrives.
 
+## Desktop Mission Control
+
+The desktop app can inspect local agent orchestration events recorded as JSONL.
+Use the optional `--event-log .ryoko/events/run.jsonl` flag with a sandboxed
+`ryoko run` invocation (and a reviewed `--sandbox-image`). The Mission
+Control panel displays task dependencies, attempts, validation results, and
+outputs. Logging is disabled by default; logs can contain task descriptions
+and should remain private. The desktop reader rejects log files that escape
+the selected workspace and limits each displayed log to 4 MiB.
+
 ## Provider configuration
 
 ```json

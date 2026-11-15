@@ -5,6 +5,14 @@ import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
 import { LspClient, type LspState } from './lsp';
 import {
+  layoutMission,
+  missionNodeSize,
+  parseMissionLog,
+  reduceMissionEvents,
+  type MissionSnapshot,
+  type MissionTask,
+} from './mission';
+import {
   fileUri,
   joinWorkspacePath,
   languageForPath,
@@ -34,6 +42,12 @@ interface FlatProblem {
   diagnostic: LspDiagnostic;
 }
 
+interface MissionLog {
+  name: string;
+  bytes: number;
+  modified_ms: number;
+}
+
 (globalThis as unknown as Record<string, unknown>).MonacoEnvironment = {
   getWorker: () => new EditorWorker(),
 };
@@ -56,6 +70,11 @@ const editorHost = element('editor');
 const emptyEditor = element('emptyEditor');
 const problemList = element('problemList');
 const problemCount = element('problemCount');
+const missionLogSelect = element<HTMLSelectElement>('missionLog');
+const missionRefresh = element<HTMLButtonElement>('missionRefresh');
+const missionGraph = element('missionGraph');
+const missionDetail = element('missionDetail');
+const missionSummary = element('missionSummary');
 const lspStatus = element('lspStatus');
 const editorStatus = element('editorStatus');
 const cursorPos = element('cursorPos');
@@ -66,6 +85,11 @@ const state: {
   files: string[];
   current: OpenFile | null;
 } = { root: '', files: [], current: null };
+
+let missionLogs: MissionLog[] = [];
+let missionSnapshot: MissionSnapshot | null = null;
+let missionSelection: string | null = null;
+let missionPolling = false;
 
 const openFiles = new Map<string, OpenFile>();
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
@@ -162,6 +186,12 @@ async function openFolder(): Promise<void> {
     openFiles.clear();
     diagnostics.clear();
     state.current = null;
+    missionLogs = [];
+    missionSnapshot = null;
+    missionSelection = null;
+    missionLogSelect.replaceChildren();
+    missionGraph.replaceChildren();
+    missionDetail.replaceChildren();
     editor.setModel(null);
     clearProblems();
     state.root = info.root;
@@ -173,10 +203,211 @@ async function openFolder(): Promise<void> {
     setStatus('Loading files…');
     await loadFiles();
     setStatus(`${state.files.length} files from ${info.name}`);
+    void refreshMissionLogs();
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   }
+}
+
+function missionStatusLabel(task: MissionTask): string {
+  if (task.status === 'succeeded') return 'succeeded';
+  if (task.status === 'failed') return 'failed';
+  if (task.status === 'skipped') return 'skipped';
+  if (task.status === 'retrying') return `retry ${task.attempt ?? ''}`.trim();
+  if (task.status === 'validating') return 'validating';
+  if (task.status === 'running') return 'running';
+  return 'scheduled';
+}
+
+function renderMissionOptions(): void {
+  const previous = missionLogSelect.value;
+  missionLogSelect.replaceChildren();
+  if (missionLogs.length === 0) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No event logs';
+    missionLogSelect.append(option);
+    missionLogSelect.disabled = true;
+    return;
+  }
+  missionLogSelect.disabled = false;
+  for (const log of missionLogs) {
+    const option = document.createElement('option');
+    option.value = log.name;
+    option.textContent = log.name;
+    missionLogSelect.append(option);
+  }
+  missionLogSelect.value = missionLogs.some((log) => log.name === previous)
+    ? previous
+    : missionLogs[0].name;
+}
+
+async function refreshMissionLogs(): Promise<void> {
+  if (!state.root || missionPolling) return;
+  missionPolling = true;
+  try {
+    const logs = await invoke<MissionLog[]>('list_mission_logs');
+    const namesChanged =
+      missionLogSelect.options.length === 0 ||
+      logs.length !== missionLogs.length ||
+      logs.some((log, index) => log.name !== missionLogs[index]?.name);
+    missionLogs = logs;
+    if (namesChanged) renderMissionOptions();
+    if (!missionLogSelect.value) {
+      missionSummary.textContent = 'no events';
+      missionGraph.replaceChildren();
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = 'No event logs yet. Start a run with --event-log .ryoko/events/run.jsonl.';
+      missionGraph.append(hint);
+      missionDetail.replaceChildren(hint.cloneNode(true));
+      return;
+    }
+    const text = await invoke<string>('read_mission_log', { name: missionLogSelect.value });
+    missionSnapshot = reduceMissionEvents(parseMissionLog(text));
+    renderMission();
+  } catch (error) {
+    missionSummary.textContent = 'unavailable';
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = error instanceof Error ? error.message : String(error);
+    missionGraph.replaceChildren(hint);
+  } finally {
+    missionPolling = false;
+  }
+}
+
+function renderMission(): void {
+  const snapshot = missionSnapshot;
+  missionGraph.replaceChildren();
+  if (!snapshot || snapshot.tasks.length === 0) {
+    missionSummary.textContent = 'no tasks';
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'Waiting for task_scheduled events…';
+    missionGraph.append(hint);
+    renderMissionDetail();
+    return;
+  }
+  missionSummary.textContent = snapshot.finished
+    ? `${snapshot.finished.succeeded} ok · ${snapshot.finished.failed} failed · ${snapshot.finished.durationMs}ms`
+    : `${snapshot.tasks.length}/${snapshot.taskCount} tasks`;
+
+  const layout = layoutMission(snapshot.tasks);
+  const canvas = document.createElement('div');
+  canvas.className = 'mission-canvas';
+  canvas.style.width = `${layout.width}px`;
+  canvas.style.height = `${layout.height}px`;
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('mission-edges');
+  svg.setAttribute('width', String(layout.width));
+  svg.setAttribute('height', String(layout.height));
+  svg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
+  for (const edge of layout.edges) {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const x1 = edge.from.x + missionNodeSize.width;
+    const y1 = edge.from.y + missionNodeSize.height / 2;
+    const x2 = edge.to.x;
+    const y2 = edge.to.y + missionNodeSize.height / 2;
+    const bend = Math.max(24, (x2 - x1) / 2);
+    line.setAttribute('d', `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
+    line.setAttribute('class', 'mission-edge');
+    svg.append(line);
+  }
+  canvas.append(svg);
+
+  for (const node of layout.nodes) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `mission-node ${node.task.status}`;
+    if (missionSelection === node.task.id) button.classList.add('selected');
+    button.style.left = `${node.x}px`;
+    button.style.top = `${node.y}px`;
+    button.style.width = `${missionNodeSize.width}px`;
+    button.style.height = `${missionNodeSize.height}px`;
+    button.title = `${node.task.role}: ${node.task.description}`;
+
+    const role = document.createElement('span');
+    role.className = 'mission-node-role';
+    role.textContent = node.task.role;
+    const label = document.createElement('span');
+    label.className = 'mission-node-status';
+    label.textContent = missionStatusLabel(node.task);
+    const description = document.createElement('span');
+    description.className = 'mission-node-description';
+    description.textContent = node.task.description;
+    button.append(role, label, description);
+    button.addEventListener('click', () => {
+      missionSelection = node.task.id;
+      renderMission();
+      renderMissionDetail();
+    });
+    canvas.append(button);
+  }
+
+  missionGraph.append(canvas);
+  if (missionSelection && !snapshot.tasks.some((task) => task.id === missionSelection)) {
+    missionSelection = null;
+  }
+  renderMissionDetail();
+}
+
+function addDetailRow(container: HTMLElement, label: string, value: string, code = false): void {
+  if (!value) return;
+  const row = document.createElement('div');
+  row.className = 'mission-detail-row';
+  const heading = document.createElement('span');
+  heading.className = 'mission-detail-label';
+  heading.textContent = label;
+  const body = document.createElement(code ? 'pre' : 'p');
+  body.className = 'mission-detail-value';
+  body.textContent = value.length > 12_000 ? `${value.slice(0, 12_000)}…` : value;
+  row.append(heading, body);
+  container.append(row);
+}
+
+function renderMissionDetail(): void {
+  missionDetail.replaceChildren();
+  const task = missionSnapshot?.tasks.find((candidate) => candidate.id === missionSelection);
+  if (!task) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'Select a task to inspect its brief, validation and output.';
+    missionDetail.append(hint);
+    return;
+  }
+  const heading = document.createElement('div');
+  heading.className = 'mission-detail-heading';
+  const title = document.createElement('h3');
+  title.textContent = task.role;
+  const status = document.createElement('span');
+  status.className = `mission-status ${task.status}`;
+  status.textContent = missionStatusLabel(task);
+  heading.append(title, status);
+  missionDetail.append(heading);
+
+  addDetailRow(missionDetail, 'Task brief', task.description);
+  addDetailRow(missionDetail, 'Agent', task.agent ?? '');
+  addDetailRow(missionDetail, 'Attempts', task.attempts ? String(task.attempts) : '');
+  addDetailRow(missionDetail, 'Progress', task.progress ?? '');
+  if (task.validation) {
+    addDetailRow(
+      missionDetail,
+      task.validation.passed ? 'Validation passed' : 'Validation failed',
+      task.validation.summary,
+    );
+    if (task.validation.logs.length > 0) {
+      addDetailRow(missionDetail, 'Validation log', task.validation.logs.join('\n'), true);
+    }
+  }
+  if (task.pullRequest) {
+    addDetailRow(missionDetail, 'Pull request', `${task.pullRequest.id} → ${task.pullRequest.branch}`);
+    addDetailRow(missionDetail, 'Files', task.pullRequest.files.join('\n'), true);
+  }
+  addDetailRow(missionDetail, 'Output', task.output ?? '', true);
+  addDetailRow(missionDetail, task.status === 'failed' ? 'Error' : 'Note', task.error ?? '');
 }
 
 async function openFile(path: string): Promise<void> {
@@ -363,9 +594,21 @@ saveButton.addEventListener('click', () => {
   void saveCurrent();
 });
 fileFilter.addEventListener('input', renderFiles);
+missionRefresh.addEventListener('click', () => {
+  void refreshMissionLogs();
+});
+missionLogSelect.addEventListener('change', () => {
+  missionSelection = null;
+  void refreshMissionLogs();
+});
+
+window.setInterval(() => {
+  if (state.root && document.visibilityState === 'visible') void refreshMissionLogs();
+}, 1200);
 
 window.addEventListener('beforeunload', () => {
   void lsp.stop();
 });
 
 setLspState('offline');
+renderMissionOptions();

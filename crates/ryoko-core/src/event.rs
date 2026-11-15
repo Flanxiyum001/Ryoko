@@ -17,6 +17,9 @@ pub enum OrchestratorEvent {
         task_id: Uuid,
         role: AgentRole,
         description: String,
+        /// IDs of tasks that must finish before this one is ready.
+        #[serde(default)]
+        dependencies: Vec<Uuid>,
     },
     TaskStarted {
         task_id: Uuid,

@@ -1,0 +1,91 @@
+import { describe, expect, it } from 'vitest';
+import {
+  layoutMission,
+  parseMissionLog,
+  reduceMissionEvents,
+  roleLabel,
+  type MissionTask,
+} from './mission';
+
+const log = [
+  '{"type":"run_started","run_id":"run-1","task_count":2}',
+  '{"type":"task_scheduled","task_id":"a","role":"project_manager","description":"Plan","dependencies":[]}',
+  '{"type":"task_scheduled","task_id":"b","role":"senior_developer","description":"Build","dependencies":["a"]}',
+  '{"type":"task_started","task_id":"a","role":"project_manager","agent":"pm-1","attempt":1}',
+  '{"type":"task_succeeded","task_id":"a","role":"project_manager","output":"planned","attempts":1}',
+  '{"type":"task_started","task_id":"b","role":"senior_developer","agent":"dev-1","attempt":1}',
+  '{"type":"task_failed","task_id":"b","role":"senior_developer","error":"tests failed","attempts":1,"retrying":true}',
+  '{"type":"task_started","task_id":"b","role":"senior_developer","agent":"dev-1","attempt":2}',
+  '{"type":"validation_finished","task_id":"b","passed":true,"summary":"cargo test","logs":[],"duration_ms":12}',
+  '{"type":"task_succeeded","task_id":"b","role":"senior_developer","output":"done","attempts":2}',
+  '{"type":"run_finished","succeeded":2,"failed":0,"skipped":0,"duration_ms":40}',
+].join('\n');
+
+describe('mission event log', () => {
+  it('parses JSONL and ignores partial trailing lines', () => {
+    const events = parseMissionLog(`${log}\n{"type":"task_st`);
+    expect(events).toHaveLength(11);
+    expect(events[0].type).toBe('run_started');
+  });
+
+  it('reduces retries, validation and outputs into task state', () => {
+    const snapshot = reduceMissionEvents(parseMissionLog(log));
+    expect(snapshot.runId).toBe('run-1');
+    expect(snapshot.taskCount).toBe(2);
+    expect(snapshot.tasks.map((task) => task.id)).toEqual(['a', 'b']);
+    const developer = snapshot.tasks[1];
+    expect(developer.status).toBe('succeeded');
+    expect(developer.attempts).toBe(2);
+    expect(developer.output).toBe('done');
+    expect(developer.validation?.passed).toBe(true);
+    expect(snapshot.finished?.succeeded).toBe(2);
+  });
+
+  it('labels built-in and custom roles', () => {
+    expect(roleLabel('qa_engineer')).toBe('qa-engineer');
+    expect(roleLabel({ custom: 'security' })).toBe('security');
+    expect(roleLabel(undefined)).toBe('agent');
+  });
+});
+
+describe('mission layout', () => {
+  const tasks: MissionTask[] = [
+    {
+      id: 'a',
+      role: 'project-manager',
+      description: 'Plan',
+      dependencies: [],
+      status: 'succeeded',
+    },
+    {
+      id: 'b',
+      role: 'senior-developer',
+      description: 'Build',
+      dependencies: ['a'],
+      status: 'running',
+    },
+    {
+      id: 'c',
+      role: 'qa-engineer',
+      description: 'Test',
+      dependencies: ['b'],
+      status: 'scheduled',
+    },
+  ];
+
+  it('places dependencies in earlier columns', () => {
+    const layout = layoutMission(tasks);
+    const positions = new Map(layout.nodes.map((node) => [node.task.id, node]));
+    expect(positions.get('a')?.x).toBeLessThan(positions.get('b')!.x);
+    expect(positions.get('b')?.x).toBeLessThan(positions.get('c')!.x);
+    expect(layout.edges).toHaveLength(2);
+  });
+
+  it('does not hang on cyclic input', () => {
+    const cyclic = tasks.map((task) => ({
+      ...task,
+      dependencies: task.id === 'a' ? ['c'] : task.dependencies,
+    }));
+    expect(layoutMission(cyclic).nodes).toHaveLength(3);
+  });
+});
