@@ -2,6 +2,7 @@ mod lsp;
 mod lsp_frame;
 mod mission;
 mod paths;
+mod review;
 mod workspace;
 
 use tauri::Manager;
@@ -21,6 +22,8 @@ pub fn run() {
             lsp::lsp_stop,
             mission::list_mission_logs,
             mission::read_mission_log,
+            review::list_review_hunks,
+            review::stage_review_hunks,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Ryoko desktop shell");
