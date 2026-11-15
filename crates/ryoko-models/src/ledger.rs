@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,12 +8,35 @@ use crate::types::{ModelError, Pricing, Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Budget {
+    /// USD cap; `f64::INFINITY` means no dollar cap.
     pub limit_usd: f64,
+    #[serde(default)]
+    pub limit_tokens: Option<u64>,
+    #[serde(default)]
+    pub limit_seconds: Option<u64>,
 }
 
 impl Budget {
     pub fn new(limit_usd: f64) -> Self {
-        Self { limit_usd }
+        Self {
+            limit_usd,
+            limit_tokens: None,
+            limit_seconds: None,
+        }
+    }
+
+    pub fn unlimited() -> Self {
+        Self::new(f64::INFINITY)
+    }
+
+    pub fn with_token_limit(mut self, limit_tokens: u64) -> Self {
+        self.limit_tokens = Some(limit_tokens);
+        self
+    }
+
+    pub fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.limit_seconds = Some(limit.as_secs());
+        self
     }
 }
 
@@ -38,6 +62,8 @@ pub struct LedgerSnapshot {
     pub by_model: BTreeMap<String, UsageTotals>,
     pub budget: Option<Budget>,
     pub budget_exceeded: bool,
+    #[serde(default)]
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Default)]
@@ -49,11 +75,18 @@ struct LedgerInner {
 
 /// Single source of truth for token expenditure across every agent in a run.
 ///
-/// Cheap to clone: all clones share the same counters.
-#[derive(Debug, Clone, Default)]
+/// Cheap to clone: all clones share the same counters and start time.
+#[derive(Debug, Clone)]
 pub struct UsageLedger {
     inner: Arc<Mutex<LedgerInner>>,
     budget: Option<Budget>,
+    started_at: Instant,
+}
+
+impl Default for UsageLedger {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl UsageLedger {
@@ -61,6 +94,7 @@ impl UsageLedger {
         Self {
             inner: Arc::new(Mutex::new(LedgerInner::default())),
             budget,
+            started_at: Instant::now(),
         }
     }
 
@@ -100,38 +134,78 @@ impl UsageLedger {
             .cost_usd
     }
 
+    pub fn spent_tokens(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .total
+            .usage
+            .total_tokens()
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
     pub fn budget(&self) -> Option<Budget> {
         self.budget
     }
 
     pub fn budget_exceeded(&self) -> bool {
-        self.budget
-            .map(|b| self.spent_usd() >= b.limit_usd)
-            .unwrap_or(false)
+        self.check_budget().is_err()
     }
 
-    /// Called before dispatching a request so a runaway agent cannot keep
-    /// spending once the cap is reached.
+    /// Called before dispatching a request and again after it completes so a
+    /// runaway agent cannot keep spending once a cap is reached.
     pub fn check_budget(&self) -> Result<(), ModelError> {
-        if let Some(budget) = self.budget
-            && self.spent_usd() >= budget.limit_usd
-        {
+        let Some(budget) = self.budget else {
+            return Ok(());
+        };
+        let spent_usd = self.spent_usd();
+        if spent_usd >= budget.limit_usd {
             return Err(ModelError::BudgetExceeded {
                 budget_usd: budget.limit_usd,
-                spent_usd: self.spent_usd(),
+                spent_usd,
             });
+        }
+        if let Some(limit_tokens) = budget.limit_tokens {
+            let spent_tokens = self.spent_tokens();
+            if spent_tokens >= limit_tokens {
+                return Err(ModelError::TokenBudgetExceeded {
+                    budget_tokens: limit_tokens,
+                    spent_tokens,
+                });
+            }
+        }
+        if let Some(limit_seconds) = budget.limit_seconds {
+            let elapsed = self.elapsed();
+            if elapsed >= Duration::from_secs(limit_seconds) {
+                return Err(ModelError::LatencyBudgetExceeded {
+                    budget_secs: limit_seconds,
+                    elapsed_ms: elapsed.as_millis() as u64,
+                });
+            }
         }
         Ok(())
     }
 
+    /// Time left before the wall-clock cap, if one is configured.
+    pub fn remaining_time(&self) -> Option<Duration> {
+        let seconds = self.budget?.limit_seconds?;
+        Some(Duration::from_secs(seconds).saturating_sub(self.elapsed()))
+    }
+
     pub fn snapshot(&self) -> LedgerSnapshot {
+        // Compute this before taking the lock: check_budget reads the counters.
+        let budget_exceeded = self.budget_exceeded();
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         LedgerSnapshot {
             total: inner.total.clone(),
             by_provider: inner.by_provider.clone(),
             by_model: inner.by_model.clone(),
             budget: self.budget,
-            budget_exceeded: self.budget_exceeded(),
+            budget_exceeded,
+            elapsed_ms: self.elapsed().as_millis() as u64,
         }
     }
 }
@@ -175,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn enforces_budget() {
+    fn enforces_dollar_budget() {
         let ledger = UsageLedger::with_budget(0.001);
         assert!(ledger.check_budget().is_ok());
         ledger.record(
@@ -189,5 +263,37 @@ mod tests {
             ledger.check_budget(),
             Err(ModelError::BudgetExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn enforces_token_budget() {
+        let ledger = UsageLedger::new(Some(Budget::unlimited().with_token_limit(1_000)));
+        ledger.record("mock", "mock-1", Usage::new(600, 500), None);
+        assert!(matches!(
+            ledger.check_budget(),
+            Err(ModelError::TokenBudgetExceeded {
+                budget_tokens: 1_000,
+                spent_tokens: 1_100
+            })
+        ));
+        assert_eq!(ledger.snapshot().total.usage.total_tokens(), 1_100);
+    }
+
+    #[test]
+    fn enforces_wall_clock_budget() {
+        let ledger = UsageLedger::new(Some(Budget::unlimited().with_time_limit(Duration::ZERO)));
+        assert!(matches!(
+            ledger.check_budget(),
+            Err(ModelError::LatencyBudgetExceeded { budget_secs: 0, .. })
+        ));
+        assert_eq!(ledger.remaining_time(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn unlimited_budget_never_blocks() {
+        let ledger = UsageLedger::new(Some(Budget::unlimited()));
+        ledger.record("mock", "mock-1", Usage::new(1_000_000, 1_000_000), None);
+        assert!(ledger.check_budget().is_ok());
+        assert!(!ledger.budget_exceeded());
     }
 }

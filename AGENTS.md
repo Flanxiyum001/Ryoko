@@ -48,6 +48,7 @@ it. Do not upgrade dependencies as part of an unrelated change.
 ## Layout
 
 ```text
+apps/desktop            Tauri shell and Monaco/Vite frontend (Tauri crate excluded from the workspace)
 crates/ryoko-cli        terminal entry point and workflows
 crates/ryoko-core       domain types, agents, IACP, orchestrator, memory
 crates/ryoko-models     provider adapters, routing, streaming, usage

@@ -27,7 +27,9 @@ pub use agents::{
     CODEGEN_SYSTEM_PROMPT, CONTEXT_METADATA, ModelAgent, RETRY_FEEDBACK_METADATA,
     StructuredProposal, parse_structured_proposal,
 };
-pub use context::{ContextError, ContextExtractor, ContextSnippet, FileContext, Symbol};
+pub use context::{
+    CallEdge, ContextError, ContextExtractor, ContextSnippet, FileContext, Language, Symbol,
+};
 pub use diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 pub use error::{CoreError, CoreResult};
 pub use event::{EventSink, OrchestratorEvent};
