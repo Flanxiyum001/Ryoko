@@ -159,9 +159,7 @@ impl ModelRouter {
                 Err(_) => {
                     // Preserve task-specific failures rather than attributing a
                     // task timeout to the global run's (possibly absent) cap.
-                    if let Err(error) = self.ledger.check_budget_for(scope.as_deref()) {
-                        return Err(error);
-                    }
+                    self.ledger.check_budget_for(scope.as_deref())?;
                     Err(ModelError::LatencyBudgetExceeded {
                         budget_secs: self
                             .ledger
