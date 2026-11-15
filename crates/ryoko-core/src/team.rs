@@ -110,6 +110,31 @@ pub fn application_plan(goal: &str) -> Vec<Task> {
     ]
 }
 
+/// Executable four-role DAG. Each child has one parent so it can inherit
+/// the validated parent commit without implicitly merging unrelated branches.
+pub fn engineering_execution_plan(goal: &str) -> Vec<Task> {
+    let architect = Task::new(
+        format!("ARCHITECT: Implement a narrow, testable architecture/interface slice for: {goal}. Produce working code and regression tests, not only advice."),
+        AgentRole::Custom("software-architect".into()),
+    );
+    let backend = Task::new(
+        format!("BACKEND: Implement backend behavior and regression tests for: {goal}. Extend the validated Architect branch."),
+        AgentRole::Custom("backend-engineer".into()),
+    )
+    .depends_on(&architect);
+    let qa = Task::new(
+        format!("QA: Implement executable regression tests for: {goal}. Work on the validated Backend snapshot."),
+        AgentRole::QaEngineer,
+    )
+    .depends_on(&backend);
+    let security = Task::new(
+        format!("SECURITY: Implement security hardening and adversarial regression tests for: {goal}. Work on the validated Backend snapshot."),
+        AgentRole::Custom("security-engineer".into()),
+    )
+    .depends_on(&backend);
+    vec![architect, backend, qa, security]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +151,17 @@ mod tests {
         assert_eq!(tasks.len(), 8);
         assert!(tasks.iter().all(|t| roles.contains(&t.assigned_to)));
         Orchestrator::validate_plan(&tasks).unwrap();
+    }
+
+    #[test]
+    fn execution_plan_is_an_ordered_dag_with_parallel_reviewers() {
+        let tasks = engineering_execution_plan("add an endpoint");
+        Orchestrator::validate_plan(&tasks).unwrap();
+        assert_eq!(tasks.len(), 4);
+        assert!(tasks[0].dependencies.is_empty());
+        assert_eq!(tasks[1].dependencies, vec![tasks[0].id]);
+        assert_eq!(tasks[2].dependencies, vec![tasks[1].id]);
+        assert_eq!(tasks[3].dependencies, vec![tasks[1].id]);
     }
 
     #[test]
