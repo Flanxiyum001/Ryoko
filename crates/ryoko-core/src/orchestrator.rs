@@ -456,6 +456,8 @@ async fn execute_task(
 ) -> (TaskOutcome, Option<TaskSuccess>) {
     let mut last_error = String::from("task did not run");
     let mut feedback: Option<String> = None;
+    let mut attempted_files: Vec<String> = Vec::new();
+    let mut failure: Option<(FailureStage, String)> = None;
     for attempt in 1..=max_attempts {
         events.emit(OrchestratorEvent::TaskStarted {
             task_id: task.id,
@@ -469,6 +471,10 @@ async fn execute_task(
             Err(err) => {
                 last_error = err.to_string();
                 feedback = Some(last_error.clone());
+                // No lease means this attempt proposed no files: do not report
+                // files from an earlier attempt as if they belonged to it.
+                attempted_files.clear();
+                failure = None;
                 events.emit(OrchestratorEvent::TaskFailed {
                     task_id: task.id,
                     role: task.assigned_to.clone(),
@@ -494,6 +500,7 @@ async fn execute_task(
             Ok(result) => result,
             Err(err) => TaskResult::failure(task.id, err.to_string()),
         };
+        attempted_files = result.changes.iter().map(|c| c.path.clone()).collect();
 
         if !result.success {
             let reason = result
@@ -504,6 +511,7 @@ async fn execute_task(
             let _ = lease.discard().await;
             last_error = reason.clone();
             feedback = Some(reason);
+            failure = Some((FailureStage::Agent, last_error.clone()));
             events.emit(OrchestratorEvent::TaskFailed {
                 task_id: task.id,
                 role: task.assigned_to.clone(),
@@ -523,6 +531,7 @@ async fn execute_task(
             let _ = lease.discard().await;
             last_error = reason.clone();
             feedback = Some(reason);
+            failure = Some((FailureStage::Agent, last_error.clone()));
             continue;
         }
 
@@ -532,6 +541,7 @@ async fn execute_task(
             let _ = lease.discard().await;
             last_error = reason.clone();
             feedback = Some(reason);
+            failure = Some((FailureStage::Staging, last_error.clone()));
             continue;
         }
 
@@ -569,31 +579,7 @@ async fn execute_task(
             }
             last_error = reason;
             feedback = Some(next);
-            if attempt == max_attempts {
-                // Exhausted without a passing validation: no pull request will
-                // exist, so the editor is the only place that can explain the
-                // missing proposal. Agents that fail before validation report
-                // their own failures, so this only fires when validation is the
-                // reason the task stopped.
-                if let Some(sink) = &diagnostic_sink {
-                    let attempts_label = if max_attempts == 1 {
-                        "attempt"
-                    } else {
-                        "attempts"
-                    };
-                    publish_findings(
-                        sink.as_ref(),
-                        &context.project.project_root,
-                        result.changes.iter().map(|change| change.path.as_str()),
-                        DiagnosticLevel::Error,
-                        "ryoko.validation.failed",
-                        &format!(
-                            "Ryoko proposed nothing: validation never passed after {max_attempts} {attempts_label}: {}",
-                            report.summary
-                        ),
-                    );
-                }
-            }
+            failure = Some((FailureStage::Validation, report.summary.clone()));
             continue;
         }
 
@@ -641,8 +627,22 @@ async fn execute_task(
                 let _ = lease.discard().await;
                 last_error = reason.clone();
                 feedback = Some(reason);
+                failure = Some((FailureStage::Publish, err.to_string()));
             }
         }
+    }
+
+    // Every attempt is gone and nothing was proposed. If the last attempt
+    // touched files, the editor is the only place left to explain the gap.
+    if let (Some(sink), Some((stage, detail))) = (&diagnostic_sink, failure) {
+        publish_failure(
+            sink.as_ref(),
+            &context.project.project_root,
+            &attempted_files,
+            stage,
+            &detail,
+            max_attempts,
+        );
     }
 
     (
@@ -652,6 +652,36 @@ async fn execute_task(
         },
         None,
     )
+}
+
+/// Where an exhausted task stopped, which decides the finding code an editor
+/// shows next to the files the task never got to publish.
+#[derive(Debug, Clone, Copy)]
+enum FailureStage {
+    Agent,
+    Staging,
+    Validation,
+    Publish,
+}
+
+impl FailureStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Agent => "ryoko.agent.failed",
+            Self::Staging => "ryoko.staging.failed",
+            Self::Validation => "ryoko.validation.failed",
+            Self::Publish => "ryoko.publish.failed",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Agent => "the agent failed",
+            Self::Staging => "the changes could not be staged",
+            Self::Validation => "validation never passed",
+            Self::Publish => "the validated changes could not be published",
+        }
+    }
 }
 
 /// Sends one finding per file to the attached editor. Paths stay relative to
@@ -684,6 +714,32 @@ fn publish_findings<'a>(
     sink.publish(project_root, &findings);
 }
 
+/// Explains an exhausted task in the editor: the last attempt failed at
+/// `stage`, so no pull request was opened. The error points at the files that
+/// attempt proposed, which is where the agent tried to write. An attempt that
+/// proposed nothing has no document to annotate and publishes nothing.
+fn publish_failure(
+    sink: &dyn TaskDiagnosticSink,
+    project_root: &str,
+    files: &[String],
+    stage: FailureStage,
+    detail: &str,
+    attempts: u32,
+) {
+    let attempts_label = if attempts == 1 { "attempt" } else { "attempts" };
+    publish_findings(
+        sink,
+        project_root,
+        files.iter().map(String::as_str),
+        DiagnosticLevel::Error,
+        stage.code(),
+        &format!(
+            "Ryoko proposed nothing: {} after {attempts} {attempts_label}: {detail}",
+            stage.description()
+        ),
+    );
+}
+
 fn cap_feedback(feedback: &str) -> String {
     const MAX_BYTES: usize = 16_000;
     if feedback.len() <= MAX_BYTES {
@@ -700,8 +756,10 @@ fn cap_feedback(feedback: &str) -> String {
 mod tests {
     use super::*;
     use crate::model::{AgentIdentity, ProposedChange};
+    use crate::workspace::{PullRequest, WorkspaceLease};
     use crate::{AllowAllValidator, InMemoryWorkspaceProvider};
     use async_trait::async_trait;
+    use std::path::Path;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
@@ -1252,5 +1310,210 @@ mod tests {
         assert_eq!(findings[0].code.as_deref(), Some("ryoko.validation.failed"));
         assert!(findings[0].message.contains("validation never passed"));
         assert!(findings[0].message.contains("cargo test failed"));
+    }
+
+    struct FailingWithChangesAgent {
+        identity: AgentIdentity,
+        changes: Vec<ProposedChange>,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for FailingWithChangesAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            Ok(TaskResult::failure(task.id, "model stopped early")
+                .with_changes(self.changes.clone()))
+        }
+
+        async fn rollback(&self, _ctx: TaskContext, _task: &Task, _reason: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    struct EscapingAgent {
+        identity: AgentIdentity,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for EscapingAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            Ok(
+                TaskResult::success(task.id, "wrote outside the workspace").with_changes(vec![
+                    ProposedChange::new("../escape.rs", "pub fn escaped() {}"),
+                ]),
+            )
+        }
+
+        async fn rollback(&self, _ctx: TaskContext, _task: &Task, _reason: &str) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Delegates to the in-memory provider but always fails to publish, so the
+    /// task validates and then loses its pull request at the last step.
+    struct FailingPublishProvider {
+        inner: InMemoryWorkspaceProvider,
+    }
+
+    #[async_trait]
+    impl WorkspaceProvider for FailingPublishProvider {
+        async fn allocate(
+            &self,
+            task: &Task,
+            agent: &AgentIdentity,
+        ) -> CoreResult<Arc<dyn WorkspaceLease>> {
+            let inner = self.inner.allocate(task, agent).await?;
+            Ok(Arc::new(FailingPublishLease { inner }))
+        }
+    }
+
+    struct FailingPublishLease {
+        inner: Arc<dyn WorkspaceLease>,
+    }
+
+    #[async_trait]
+    impl WorkspaceLease for FailingPublishLease {
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+
+        fn branch(&self) -> &str {
+            self.inner.branch()
+        }
+
+        async fn apply(&self, changes: &[ProposedChange]) -> CoreResult<()> {
+            self.inner.apply(changes).await
+        }
+
+        async fn publish(&self, _task: &Task, _summary: &str) -> CoreResult<PullRequest> {
+            Err(CoreError::Workspace("remote rejected the push".to_owned()))
+        }
+
+        async fn discard(&self) -> CoreResult<()> {
+            self.inner.discard().await
+        }
+    }
+
+    fn demo_project() -> ProjectContext {
+        ProjectContext {
+            project_root: "/workspace/demo".to_owned(),
+            ..ProjectContext::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_failure_publishes_an_error_once_attempts_run_out() {
+        let sink = Arc::new(RecordingSink::default());
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_diagnostic_sink(sink.clone())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 1,
+                max_attempts: 2,
+            });
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+                vec![Arc::new(FailingWithChangesAgent {
+                    identity: dev(),
+                    changes: change(),
+                })],
+                demo_project(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.failed.len(), 1);
+        let published = sink.published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            1,
+            "reported once, after the retries run out"
+        );
+        let (project_root, findings) = &published[0];
+        assert_eq!(project_root, "/workspace/demo");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/generated.rs");
+        assert_eq!(findings[0].level, DiagnosticLevel::Error);
+        assert_eq!(findings[0].code.as_deref(), Some("ryoko.agent.failed"));
+        assert!(findings[0].message.contains("the agent failed"));
+        assert!(findings[0].message.contains("model stopped early"));
+    }
+
+    #[tokio::test]
+    async fn staging_failure_publishes_an_error_once_attempts_run_out() {
+        let sink = Arc::new(RecordingSink::default());
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_diagnostic_sink(sink.clone())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 1,
+                max_attempts: 2,
+            });
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+                vec![Arc::new(EscapingAgent { identity: dev() })],
+                demo_project(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.failed.len(), 1);
+        let published = sink.published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        let (project_root, findings) = &published[0];
+        assert_eq!(project_root, "/workspace/demo");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "../escape.rs");
+        assert_eq!(findings[0].level, DiagnosticLevel::Error);
+        assert_eq!(findings[0].code.as_deref(), Some("ryoko.staging.failed"));
+        assert!(findings[0].message.contains("could not be staged"));
+        assert!(findings[0].message.contains("parent traversal"));
+    }
+
+    #[tokio::test]
+    async fn publish_failure_publishes_an_error_once_attempts_run_out() {
+        let sink = Arc::new(RecordingSink::default());
+        let provider: Arc<dyn WorkspaceProvider> = Arc::new(FailingPublishProvider {
+            inner: InMemoryWorkspaceProvider::new("main"),
+        });
+        let orchestrator = Orchestrator::new(provider, Arc::new(AllowAllValidator), router())
+            .with_diagnostic_sink(sink.clone())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 1,
+                max_attempts: 2,
+            });
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+                vec![Arc::new(SleepAgent {
+                    identity: dev(),
+                    delay: Duration::ZERO,
+                })],
+                demo_project(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.failed.len(), 1);
+        let published = sink.published.lock().unwrap();
+        assert_eq!(published.len(), 1);
+        let (project_root, findings) = &published[0];
+        assert_eq!(project_root, "/workspace/demo");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/generated.rs");
+        assert_eq!(findings[0].level, DiagnosticLevel::Error);
+        assert_eq!(findings[0].code.as_deref(), Some("ryoko.publish.failed"));
+        assert!(findings[0].message.contains("could not be published"));
+        assert!(findings[0].message.contains("remote rejected the push"));
     }
 }
