@@ -75,7 +75,7 @@ cargo run -p ryoko-cli -- run \
 cargo run -p ryoko-cli -- review --repo .
 ```
 
-`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust.
+`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust. Before acceptance, every proposal is also secret-scanned; `cargo audit` and `npm audit` run when their manifests, lockfiles and tools are available. Findings block the merge, while missing audit tools are reported as skipped rather than clean.
 
 ## Provider configuration
 
@@ -138,7 +138,7 @@ cargo run -p ryoko-native --bin ryoko-lsp
 
 The server supports incremental document sync, diagnostics, code lenses, quick fixes and `ryoko.fix` / `ryoko.explain` / `ryoko.review` commands. An agent host can publish findings through `ryoko_native::diagnostic_channel()`; the server forwards those diagnostics to the editor. It does not start an editor UI or execute editor commands automatically.
 
-`ryoko_core::ContextExtractor` uses tree-sitter to return imports, a symbol outline and targeted Rust function bodies, keeping prompts to the code an agent actually needs.
+`ryoko_core::ContextExtractor` uses tree-sitter to return imports, a symbol outline, intra-file call edges and targeted bodies for Rust, TypeScript/TSX, JavaScript, Python, Go and C/C++. `ryoko run` scans supported source files under the repository root and injects a bounded structural outline into the developer agent's context; the review revise flow includes the same outline alongside the changed file contents.
 
 ## Development
 
