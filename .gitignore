@@ -9,6 +9,7 @@ dist/
 .env.*
 !.env.example
 apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/binaries/
 
 # GitHub App credentials, local workbench state and clones
 .env

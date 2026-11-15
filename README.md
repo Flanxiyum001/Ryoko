@@ -2,7 +2,7 @@
 
 **Ryoko** is an experimental Rust foundation for a provider-neutral, multi-agent AI IDE. The target experience is a full engineering team—project manager, architect, senior UI/UX, backend, full-stack, security, QA and DevOps—collaborating on a user-defined application, with isolated worktrees and human-reviewed changes.
 
-> **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, WASI test execution and structural context extraction. It does not yet provide a full editor UI, hardened project-specific build isolation or deployment. Do not use its previews as proof of successful implementation.
+> **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, a Tauri desktop shell with a Monaco editor wired to `ryoko-lsp`, WASI test execution and structural context extraction. It does not yet provide a task-DAG visualizer, hunk-level review, hardened project-specific build isolation, signed installers or deployment. Do not use its previews as proof of successful implementation.
 
 The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. Contribution rules are in [`AGENTS.md`](AGENTS.md).
 
@@ -114,6 +114,19 @@ The root workspace is organized as follows:
 | `ryoko-scripting` | Future plugin layer |
 
 See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) and [IACP specification](docs/IACP.md).
+
+## Desktop app
+
+`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` over a stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server.
+
+    cargo build -p ryoko-native --bin ryoko-lsp
+    cd apps/desktop
+    npm ci
+    npm test
+    npm run build
+    RYOKO_LSP_BIN="$PWD/../../target/debug/ryoko-lsp" npm run tauri dev
+
+Without `RYOKO_LSP_BIN`, the shell looks for a `ryoko-lsp` binary next to the app executable (the bundled sidecar); it never resolves the language server from `PATH`. Installers are built by the `Desktop installers` workflow on macOS, Windows and Linux runners; they are unsigned until signing secrets are configured. The browser GitHub workbench at `http://127.0.0.1:4173` is unchanged and still served from the files at the desktop root.
 
 ## Editor integration
 
