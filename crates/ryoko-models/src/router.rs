@@ -136,31 +136,43 @@ impl ModelRouter {
     }
 
     pub async fn complete(&self, request: ChatRequest) -> Result<Completion, ModelError> {
-        let requested_model = request.model.clone();
         let scope = request.scope.clone();
-        let stream = self.stream(request).await?;
-        let mut completion = Completion {
-            model: requested_model,
-            ..Completion::default()
+        // Start the per-task clock before opening the network connection.
+        self.ledger.check_budget_for(scope.as_deref())?;
+        let remaining = self.ledger.remaining_time_for(scope.as_deref());
+        let work = async {
+            let requested_model = request.model.clone();
+            // The deadline includes provider startup and stream creation,
+            // not merely collection once the remote connection exists.
+            let stream = self.stream(request).await?;
+            let mut completion = Completion {
+                model: requested_model,
+                ..Completion::default()
+            };
+            collect_stream(stream, &mut completion).await?;
+            self.ledger.check_budget_for(scope.as_deref())?;
+            Ok(completion)
         };
-        if let Some(remaining) = self.ledger.remaining_time_for(scope.as_deref()) {
-            match tokio::time::timeout(remaining, collect_stream(stream, &mut completion)).await {
-                Ok(result) => result?,
+        if let Some(duration) = remaining {
+            match tokio::time::timeout(duration, work).await {
+                Ok(result) => result,
                 Err(_) => {
-                    return Err(ModelError::LatencyBudgetExceeded {
+                    // Preserve task-specific failures rather than attributing a
+                    // task timeout to the global run's (possibly absent) cap.
+                    self.ledger.check_budget_for(scope.as_deref())?;
+                    Err(ModelError::LatencyBudgetExceeded {
                         budget_secs: self
                             .ledger
                             .budget()
                             .and_then(|budget| budget.limit_seconds)
                             .unwrap_or(0),
                         elapsed_ms: self.ledger.elapsed().as_millis() as u64,
-                    });
+                    })
                 }
             }
         } else {
-            collect_stream(stream, &mut completion).await?;
+            work.await
         }
-        Ok(completion)
     }
 
     pub fn snapshot(&self) -> crate::ledger::LedgerSnapshot {
@@ -172,6 +184,10 @@ pub async fn collect_stream(
     mut stream: ModelStream,
     completion: &mut Completion,
 ) -> Result<(), ModelError> {
+    // Explicit completion caps guard against unlimited model-controlled data.
+    const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_TOOL_CALLS: usize = 128;
+    const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
     let mut partial_calls: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
     let mut provider_seen = false;
 
@@ -181,18 +197,39 @@ pub async fn collect_stream(
                 completion.model = model;
                 provider_seen = true;
             }
-            StreamEvent::TextDelta { text } => completion.text.push_str(&text),
+            StreamEvent::TextDelta { text } => {
+                if completion.text.len().saturating_add(text.len()) > MAX_TEXT_BYTES {
+                    return Err(ModelError::Decode(
+                        "model text exceeded completion size limit".into(),
+                    ));
+                }
+                completion.text.push_str(&text);
+            }
             StreamEvent::ToolCallDelta {
                 index,
                 id,
                 name,
                 arguments_delta,
             } => {
+                if !partial_calls.contains_key(&index) && partial_calls.len() >= MAX_TOOL_CALLS {
+                    return Err(ModelError::Decode("too many streamed tool calls".into()));
+                }
                 let entry = partial_calls.entry(index).or_default();
+                if arguments_delta.len().saturating_add(entry.2.len()) > MAX_TOOL_ARGUMENT_BYTES {
+                    return Err(ModelError::Decode(
+                        "streamed tool arguments exceeded size limit".into(),
+                    ));
+                }
                 if let Some(id) = id {
+                    if id.len() > 512 {
+                        return Err(ModelError::Decode("streamed tool call id too long".into()));
+                    }
                     entry.0 = id;
                 }
                 if let Some(name) = name {
+                    if name.len() > 512 {
+                        return Err(ModelError::Decode("streamed tool name too long".into()));
+                    }
                     entry.1 = name;
                 }
                 entry.2.push_str(&arguments_delta);
@@ -287,6 +324,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregation_rejects_unbounded_provider_output() {
+        let text_stream = futures::stream::iter([Ok(StreamEvent::TextDelta {
+            text: "a".repeat(4 * 1024 * 1024 + 1),
+        })]);
+        assert!(matches!(
+            collect_stream(Box::pin(text_stream), &mut Completion::default()).await,
+            Err(ModelError::Decode(_))
+        ));
+
+        let tool_stream = futures::stream::iter([Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call".into()),
+            name: Some("tool".into()),
+            arguments_delta: "x".repeat(1024 * 1024 + 1),
+        })]);
+        assert!(matches!(
+            collect_stream(Box::pin(tool_stream), &mut Completion::default()).await,
+            Err(ModelError::Decode(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn budget_blocks_dispatch() {
         let mock = Arc::new(MockProvider::new("mock").with_pricing(Pricing::new(100.0, 100.0)));
         mock.push_turn(ScriptedTurn::text("too expensive").with_usage(Usage::new(10_000, 10_000)));
@@ -294,7 +353,11 @@ mod tests {
         let mut router = ModelRouter::new("mock").with_ledger(ledger);
         router.register(mock);
 
-        router.complete(ChatRequest::new("mock-1")).await.unwrap();
+        let first = router
+            .complete(ChatRequest::new("mock-1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(first, ModelError::BudgetExceeded { .. }));
 
         let err = router
             .complete(ChatRequest::new("mock-1"))

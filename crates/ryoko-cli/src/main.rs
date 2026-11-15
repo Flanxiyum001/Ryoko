@@ -2,6 +2,7 @@ mod audit;
 mod check;
 mod context_window;
 mod experience;
+mod mcp;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -19,13 +20,13 @@ use ryoko_core::{
 };
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
-    ProviderProfile, UsageLedger,
+    ProviderProfile, UsageLedger, discover_local_models,
 };
-use ryoko_sandbox::SpecPolicy;
+use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 use ryoko_worktree::{
     GitWorktreeManager, WorktreeDiff, WorktreeRecord, WorktreeSession, WorktreeState,
 };
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -56,6 +57,8 @@ enum Commands {
     Plan(PlanArgs),
     /// Validate provider profiles without contacting any endpoint or reading keys.
     Providers(ProvidersArgs),
+    /// Probe only fixed loopback Ollama and LM Studio endpoints, with no keys.
+    DiscoverLocal,
     /// Ask one configured model a question (no tools or filesystem changes).
     Ask(AskArgs),
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
@@ -64,12 +67,42 @@ enum Commands {
     Run(RunArgs),
     /// Review published worktrees and accept, reject, or send feedback.
     Review(ReviewArgs),
+    /// Operator-controlled MCP stdio discovery and tool invocation.
+    Mcp(McpArgs),
     /// Generate a safe provider configuration without writing credentials.
     Init(InitArgs),
     /// Check provider environment, models, and agent assignments offline.
     Doctor(DoctorArgs),
     /// List saved agent worktrees and their review status.
     Sessions(SessionsArgs),
+}
+
+#[derive(Debug, Args)]
+struct McpArgs {
+    /// Explicitly chosen local MCP server executable (never model-selected).
+    #[arg(long)]
+    server: PathBuf,
+    /// Server launch argument. Repeat once per argument.
+    #[arg(long = "server-arg")]
+    server_args: Vec<String>,
+    /// Explicitly forward a named credential/environment variable.
+    #[arg(long = "allow-env")]
+    allow_env: Vec<String>,
+    #[command(subcommand)]
+    command: McpCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommands {
+    /// Initialize the server and list its advertised tools.
+    Tools,
+    /// Call an advertised tool, prompting for explicit approval.
+    Call {
+        #[arg(long)]
+        tool: String,
+        #[arg(long, default_value = "{}")]
+        arguments: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -189,11 +222,8 @@ struct RunArgs {
     /// Timeout for the pre-flight command.
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
-    /// Write orchestrator events as JSONL inside the repo, for example
-    /// `.ryoko/events/run.jsonl`. The desktop Mission Control panel reads
-    /// `.ryoko/events/*.jsonl`.
-    #[arg(long, value_name = "PATH")]
-    event_log: Option<PathBuf>,
+    #[command(flatten)]
+    isolation: IsolationArgs,
 }
 
 #[derive(Debug, Args)]
@@ -221,6 +251,55 @@ struct ReviewArgs {
     check_command: Option<String>,
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
+    #[command(flatten)]
+    isolation: IsolationArgs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SandboxBackendArg {
+    Auto,
+    Docker,
+    Podman,
+}
+
+#[derive(Debug, Clone, Args)]
+struct IsolationArgs {
+    /// OCI isolation backend. Auto tries Docker then Podman, never the host.
+    #[arg(long, value_enum, default_value = "auto")]
+    sandbox_backend: SandboxBackendArg,
+    /// Operator-built OCI image with offline build tools and dependencies.
+    #[arg(long)]
+    sandbox_image: Option<String>,
+    /// DANGEROUS: explicitly run pre-flight commands on this machine.
+    #[arg(long)]
+    unsafe_host_check: bool,
+}
+
+fn resolve_sandbox(args: &IsolationArgs) -> Result<BuildSandbox, Box<dyn Error>> {
+    if args.unsafe_host_check {
+        if args.sandbox_image.is_some() || !matches!(args.sandbox_backend, SandboxBackendArg::Auto)
+        {
+            return Err(cli_error(
+                "--unsafe-host-check cannot be combined with sandbox options",
+            ));
+        }
+        eprintln!("WARNING: --unsafe-host-check runs untrusted project code on the host");
+        return Ok(BuildSandbox::new(BuildBackend::UnsafeHost, None));
+    }
+    let image = args.sandbox_image.as_ref().ok_or_else(|| {
+        cli_error("pre-flight checks require --sandbox-image (or explicit --unsafe-host-check)")
+    })?;
+    if image.trim().is_empty() || image.starts_with('-') {
+        return Err(cli_error(
+            "--sandbox-image must be a valid OCI image reference",
+        ));
+    }
+    let backend = match args.sandbox_backend {
+        SandboxBackendArg::Auto => BuildBackend::Auto,
+        SandboxBackendArg::Docker => BuildBackend::Docker,
+        SandboxBackendArg::Podman => BuildBackend::Podman,
+    };
+    Ok(BuildSandbox::new(backend, Some(image.clone())))
 }
 
 #[derive(Debug, Clone, Args)]
@@ -367,10 +446,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Roles => roles().await,
         Commands::Plan(args) => plan(args).await,
         Commands::Providers(args) => providers(args).await,
+        Commands::DiscoverLocal => discover_local().await,
         Commands::Ask(args) => ask(args).await,
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(args).await,
         Commands::Review(args) => review(args).await,
+        Commands::Mcp(args) => mcp_command(args).await,
         Commands::Init(args) => init(args).await,
         Commands::Doctor(args) => doctor(args).await,
         Commands::Sessions(args) => sessions(args).await,
@@ -401,6 +482,36 @@ async fn providers(args: ProvidersArgs) -> Result<(), Box<dyn Error>> {
         println!("{}: {}", provider.id, provider.base_url);
     }
     println!("Profiles validated; endpoints and credentials not tested.");
+    Ok(())
+}
+
+async fn discover_local() -> Result<(), Box<dyn Error>> {
+    let models = discover_local_models().await;
+    if models.is_empty() {
+        println!("No Ollama or LM Studio models found on their default loopback ports.");
+        return Ok(());
+    }
+    for model in models {
+        println!("{} ({})", model.selection(), model.base_url);
+    }
+    println!("Discovery does not configure credentials or select models for execution.");
+    Ok(())
+}
+
+async fn mcp_command(args: McpArgs) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        McpCommands::Tools => mcp::tools(&args.server, &args.server_args, &args.allow_env).await?,
+        McpCommands::Call { tool, arguments } => {
+            mcp::call(
+                &args.server,
+                &args.server_args,
+                &args.allow_env,
+                &tool,
+                &arguments,
+            )
+            .await?
+        }
+    }
     Ok(())
 }
 
@@ -676,11 +787,15 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let check_command = resolve_check_command(&root, args.check_command.as_deref())?;
     let (model, router) = args.model.load()?;
     let manager = GitWorktreeManager::new(&root);
-    let validator: Arc<dyn ChangeValidator> = Arc::new(CommandValidator::new(
-        check_command,
-        SpecPolicy::default(),
-        Duration::from_secs(args.timeout_secs),
-    ));
+    let sandbox = resolve_sandbox(&args.isolation)?;
+    let validator: Arc<dyn ChangeValidator> = Arc::new(
+        CommandValidator::new(
+            check_command,
+            SpecPolicy::default(),
+            Duration::from_secs(args.timeout_secs),
+        )
+        .with_sandbox(sandbox),
+    );
     let agent: Arc<dyn AgentRuntime> = Arc::new(
         ModelAgent::new(AgentIdentity::new(
             AgentRole::SeniorDeveloper,
@@ -689,15 +804,6 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         ))
         .with_model(model),
     );
-    let event_log = args
-        .event_log
-        .as_deref()
-        .map(|path| resolve_event_log(&root, path))
-        .transpose()?;
-    if let Some(path) = &event_log {
-        create_private_file(path, "")?;
-        println!("Recording Mission Control events to {}", path.display());
-    }
     let project = ProjectContext {
         project_root: root.display().to_string(),
         active_branch: current_branch(&root).await,
@@ -710,10 +816,6 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     println!("Creating an isolated worktree for task {task_id}...");
     let events = EventSink::default();
     let mut receiver = events.subscribe();
-    let event_writer = match (&event_log, events.subscribe()) {
-        (Some(path), receiver) => Some(tokio::spawn(write_event_log(receiver, path.clone()))),
-        (None, _) => None,
-    };
     let validation_logs = tokio::spawn(async move {
         while let Ok(event) = receiver.recv().await {
             if let OrchestratorEvent::ValidationFinished {
@@ -739,17 +841,6 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let report = orchestrator.run(vec![task], vec![agent], project).await?;
     drop(orchestrator);
     let _ = validation_logs.await;
-    if let Some(writer) = event_writer {
-        match writer.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                eprintln!("warning: Mission Control event log was not completed: {error}");
-            }
-            Err(error) => {
-                eprintln!("warning: Mission Control event log task failed: {error}");
-            }
-        }
-    }
 
     for success in &report.succeeded {
         println!(
@@ -793,11 +884,15 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         .clone()
         .unwrap_or_else(|| default_target(&session));
     let check_command = resolve_check_command(&root, args.check_command.as_deref())?;
-    let validator: Arc<dyn ChangeValidator> = Arc::new(CommandValidator::new(
-        check_command,
-        SpecPolicy::default(),
-        Duration::from_secs(args.timeout_secs),
-    ));
+    let sandbox = resolve_sandbox(&args.isolation)?;
+    let validator: Arc<dyn ChangeValidator> = Arc::new(
+        CommandValidator::new(
+            check_command,
+            SpecPolicy::default(),
+            Duration::from_secs(args.timeout_secs),
+        )
+        .with_sandbox(sandbox),
+    );
     let project = ProjectContext {
         project_root: root.display().to_string(),
         active_branch: current_branch(&root).await,
@@ -1188,76 +1283,6 @@ fn canonical_root(path: &Path) -> Result<PathBuf, Box<dyn Error>> {
         .map_err(|error| cli_error(format!("cannot open {}: {error}", path.display())))
 }
 
-const MAX_EVENT_LOG_BYTES: u64 = 8 * 1024 * 1024;
-
-/// Resolves `--event-log` beneath the repository root. The log is telemetry,
-/// but it can contain task descriptions, so it must never escape the workspace
-/// or overwrite an existing file.
-async fn write_event_log(
-    mut receiver: tokio::sync::broadcast::Receiver<OrchestratorEvent>,
-    path: PathBuf,
-) -> std::io::Result<()> {
-    let file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .await?;
-    let mut writer = BufWriter::new(file);
-    let mut written = 0u64;
-    loop {
-        let event = match receiver.recv().await {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                eprintln!("warning: Mission Control skipped {skipped} event(s)");
-                continue;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-        };
-        if written >= MAX_EVENT_LOG_BYTES {
-            continue;
-        }
-        let mut line = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
-        line.push(b'\n');
-        written = written.saturating_add(line.len() as u64);
-        writer.write_all(&line).await?;
-        writer.flush().await?;
-    }
-    writer.flush().await
-}
-
-fn resolve_event_log(root: &Path, path: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    if path.as_os_str().is_empty() {
-        return Err(cli_error("--event-log cannot be empty"));
-    }
-    let mut clean = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => clean.push(part),
-            std::path::Component::CurDir => {}
-            _ => {
-                return Err(cli_error(
-                    "--event-log must be a relative path inside the repository",
-                ));
-            }
-        }
-    }
-    let target = root.join(&clean);
-    let parent = target
-        .parent()
-        .ok_or_else(|| cli_error("--event-log has no parent directory"))?;
-    std::fs::create_dir_all(parent)?;
-    let parent = parent.canonicalize()?;
-    if !parent.starts_with(root) {
-        return Err(cli_error("--event-log escapes the repository"));
-    }
-    if target
-        .symlink_metadata()
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Err(cli_error("--event-log must not be a symlink"));
-    }
-    Ok(target)
-}
-
 async fn current_branch(root: &Path) -> String {
     let output = Command::new("git")
         .current_dir(root)
@@ -1427,45 +1452,6 @@ mod tests {
                 .budget()
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn event_log_writer_records_jsonl() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("events.jsonl");
-        create_private_file(&path, "").unwrap();
-        let events = EventSink::default();
-        let receiver = events.subscribe();
-        let writer = tokio::spawn(write_event_log(receiver, path.clone()));
-        events.emit(OrchestratorEvent::RunStarted {
-            run_id: Uuid::new_v4(),
-            task_count: 1,
-        });
-        events.emit(OrchestratorEvent::RunFinished {
-            run_id: Uuid::new_v4(),
-            succeeded: 0,
-            failed: 0,
-            skipped: 0,
-            duration_ms: 1,
-        });
-        drop(events);
-        writer.await.unwrap().unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("\"type\":\"run_started\""));
-        assert!(lines[1].contains("\"type\":\"run_finished\""));
-    }
-
-    #[test]
-    fn event_log_paths_stay_inside_the_repository() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let path = resolve_event_log(&root, Path::new(".ryoko/events/run.jsonl")).unwrap();
-        assert!(path.starts_with(&root));
-        assert!(path.parent().unwrap().is_dir());
-        assert!(resolve_event_log(&root, Path::new("../escape.jsonl")).is_err());
-        assert!(resolve_event_log(&root, Path::new("/tmp/escape.jsonl")).is_err());
     }
 
     #[test]
