@@ -5,8 +5,8 @@ use std::process::Output;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ryoko_core::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use ryoko_core::CoreResult;
+use ryoko_core::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 
 /// Runs a project's own build/test command in the task's isolated worktree.
