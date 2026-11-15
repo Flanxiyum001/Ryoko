@@ -73,7 +73,11 @@ impl BuildSandbox {
             .ok_or(BuildSandboxError::MissingImage)?;
         // Docker --mount uses comma-separated key/value pairs. Forbid commas
         // instead of allowing a workspace path to inject extra mount options.
-        if root.to_string_lossy().chars().any(|ch| matches!(ch, ',' | '\n' | '\r')) {
+        if root
+            .to_string_lossy()
+            .chars()
+            .any(|ch| matches!(ch, ',' | '\n' | '\r'))
+        {
             return Err(BuildSandboxError::InvalidConfiguration);
         }
         let runtime = self.resolve_runtime().await?;
@@ -188,7 +192,8 @@ fn user_identity() -> Result<String, BuildSandboxError> {
     let read = |arg: &str| -> Result<String, BuildSandboxError> {
         let output = std::process::Command::new("id").arg(arg).output()?;
         let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !output.status.success() || text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        if !output.status.success() || text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit())
+        {
             return Err(BuildSandboxError::InvalidConfiguration);
         }
         Ok(text)
@@ -205,14 +210,14 @@ fn user_identity() -> Result<String, BuildSandboxError> {
 
 async fn read_bounded<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    reader.take(MAX_STREAM_BYTES + 1).read_to_end(&mut buf).await?;
+    reader
+        .take(MAX_STREAM_BYTES + 1)
+        .read_to_end(&mut buf)
+        .await?;
     Ok(buf)
 }
 
-async fn run_bounded(
-    mut command: Command,
-    timeout: Duration,
-) -> Result<Output, BuildSandboxError> {
+async fn run_bounded(mut command: Command, timeout: Duration) -> Result<Output, BuildSandboxError> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -281,7 +286,11 @@ mod tests {
 
     #[test]
     fn container_runtime_variants_are_not_host() {
-        for backend in [BuildBackend::Auto, BuildBackend::Docker, BuildBackend::Podman] {
+        for backend in [
+            BuildBackend::Auto,
+            BuildBackend::Docker,
+            BuildBackend::Podman,
+        ] {
             assert_ne!(backend, BuildBackend::UnsafeHost);
         }
     }
