@@ -2,6 +2,7 @@ mod audit;
 mod check;
 mod context_window;
 mod experience;
+mod mcp;
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -64,12 +65,42 @@ enum Commands {
     Run(RunArgs),
     /// Review published worktrees and accept, reject, or send feedback.
     Review(ReviewArgs),
+    /// Operator-controlled MCP stdio discovery and tool invocation.
+    Mcp(McpArgs),
     /// Generate a safe provider configuration without writing credentials.
     Init(InitArgs),
     /// Check provider environment, models, and agent assignments offline.
     Doctor(DoctorArgs),
     /// List saved agent worktrees and their review status.
     Sessions(SessionsArgs),
+}
+
+#[derive(Debug, Args)]
+struct McpArgs {
+    /// Explicitly chosen local MCP server executable (never model-selected).
+    #[arg(long)]
+    server: PathBuf,
+    /// Server launch argument. Repeat once per argument.
+    #[arg(long = "server-arg")]
+    server_args: Vec<String>,
+    /// Explicitly forward a named credential/environment variable.
+    #[arg(long = "allow-env")]
+    allow_env: Vec<String>,
+    #[command(subcommand)]
+    command: McpCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommands {
+    /// Initialize the server and list its advertised tools.
+    Tools,
+    /// Call an advertised tool, prompting for explicit approval.
+    Call {
+        #[arg(long)]
+        tool: String,
+        #[arg(long, default_value = "{}")]
+        arguments: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -366,6 +397,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(args).await,
         Commands::Review(args) => review(args).await,
+        Commands::Mcp(args) => mcp_command(args).await,
         Commands::Init(args) => init(args).await,
         Commands::Doctor(args) => doctor(args).await,
         Commands::Sessions(args) => sessions(args).await,
@@ -396,6 +428,16 @@ async fn providers(args: ProvidersArgs) -> Result<(), Box<dyn Error>> {
         println!("{}: {}", provider.id, provider.base_url);
     }
     println!("Profiles validated; endpoints and credentials not tested.");
+    Ok(())
+}
+
+async fn mcp_command(args: McpArgs) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        McpCommands::Tools => mcp::tools(&args.server, &args.server_args, &args.allow_env).await?,
+        McpCommands::Call { tool, arguments } => {
+            mcp::call(&args.server, &args.server_args, &args.allow_env, &tool, &arguments).await?
+        }
+    }
     Ok(())
 }
 
