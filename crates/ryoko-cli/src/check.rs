@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ryoko_core::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use ryoko_core::{CoreError, CoreResult};
-use ryoko_sandbox::SpecPolicy;
-use tokio::process::Command;
+use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 
 /// Runs a project's own build/test command in the task's isolated worktree.
 /// Spec evidence is checked first, so a source-only proposal is rejected before
@@ -18,6 +17,7 @@ pub struct CommandValidator {
     command: String,
     policy: SpecPolicy,
     timeout: Duration,
+    sandbox: BuildSandbox,
 }
 
 impl CommandValidator {
@@ -26,7 +26,14 @@ impl CommandValidator {
             command: command.into(),
             policy,
             timeout: timeout.max(Duration::from_secs(1)),
+            sandbox: BuildSandbox::new(BuildBackend::Auto, None),
         }
+    }
+
+    /// Isolation selection is an operator decision, never agent-controlled.
+    pub fn with_sandbox(mut self, sandbox: BuildSandbox) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 }
 
@@ -59,7 +66,7 @@ impl ChangeValidator for CommandValidator {
             ));
         }
 
-        let output = match run_command(&self.command, root, self.timeout).await {
+        let output = match self.sandbox.run(&self.command, root, self.timeout).await {
             Ok(output) => output,
             Err(error) => {
                 return Ok(ValidationReport::failed(
@@ -121,36 +128,6 @@ impl ChangeValidator for CommandValidator {
                 started.elapsed(),
             ))
         }
-    }
-}
-
-async fn run_command(command: &str, root: &Path, timeout: Duration) -> CoreResult<Output> {
-    #[cfg(windows)]
-    let mut process = {
-        let mut process = Command::new("cmd");
-        process.arg("/C").arg(command);
-        process
-    };
-    #[cfg(not(windows))]
-    let mut process = {
-        let mut process = Command::new("sh");
-        process.arg("-c").arg(command);
-        process
-    };
-
-    process
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-
-    match tokio::time::timeout(timeout, process.output()).await {
-        Ok(result) => result.map_err(|error| CoreError::Workspace(error.to_string())),
-        Err(_) => Err(CoreError::Workspace(format!(
-            "command timed out after {}s: {command}",
-            timeout.as_secs()
-        ))),
     }
 }
 
@@ -228,7 +205,8 @@ mod tests {
     async fn passing_command_is_a_passed_report() {
         let dir = TempDir::new().unwrap();
         let validator =
-            CommandValidator::new("true", SpecPolicy::default(), Duration::from_secs(5));
+            CommandValidator::new("true", SpecPolicy::default(), Duration::from_secs(5))
+                .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None));
         let report = validator
             .validate(&changes(dir.path(), true))
             .await
@@ -274,7 +252,8 @@ mod tests {
         )
         .with_root(dir.path());
         let validator =
-            CommandValidator::new("true", SpecPolicy::default(), Duration::from_secs(5));
+            CommandValidator::new("true", SpecPolicy::default(), Duration::from_secs(5))
+                .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None));
         let report = validator.validate(&staged).await.unwrap();
         assert!(!report.passed);
         assert!(report.summary.contains("security audit"));
