@@ -7,7 +7,7 @@ Source review of all eight Rust workspace crates, the CI workflow, the model ada
 ## Current architecture
 
 - `ryoko-models`: normalized chat contracts, OpenAI-compatible streaming, native Anthropic Messages streaming, provider routing and usage ledger. Local and hosted engines that implement either protocol can share the same router.
-- `ryoko-core`: agent runtime trait, project/task model, dependency DAG orchestration, events, memory, IACP validation, change validation, workspace abstraction and tree-sitter Rust context extraction.
+- `ryoko-core`: agent runtime trait, project/task model, dependency DAG orchestration, events, memory, IACP validation, change validation, workspace abstraction and tree-sitter multi-language context extraction.
 - `ryoko-worktree`: Git worktree isolation with reviewable internal pull requests and guarded merge APIs.
 - `ryoko-sandbox`: Wasmtime harness with WASI imports backed by an empty context, no host preopens, and fuel/epoch/memory limits. This **does not** prove the generated application itself is safe or working.
 - `ryoko-cli`: provider checks, one-turn model requests, deterministic team plans and read-only multi-agent previews.
