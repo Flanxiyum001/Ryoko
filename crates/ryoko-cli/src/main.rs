@@ -828,8 +828,8 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     println!("Creating an isolated worktree for task {task_id}...");
     let events = EventSink::default();
     let mut receiver = events.subscribe();
-    let event_writer = event_log
-        .map(|path| tokio::spawn(write_event_log(events.subscribe(), path)));
+    let event_writer =
+        event_log.map(|path| tokio::spawn(write_event_log(events.subscribe(), path)));
     let validation_logs = tokio::spawn(async move {
         while let Ok(event) = receiver.recv().await {
             if let OrchestratorEvent::ValidationFinished {
@@ -1350,9 +1350,11 @@ fn resolve_event_log(root: &Path, path: &Path) -> Result<PathBuf, Box<dyn Error>
         match component {
             std::path::Component::Normal(part) => clean.push(part),
             std::path::Component::CurDir => {}
-            _ => return Err(cli_error(
-                "--event-log must be a relative path inside the repository",
-            )),
+            _ => {
+                return Err(cli_error(
+                    "--event-log must be a relative path inside the repository",
+                ));
+            }
         }
     }
     let target = root.join(&clean);
@@ -1560,7 +1562,10 @@ mod tests {
         let receiver = events.subscribe();
         let writer = tokio::spawn(write_event_log(receiver, path.clone()));
         let run_id = Uuid::new_v4();
-        events.emit(OrchestratorEvent::RunStarted { run_id, task_count: 1 });
+        events.emit(OrchestratorEvent::RunStarted {
+            run_id,
+            task_count: 1,
+        });
         events.emit(OrchestratorEvent::RunFinished {
             run_id,
             succeeded: 1,
@@ -1586,5 +1591,4 @@ mod tests {
         assert!(resolve_event_log(&root, Path::new("../outside.jsonl")).is_err());
         assert!(resolve_event_log(&root, Path::new("/tmp/outside.jsonl")).is_err());
     }
-
 }
