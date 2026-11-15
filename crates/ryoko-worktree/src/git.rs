@@ -1256,13 +1256,16 @@ impl WorkspaceProvider for GitWorktreeManager {
                     "dependency has not published validated changes".into(),
                 ));
             }
-            let head = record.head_commit.ok_or_else(|| {
-                CoreError::Workspace("dependency has no published commit".into())
-            })?;
+            let head = record
+                .head_commit
+                .ok_or_else(|| CoreError::Workspace("dependency has no published commit".into()))?;
             let current = self
                 .checked(
                     "verify dependency ref",
-                    &["rev-parse", &format!("refs/heads/{}", record.session.branch_name)],
+                    &[
+                        "rev-parse",
+                        &format!("refs/heads/{}", record.session.branch_name),
+                    ],
                     &self.base_project_path,
                 )
                 .await
@@ -1282,7 +1285,11 @@ impl WorkspaceProvider for GitWorktreeManager {
             .map_err(CoreError::from)?;
         if let Some(head) = parent_head {
             if let Err(error) = self
-                .checked("inherit validated parent", &["reset", "--hard", &head], &session.path)
+                .checked(
+                    "inherit validated parent",
+                    &["reset", "--hard", &head],
+                    &session.path,
+                )
                 .await
             {
                 let _ = self.abandon_worktree(&session).await;
@@ -1653,11 +1660,17 @@ mod tests {
     async fn dependent_agent_inherits_published_parent_commit() {
         let (_dir, manager) = repo().await;
         let parent = Task::new("architecture", AgentRole::SeniorDeveloper);
-        let session = manager.create_worktree("architect", parent.id).await.unwrap();
+        let session = manager
+            .create_worktree("architect", parent.id)
+            .await
+            .unwrap();
         tokio::fs::write(session.path.join("architecture.txt"), "contract")
             .await
             .unwrap();
-        manager.publish_worktree(&session, "architecture").await.unwrap();
+        manager
+            .publish_worktree(&session, "architecture")
+            .await
+            .unwrap();
         manager.clean_worktree(&session).await.unwrap();
 
         let task = Task::new("tests", AgentRole::QaEngineer).depends_on(&parent);
@@ -1676,7 +1689,10 @@ mod tests {
     async fn unpublished_dependency_is_rejected_without_new_worktree() {
         let (_dir, manager) = repo().await;
         let parent = Task::new("architecture", AgentRole::SeniorDeveloper);
-        let session = manager.create_worktree("architect", parent.id).await.unwrap();
+        let session = manager
+            .create_worktree("architect", parent.id)
+            .await
+            .unwrap();
         let child = Task::new("tests", AgentRole::QaEngineer).depends_on(&parent);
         let identity = AgentIdentity::new(AgentRole::QaEngineer, "qa", "tests");
         assert!(manager.allocate(&child, &identity).await.is_err());
