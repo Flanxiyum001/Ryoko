@@ -8,7 +8,10 @@
 //! refuses proposals that do not carry tests, so source-only changes never
 //! reach review.
 
+mod process;
 mod spec;
+
+pub use process::{BuildBackend, BuildSandbox, BuildSandboxError};
 
 pub use spec::{SandboxSpecValidator, SpecError, SpecEvidence, SpecPolicy};
 
