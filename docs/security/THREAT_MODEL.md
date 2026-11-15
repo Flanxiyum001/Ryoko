@@ -57,8 +57,9 @@ digest and commands; mismatched evidence is rejected.
 
 Keys leak through logs, prompts, error bodies, memory or generated files.
 Mitigations: credentials only from environment or OS store; redaction in logs and
-error bodies; provider responses bounded and sanitised; secret scanning in CI;
-memory refuses secret-shaped content.
+error bodies; provider responses bounded and sanitised; secret scanning in CI and
+before worktree acceptance; dependency audits before acceptance; memory refuses
+secret-shaped content.
 
 ### Supply chain
 
