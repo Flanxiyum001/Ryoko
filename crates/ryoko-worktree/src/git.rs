@@ -580,7 +580,10 @@ impl GitWorktreeManager {
             return Err(WorktreeError::NotPublished(source.branch_name.clone()));
         }
         if !self
-            .git(&self.base_project_path, &["check-ref-format", "--branch", target])
+            .git(
+                &self.base_project_path,
+                &["check-ref-format", "--branch", target],
+            )
             .await?
             .status
             .success()
@@ -595,7 +598,11 @@ impl GitWorktreeManager {
             )
             .await?;
         let checkout_head = self
-            .checked("resolve checkout HEAD", &["rev-parse", "HEAD"], &self.base_project_path)
+            .checked(
+                "resolve checkout HEAD",
+                &["rev-parse", "HEAD"],
+                &self.base_project_path,
+            )
             .await?;
         if target_head != checkout_head {
             return Err(WorktreeError::State(
@@ -616,9 +623,10 @@ impl GitWorktreeManager {
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .kill_on_drop(true)
                 .spawn()?;
-            let mut input = process.stdin.take().ok_or_else(|| {
-                WorktreeError::State("git apply stdin unavailable".into())
-            })?;
+            let mut input = process
+                .stdin
+                .take()
+                .ok_or_else(|| WorktreeError::State("git apply stdin unavailable".into()))?;
             input.write_all(patch.as_bytes()).await?;
             drop(input);
             let output = tokio::time::timeout(Duration::from_secs(20), process.wait_with_output())
@@ -1817,7 +1825,10 @@ mod tests {
         tokio::fs::write(source.path.join("notes.txt"), changed)
             .await
             .unwrap();
-        manager.publish_worktree(&source, "two hunks").await.unwrap();
+        manager
+            .publish_worktree(&source, "two hunks")
+            .await
+            .unwrap();
 
         let diff = manager.diff_worktree(&source, "main").await.unwrap();
         let hunks = HunkPatch::parse(&diff.patch).unwrap();
