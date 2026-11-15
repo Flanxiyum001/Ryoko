@@ -441,7 +441,7 @@ function renderMissionDetail(): void {
       if (attempt.validation) {
         addDetailRow(row, 'Validation', attempt.validation.summary);
         if (attempt.validation.logs.length) {
-          addDetailRow(row, 'Container / validation logs', attempt.validation.logs.join('\\n'), true);
+          addDetailRow(row, 'Container / validation logs', attempt.validation.logs.join('\n'), true);
         }
       }
       if (attempt.error) addDetailRow(row, 'Error', attempt.error);
