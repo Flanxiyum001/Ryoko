@@ -1304,7 +1304,7 @@ fn canonical_root(path: &Path) -> Result<PathBuf, Box<dyn Error>> {
         .map_err(|error| cli_error(format!("cannot open {}: {error}", path.display())))
 }
 
-const MAX_EVENT_LOG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_EVENT_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Emit bounded JSONL event records. The file is created with private
 /// permissions before this task starts; never overwrite an existing log.
@@ -1330,7 +1330,7 @@ async fn write_event_log(
         let mut line = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
         line.push(b'\n');
         if written.saturating_add(line.len() as u64) > MAX_EVENT_LOG_BYTES {
-            eprintln!("warning: Mission Control log reached the 8 MiB limit");
+            eprintln!("warning: Mission Control log reached the 4 MiB limit");
             break;
         }
         written += line.len() as u64;
