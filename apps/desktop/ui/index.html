@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Ryoko</title>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
+      <div class="workspace-name" id="workspaceName">No folder open</div>
+      <div class="top-actions">
+        <button id="openFolder" class="button primary" type="button">Open folder…</button>
+        <button id="saveFile" class="button ghost" type="button" disabled>Save</button>
+        <span class="shortcut-hint">⌘S / Ctrl+S</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="explorer" aria-label="Workspace explorer">
+        <div class="panel-head"><span>EXPLORER</span><span id="fileCount" class="counter">0 files</span></div>
+        <label class="sr-only" for="fileFilter">Filter files</label>
+        <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
+        <div id="fileList" class="file-list">
+          <p class="hint">Open a folder to browse its files.</p>
+        </div>
+      </aside>
+
+      <main class="editor-column" aria-label="Code editor">
+        <div class="tabbar">
+          <span id="activePath" class="active-path">No file open</span>
+          <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
+        </div>
+        <div id="editor" class="editor hidden"></div>
+        <div id="emptyEditor" class="empty-editor">
+          <div class="empty-mark" aria-hidden="true">⌘</div>
+          <h1>Ryoko Desktop</h1>
+          <p>Open a folder, edit files with Monaco, and see findings published by <code>ryoko-lsp</code>.</p>
+        </div>
+      </main>
+
+      <aside class="problems" aria-label="Diagnostics">
+        <div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
+        <div id="problemList" class="problem-list">
+          <p class="hint">No diagnostics yet.</p>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="statusbar">
+      <span id="lspStatus" class="status-pill offline">ryoko-lsp offline</span>
+      <span id="editorStatus" class="status-message" role="status" aria-live="polite">Ready</span>
+      <span class="status-spacer"></span>
+      <span id="cursorPos">Ln 1, Col 1</span>
+      <span id="languageMode">plaintext</span>
+      <span>UTF-8</span>
+    </footer>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
