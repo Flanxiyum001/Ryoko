@@ -18,8 +18,8 @@ use ryoko_core::{
     team::{application_plan, standard_team},
 };
 use ryoko_models::{
-    ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
-    ProviderProfile,
+    Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
+    ProviderProfile, UsageLedger,
 };
 use ryoko_sandbox::SpecPolicy;
 use ryoko_worktree::{
@@ -253,7 +253,58 @@ struct ModelArgs {
 }
 
 impl ModelArgs {
+    fn ledger(&self) -> Result<UsageLedger, Box<dyn Error>> {
+        let mut budget = Budget::unlimited();
+        let mut limited = false;
+        if let Some(limit) = self.budget_usd {
+            if !limit.is_finite() || limit <= 0.0 {
+                return Err(cli_error("--budget-usd must be a positive finite number"));
+            }
+            budget.limit_usd = limit;
+            limited = true;
+        }
+        if let Some(limit) = self.budget_tokens {
+            if limit == 0 {
+                return Err(cli_error("--budget-tokens must be greater than zero"));
+            }
+            budget.limit_tokens = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.budget_secs {
+            if limit == 0 {
+                return Err(cli_error("--budget-secs must be greater than zero"));
+            }
+            budget.limit_seconds = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.task_budget_usd {
+            if !limit.is_finite() || limit <= 0.0 {
+                return Err(cli_error(
+                    "--task-budget-usd must be a positive finite number",
+                ));
+            }
+            budget.task_limit_usd = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.task_budget_tokens {
+            if limit == 0 {
+                return Err(cli_error("--task-budget-tokens must be greater than zero"));
+            }
+            budget.task_limit_tokens = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.task_budget_secs {
+            if limit == 0 {
+                return Err(cli_error("--task-budget-secs must be greater than zero"));
+            }
+            budget.task_limit_seconds = Some(limit);
+            limited = true;
+        }
+        Ok(UsageLedger::new(limited.then_some(budget)))
+    }
+
     fn load(&self) -> Result<(String, Arc<ModelRouter>), Box<dyn Error>> {
+        let ledger = self.ledger()?;
         let model = self
             .model
             .clone()
@@ -261,7 +312,9 @@ impl ModelArgs {
             .ok_or_else(|| cli_error("set RYOKO_MODEL or pass --model"))?;
         if let Some(config) = &self.config {
             let catalog = load_catalog(config)?;
-            let router = catalog.build_router_for_models([model.as_str()])?;
+            let router = catalog
+                .build_router_for_models([model.as_str()])?
+                .with_ledger(ledger);
             return Ok((model, Arc::new(router)));
         }
         let base_url = self
@@ -297,7 +350,7 @@ impl ModelArgs {
         }
         let provider = OpenAiCompatProvider::new(config)
             .map_err(|error| cli_error(format!("could not configure model provider: {error}")))?;
-        let mut router = ModelRouter::new(provider_id);
+        let mut router = ModelRouter::new(provider_id).with_ledger(ledger);
         router.register(Arc::new(provider));
         Ok((model, Arc::new(router)))
     }
@@ -1224,5 +1277,64 @@ mod tests {
         assert!(context.contains("--- src/App.tsx ---"));
         assert!(context.contains("structural outline"));
         assert!(context.contains("function Greeting"));
+    }
+
+    fn model_args(usd: Option<f64>, tokens: Option<u64>, secs: Option<u64>) -> ModelArgs {
+        ModelArgs {
+            config: None,
+            model: None,
+            base_url: None,
+            api_key: None,
+            budget_usd: usd,
+            budget_tokens: tokens,
+            budget_secs: secs,
+            task_budget_usd: None,
+            task_budget_tokens: None,
+            task_budget_secs: None,
+        }
+    }
+
+    #[test]
+    fn budget_flags_build_a_ledger() {
+        let ledger = model_args(Some(0.5), Some(1_000), Some(30))
+            .ledger()
+            .unwrap();
+        let budget = ledger.budget().unwrap();
+        assert_eq!(budget.limit_usd, 0.5);
+        assert_eq!(budget.limit_tokens, Some(1_000));
+        assert_eq!(budget.limit_seconds, Some(30));
+    }
+
+    #[test]
+    fn task_budget_flags_are_independent_of_the_run_cap() {
+        let mut args = model_args(Some(1.0), None, None);
+        args.task_budget_usd = Some(0.25);
+        args.task_budget_tokens = Some(2_000);
+        args.task_budget_secs = Some(45);
+        let ledger = args.ledger().unwrap();
+        let budget = ledger.budget().unwrap();
+        assert_eq!(budget.limit_usd, 1.0);
+        assert_eq!(budget.task_limit_usd, Some(0.25));
+        assert_eq!(budget.task_limit_tokens, Some(2_000));
+        assert_eq!(budget.task_limit_seconds, Some(45));
+    }
+
+    #[test]
+    fn no_budget_flags_disable_limits() {
+        assert!(
+            model_args(None, None, None)
+                .ledger()
+                .unwrap()
+                .budget()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_budget_flags() {
+        assert!(model_args(Some(0.0), None, None).ledger().is_err());
+        assert!(model_args(Some(f64::NAN), None, None).ledger().is_err());
+        assert!(model_args(None, Some(0), None).ledger().is_err());
+        assert!(model_args(None, None, Some(0)).ledger().is_err());
     }
 }
