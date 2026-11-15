@@ -61,7 +61,7 @@ describe('mission event log', () => {
       '{"type":"task_started","task_id":"x","agent":"backend","attempt":2}',
       '{"type":"validation_finished","task_id":"x","passed":true,"summary":"passed","logs":["ok"],"duration_ms":15}',
       '{"type":"task_succeeded","task_id":"x","attempts":2,"output":"fixed"}',
-    ].join('\\n');
+    ].join('\n');
     const task = reduceMissionEvents(parseMissionLog(records)).tasks[0];
     expect(task.history?.map((entry) => entry.status)).toEqual(['retrying', 'succeeded']);
     expect(task.history?.[0].validation?.logs).toEqual(['error A']);
