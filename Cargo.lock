@@ -1863,6 +1863,7 @@ dependencies = [
  "async-trait",
  "ryoko-core",
  "serde",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "uuid",

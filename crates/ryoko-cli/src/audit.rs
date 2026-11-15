@@ -195,12 +195,10 @@ async fn run_tool(program: &str, args: &[&str], root: &Path) -> ToolOutcome {
 
 fn parse_cargo_audit(json: &str) -> Result<Vec<AuditFinding>, String> {
     let value: Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
-    let Some(list) = value
+    let list = value
         .pointer("/vulnerabilities/list")
         .and_then(Value::as_array)
-    else {
-        return Ok(Vec::new());
-    };
+        .ok_or_else(|| "cargo audit JSON is missing vulnerabilities.list".to_owned())?;
     Ok(list
         .iter()
         .take(MAX_FINDINGS)
@@ -223,9 +221,10 @@ fn parse_cargo_audit(json: &str) -> Result<Vec<AuditFinding>, String> {
 
 fn parse_npm_audit(json: &str) -> Result<Vec<AuditFinding>, String> {
     let value: Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
-    let Some(vulnerabilities) = value.get("vulnerabilities").and_then(Value::as_object) else {
-        return Ok(Vec::new());
-    };
+    let vulnerabilities = value
+        .get("vulnerabilities")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "npm audit JSON is missing vulnerabilities".to_owned())?;
     let mut findings = Vec::new();
     for (name, details) in vulnerabilities {
         let severity = details
@@ -267,10 +266,15 @@ fn parse_npm_audit(json: &str) -> Result<Vec<AuditFinding>, String> {
 fn scan_secrets(changes: &StagedChanges, report: &mut SecurityAuditReport) {
     for change in &changes.files {
         if change.content.len() > MAX_SCAN_BYTES {
-            report.notes.push(format!(
-                "secret scan skipped {}: file exceeds {} bytes",
-                change.path, MAX_SCAN_BYTES
-            ));
+            push_finding(
+                report,
+                "secret scan",
+                "unknown",
+                format!(
+                    "{}: security scan blocked: proposed file exceeds {} bytes",
+                    change.path, MAX_SCAN_BYTES
+                ),
+            );
             continue;
         }
         for (index, line) in change.content.lines().enumerate() {
@@ -458,6 +462,29 @@ mod tests {
         )
         .await;
         assert!(report.passed(), "{:?}", report.findings);
+    }
+
+    #[test]
+    fn audit_parsers_reject_missing_vulnerability_fields() {
+        assert!(parse_cargo_audit(r#"{"success":true}"#).is_err());
+        assert!(parse_npm_audit(r#"{"metadata":{"vulnerabilities":{}}}"#).is_err());
+        assert!(parse_cargo_audit(r#"{"vulnerabilities":{"list":[]}}"#).is_ok());
+        assert!(parse_npm_audit(r#"{"vulnerabilities":{}}"#).is_ok());
+    }
+
+    #[tokio::test]
+    async fn refuses_to_skip_secret_scans_for_oversized_proposals() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let oversized = "a".repeat(MAX_SCAN_BYTES + 1);
+        let report =
+            run_security_audit(dir.path(), &staged(&[("src/config.rs", &oversized)])).await;
+        assert!(!report.passed());
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("exceeds"))
+        );
     }
 
     #[test]
