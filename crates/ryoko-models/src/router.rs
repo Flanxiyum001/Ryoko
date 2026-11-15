@@ -111,7 +111,8 @@ impl ModelRouter {
     }
 
     pub async fn stream(&self, request: ChatRequest) -> Result<ModelStream, ModelError> {
-        self.ledger.check_budget()?;
+        let scope = request.scope.clone();
+        self.ledger.check_budget_for(scope.as_deref())?;
         let (entry, bare_model) = self.resolve(&request.model)?;
 
         let mut provider_request = request;
@@ -127,7 +128,7 @@ impl ModelRouter {
         let stream = entry.provider.stream(provider_request).await?;
         let mapped = stream.map(move |item| {
             if let Ok(StreamEvent::Usage(usage)) = &item {
-                ledger.record(&provider_id, &bare_model, *usage, pricing);
+                ledger.record_for(scope.as_deref(), &provider_id, &bare_model, *usage, pricing);
             }
             item
         });
@@ -135,32 +136,41 @@ impl ModelRouter {
     }
 
     pub async fn complete(&self, request: ChatRequest) -> Result<Completion, ModelError> {
-        let remaining = self.ledger.remaining_time();
-        let limit_seconds = self
-            .ledger
-            .budget()
-            .and_then(|budget| budget.limit_seconds)
-            .unwrap_or(0);
+        let scope = request.scope.clone();
+        // Start the per-task clock before opening the network connection.
+        self.ledger.check_budget_for(scope.as_deref())?;
+        let remaining = self.ledger.remaining_time_for(scope.as_deref());
         let work = async {
             let requested_model = request.model.clone();
-            // The time budget must include connection setup and provider
-            // stream construction, not just aggregating an established stream.
+            // The deadline includes provider startup and stream creation,
+            // not merely collection once the remote connection exists.
             let stream = self.stream(request).await?;
             let mut completion = Completion {
                 model: requested_model,
                 ..Completion::default()
             };
             collect_stream(stream, &mut completion).await?;
-            self.ledger.check_budget()?;
+            self.ledger.check_budget_for(scope.as_deref())?;
             Ok(completion)
         };
         if let Some(duration) = remaining {
             match tokio::time::timeout(duration, work).await {
                 Ok(result) => result,
-                Err(_) => Err(ModelError::LatencyBudgetExceeded {
-                    budget_secs: limit_seconds,
-                    elapsed_ms: self.ledger.elapsed().as_millis() as u64,
-                }),
+                Err(_) => {
+                    // Preserve task-specific failures rather than attributing a
+                    // task timeout to the global run's (possibly absent) cap.
+                    if let Err(error) = self.ledger.check_budget_for(scope.as_deref()) {
+                        return Err(error);
+                    }
+                    Err(ModelError::LatencyBudgetExceeded {
+                        budget_secs: self
+                            .ledger
+                            .budget()
+                            .and_then(|budget| budget.limit_seconds)
+                            .unwrap_or(0),
+                        elapsed_ms: self.ledger.elapsed().as_millis() as u64,
+                    })
+                }
             }
         } else {
             work.await
@@ -176,7 +186,7 @@ pub async fn collect_stream(
     mut stream: ModelStream,
     completion: &mut Completion,
 ) -> Result<(), ModelError> {
-    // Bound model-controlled completion content independently of HTTP event caps.
+    // Explicit completion caps guard against unlimited model-controlled data.
     const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
     const MAX_TOOL_CALLS: usize = 128;
     const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
@@ -252,29 +262,6 @@ mod tests {
     use crate::types::{Message, Role};
 
     #[tokio::test]
-    async fn aggregate_rejects_excess_model_text_and_tool_arguments() {
-        let text_stream = futures::stream::iter([Ok(StreamEvent::TextDelta {
-            text: "a".repeat(4 * 1024 * 1024 + 1),
-        })]);
-        let mut completion = Completion::default();
-        assert!(matches!(
-            collect_stream(Box::pin(text_stream), &mut completion).await,
-            Err(ModelError::Decode(_))
-        ));
-
-        let tool_stream = futures::stream::iter([Ok(StreamEvent::ToolCallDelta {
-            index: 1,
-            id: Some("id".into()),
-            name: Some("tool".into()),
-            arguments_delta: "b".repeat(1024 * 1024 + 1),
-        })]);
-        assert!(matches!(
-            collect_stream(Box::pin(tool_stream), &mut Completion::default()).await,
-            Err(ModelError::Decode(_))
-        ));
-    }
-
-    #[tokio::test]
     async fn aggregates_stream_and_records_usage() {
         let mock = Arc::new(MockProvider::new("mock").with_pricing(Pricing::new(2.0, 10.0)));
         mock.push_turn(
@@ -335,6 +322,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregation_rejects_unbounded_provider_output() {
+        let text_stream = futures::stream::iter([Ok(StreamEvent::TextDelta {
+            text: "a".repeat(4 * 1024 * 1024 + 1),
+        })]);
+        assert!(matches!(
+            collect_stream(Box::pin(text_stream), &mut Completion::default()).await,
+            Err(ModelError::Decode(_))
+        ));
+
+        let tool_stream = futures::stream::iter([Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call".into()),
+            name: Some("tool".into()),
+            arguments_delta: "x".repeat(1024 * 1024 + 1),
+        })]);
+        assert!(matches!(
+            collect_stream(Box::pin(tool_stream), &mut Completion::default()).await,
+            Err(ModelError::Decode(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn budget_blocks_dispatch() {
         let mock = Arc::new(MockProvider::new("mock").with_pricing(Pricing::new(100.0, 100.0)));
         mock.push_turn(ScriptedTurn::text("too expensive").with_usage(Usage::new(10_000, 10_000)));
@@ -342,14 +351,9 @@ mod tests {
         let mut router = ModelRouter::new("mock").with_ledger(ledger);
         router.register(mock);
 
-        let first = router
-            .complete(ChatRequest::new("mock-1"))
-            .await
-            .unwrap_err();
+        let first = router.complete(ChatRequest::new("mock-1")).await.unwrap_err();
         assert!(matches!(first, ModelError::BudgetExceeded { .. }));
 
-        // An over-budget completion is not returned to its caller, and
-        // subsequent requests are rejected before reaching the provider.
         let err = router
             .complete(ChatRequest::new("mock-1"))
             .await
