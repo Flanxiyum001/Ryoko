@@ -45,7 +45,7 @@ fn valid_log_name(name: &str) -> bool {
         && !name.contains('/')
         && !name.contains('\\')
         && !name.contains("..")
-        && !name.contains('\0')
+        && !name.chars().any(char::is_control)
 }
 
 fn log_path(root: &Path, name: &str) -> Result<PathBuf, String> {
@@ -158,7 +158,7 @@ mod tests {
         assert!(!valid_log_name("run.txt"));
         assert!(!valid_log_name("../run.jsonl"));
         assert!(!valid_log_name("nested/run.jsonl"));
-        assert!(!valid_log_name("nested\run.jsonl"));
+        assert!(!valid_log_name("nested\\run.jsonl"));
     }
 
     #[cfg(unix)]
