@@ -73,7 +73,7 @@ impl BuildSandbox {
             .ok_or(BuildSandboxError::MissingImage)?;
         // Docker --mount uses comma-separated key/value pairs. Forbid commas
         // instead of allowing a workspace path to inject extra mount options.
-        if root.to_string_lossy().contains([',', '\n', '\r']) {
+        if root.to_string_lossy().chars().any(|ch| matches!(ch, ',' | '\n' | '\r')) {
             return Err(BuildSandboxError::InvalidConfiguration);
         }
         let runtime = self.resolve_runtime().await?;
@@ -263,6 +263,7 @@ mod tests {
     #[tokio::test]
     async fn host_requires_an_explicit_backend_and_caps_output() {
         let dir = TempDir::new().unwrap();
+        #[cfg(unix)]
         let sandbox = BuildSandbox::new(BuildBackend::UnsafeHost, None);
         #[cfg(unix)]
         {
