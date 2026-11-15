@@ -1,27 +1,27 @@
 # MCP developer-tool client (operator-controlled alpha)
 
-\`ryoko-core::mcp\` owns the MCP JSON-RPC client, schema and response
-validation, pagination limits and mandatory \`McpApprovalGate\`. The CLI
+`ryoko-core::mcp` owns the MCP JSON-RPC client, schema and response
+validation, pagination limits and mandatory `McpApprovalGate`. The CLI
 implements a bounded **stdio** transport. This is a deliberately narrow MCP
 integration: it is **not** a fully autonomous agent tool loop.
 
 ## List tools from a trusted server
 
-\`\`\`sh
+```sh
 cargo run -p ryoko-cli -- mcp --server node \
   --server-arg ./path/to/trusted-mcp-server.mjs tools
-\`\`\`
+```
 
 ## Invoke a tool with human confirmation
 
-\`\`\`sh
+```sh
 cargo run -p ryoko-cli -- mcp --server node \
   --server-arg ./path/to/trusted-mcp-server.mjs \
   call --tool list_issues --arguments '{"state":"open"}'
-\`\`\`
+```
 
 The CLI prints the chosen tool and its exact argument JSON. It invokes the
-tool **only** if the operator types \`YES\` for that invocation. A fresh
+tool **only** if the operator types `YES` for that invocation. A fresh
 approval is required for every call. Server tools cannot grant themselves
 permissions, and listing tools does not imply approval.
 
@@ -29,11 +29,11 @@ Servers may need credentials. The child gets a minimal PATH/HOME/temporary
 directory environment; all other variables are denied by default. Explicitly
 forward only the variable a reviewed server requires:
 
-\`\`\`sh
+```sh
 cargo run -p ryoko-cli -- mcp --server node \
   --server-arg ./path/to/trusted-mcp-server.mjs \
   --allow-env GITHUB_TOKEN tools
-\`\`\`
+```
 
 Environment variable **names**, not secret values, are passed on the
 command line. Never select a server executable from model output and never
@@ -43,8 +43,8 @@ agent prompts by this integration.
 
 ## Security boundaries
 
-- Legacy MCP initialize/initialized handshake and \`tools/list\`,
-  \`tools/call\` over newline-delimited JSON-RPC 2.0 stdio.
+- Legacy MCP initialize/initialized handshake and `tools/list`,
+  `tools/call` over newline-delimited JSON-RPC 2.0 stdio.
 - Protocol negotiation supports 2025-03-26 and 2025-06-18. Other versions
   fail rather than silently guessing framing or tool semantics.
 - Requests capped at 64 KiB; response frames and results at 1 MiB;
