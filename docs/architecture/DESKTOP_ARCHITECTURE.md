@@ -1,96 +1,90 @@
 # Desktop architecture
 
-Status: planned. No Tauri or frontend package exists in this workspace yet.
+Status: the Tauri foundation exists. `apps/desktop` now contains a native
+`src-tauri` shell and a Vite/TypeScript frontend under `ui/`. The pre-existing
+browser workbench (`index.html`, `app.js`, `styles.css`) is still served by the
+GitHub App broker and remains separate from the native app.
 
 ## Shape
 
 ```text
 apps/desktop/
-  src/                React + TypeScript UI
+  ui/                 Vite + TypeScript UI (Monaco editor)
+    src/              editor wiring, LSP client, protocol helpers
   src-tauri/          Rust application shell
-    src/              command handlers, window lifetime, services wiring
+    src/              command handlers, workspace I/O, LSP process relay
     capabilities/     Tauri capability manifests
+    binaries/         generated ryoko-lsp sidecars (not committed)
+    icons/            bundle icons
 ```
 
-`Cargo.toml` already excludes `apps/desktop/src-tauri` from the root workspace, so
-the desktop shell builds independently while reusing the domain crates.
+`Cargo.toml` excludes `apps/desktop/src-tauri` from the root workspace, so the
+desktop shell builds independently while the sidecar reuses the domain crates.
 
-## Responsibilities
+## Implemented foundation
 
 | Part | Owns |
 | --- | --- |
-| `src-tauri` | Window lifetime, command handlers, service composition, credential access, event dispatch |
-| `src/` | Rendering, keybindings, panel layout, optimistic UI, local view state |
+| `src-tauri` | Window lifetime, workspace file commands, `ryoko-lsp` process lifecycle and framing, capability scopes |
+| `ui/` | Monaco models, explorer, editor keybindings, LSP JSON-RPC client, problems view |
 
-The frontend never owns project files, model credentials, permission policy or
-task truth. It renders what the backend reports and requests typed operations.
-
-## IPC contract
-
-Commands are verbs with typed arguments and typed results. Events are facts, not
-requests.
+### Commands
 
 ```text
-workspace.open / close / list
-editor.open_document / save_document / apply_patch / get_document
-git.status / diff / stage / commit
-model.list_providers / list_models / test_connection
-agent.list / start / pause / resume / cancel
-task.list / get / approve / reject
-terminal.create / write / resize / terminate
-lsp.start / stop / restart
-approval.list / respond
+open_workspace(path)            canonicalises and stores the workspace root
+list_files()                    bounded, gitignore-aware file list
+read_file(path)                 UTF-8, max 2 MiB, canonical path inside the root
+write_file(path, content)       atomic save, max 2 MiB, refuses symlink escapes
+lsp_start(root)                 spawns ryoko-lsp with piped stdio
+lsp_send(message)               validates JSON, writes one Content-Length frame
+lsp_stop()                      terminates the language server
 ```
 
-```text
-workspace.changed            editor.document_changed
-editor.diagnostics_updated   git.status_changed
-git.diff_updated             agent.status_changed
-agent.progress               agent.tool_requested
-agent.artifact_created       task.created / updated / completed / failed
-approval.required / resolved execution.started / output / completed
-model.usage_updated          security.policy_violation
-```
+`lsp_start` resolves the server from `RYOKO_LSP_BIN`, then a sibling
+`ryoko-lsp` binary (the bundled Tauri sidecar), then `PATH`. Output frames are
+parsed in Rust and emitted as `ryoko-lsp-message` events; stderr lines become
+`ryoko-lsp-log`; process exit emits `ryoko-lsp-closed`.
 
-Rules:
+The frontend sends `initialize` / `initialized`, `didOpen`, `didChange` and
+`didClose`, and turns `textDocument/publishDiagnostics` into Monaco markers and
+a problems list. Documents therefore live in `ryoko-vfs` inside the server
+process, not in the browser.
 
-- Every payload is Serde-typed on both sides; no untyped JSON blobs.
-- Every event carries `workspace_id`, and where relevant `task_id`,
-  `attempt_id`, `document_version` and a monotonic sequence number.
-- Event schemas are versioned (`v1`). Adding a field is compatible; removing or
-  changing meaning is not.
-- Long-running work returns an identifier immediately and reports progress through
-  events. Cancellation is a first-class command.
-- Commands validate arguments before touching services; errors are structured
-  (`code`, `message`, `retryable`).
+### Security
 
-## Security
+- Workspace commands reject absolute paths, parent traversal, NUL bytes,
+  symlink escapes, non-UTF-8 content and files over 2 MiB.
+- Saves write a sibling temp file, fsync, then rename (Windows replaces first).
+- The capability manifest grants only `core:default` and `dialog:allow-open`;
+  there is no shell plugin and no filesystem plugin scope.
+- The CSP allows only local scripts/styles, local workers and Tauri IPC.
 
-- Capability manifests grant the minimum surface: no shell plugin, no unrestricted
-  filesystem scope.
-- Content Security Policy is strict; no remote code, no inline scripts in
-  production.
-- Provider keys and tokens live in the OS credential store, never in `localStorage`,
-  project files or event logs.
-- The custom protocol handler for project files validates canonical paths inside
-  the workspace and refuses symlink escapes.
-- Approvals are recorded server-side; the UI cannot manufacture an approval.
+## Verification
 
-## State model
+- `npm test` — protocol helpers (URI encoding, language mapping, severities,
+  JSON-RPC guards).
+- `npm run build` — TypeScript check plus Vite production build.
+- `rustc --test src-tauri/src/paths.rs` and `rustc --test
+  src-tauri/src/lsp_frame.rs` — path confinement and framing tests, runnable
+  without Tauri or system WebKit libraries.
+- `.github/workflows/desktop.yml` builds the sidecar and installers on macOS,
+  Windows and Linux runners; installers cannot be produced on a Linux-only
+  development host.
 
-UI state is derived. Sources of truth:
+## Not implemented yet
 
-- backend snapshots for workspace, tasks, approvals and diagnostics;
-- a local document buffer only while the user edits, reconciled by version.
-
-When a backend event reports a newer `document_version`, the editor marks unsaved
-local buffers as conflicting instead of overwriting them.
+- Task DAG visualizer and per-agent token telemetry (requires persisted
+  orchestrator events).
+- Side-by-side worktree hunk review (the CLI still accepts or rejects a whole
+  patch).
+- Signing/notarisation credentials and automatic release publishing.
 
 ## Packaging
 
-- Build on Windows, macOS and Linux in CI; never infer cross-platform behaviour
-  from Linux alone.
-- Sign and notarise macOS builds; sign Windows installers.
-- Versioned database migrations run before the first window opens; failure to
-  migrate is a fatal, visible error, not a silent reset.
-- Crash reporting is opt-in and redacts paths, prompts and credentials.
+- `npm run tauri build` builds `.dmg` (macOS), `.msi`/NSIS (Windows) and
+  `.AppImage`/`.deb` (Linux).
+- CI builds `ryoko-lsp` with the workspace and copies it to
+  `src-tauri/binaries/ryoko-lsp-<target-triple>` so Tauri bundles it as an
+  external binary next to the app executable.
+- Builds are unsigned until certificate secrets are configured; do not present
+  unsigned artifacts as release-ready.
