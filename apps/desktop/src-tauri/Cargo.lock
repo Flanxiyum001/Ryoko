@@ -2502,6 +2502,7 @@ name = "ryoko-desktop"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "reqwest",
  "serde",
  "serde_json",
  "tauri",
