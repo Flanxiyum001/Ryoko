@@ -22,7 +22,7 @@ use crate::diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 use crate::error::{CoreError, CoreResult};
 use crate::event::{EventSink, OrchestratorEvent};
 use crate::memory::SharedMemory;
-use crate::model::{AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
+use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::WorkspaceProvider;
 use ryoko_models::ModelRouter;
@@ -572,14 +572,25 @@ async fn execute_task(
             if attempt == max_attempts {
                 // Exhausted without a passing validation: no pull request will
                 // exist, so the editor is the only place that can explain the
-                // missing proposal.
+                // missing proposal. Agents that fail before validation report
+                // their own failures, so this only fires when validation is the
+                // reason the task stopped.
                 if let Some(sink) = &diagnostic_sink {
-                    publish_validation_exhausted(
+                    let attempts_label = if max_attempts == 1 {
+                        "attempt"
+                    } else {
+                        "attempts"
+                    };
+                    publish_findings(
                         sink.as_ref(),
                         &context.project.project_root,
-                        &result.changes,
-                        &report.summary,
-                        max_attempts,
+                        result.changes.iter().map(|change| change.path.as_str()),
+                        DiagnosticLevel::Error,
+                        "ryoko.validation.failed",
+                        &format!(
+                            "Ryoko proposed nothing: validation never passed after {max_attempts} {attempts_label}: {}",
+                            report.summary
+                        ),
                     );
                 }
             }
@@ -606,11 +617,13 @@ async fn execute_task(
                     attempts: attempt,
                 };
                 if let Some(sink) = &diagnostic_sink {
-                    publish_task_findings(
+                    publish_findings(
                         sink.as_ref(),
                         &context.project.project_root,
-                        &pr.files,
-                        &report.summary,
+                        pr.files.iter().map(String::as_str),
+                        DiagnosticLevel::Info,
+                        "ryoko.validation",
+                        &format!("Ryoko validation passed: {}", report.summary),
                     );
                 }
                 let _ = lease.discard().await;
@@ -641,60 +654,33 @@ async fn execute_task(
     )
 }
 
-/// Sends one informational finding per changed file to the attached editor.
-/// Files stay relative to the project root the run was started from; the sink
-/// resolves them. A run without a root has no editor document to address, so
-/// nothing is published.
-fn publish_task_findings(
+/// Sends one finding per file to the attached editor. Paths stay relative to
+/// the project root the run was started from; the sink resolves them. A run
+/// without a root, or with no files to point at, has no editor document to
+/// address, so nothing is published.
+fn publish_findings<'a>(
     sink: &dyn TaskDiagnosticSink,
     project_root: &str,
-    files: &[String],
-    summary: &str,
+    files: impl IntoIterator<Item = &'a str>,
+    level: DiagnosticLevel,
+    code: &str,
+    message: &str,
 ) {
-    if project_root.is_empty() || files.is_empty() {
+    if project_root.is_empty() {
         return;
     }
-    let message = format!("Ryoko validation passed: {summary}");
     let findings: Vec<TaskDiagnostic> = files
-        .iter()
+        .into_iter()
         .map(|file| TaskDiagnostic {
-            file: file.clone(),
-            level: DiagnosticLevel::Info,
-            message: message.clone(),
-            code: Some("ryoko.validation".to_owned()),
+            file: file.to_owned(),
+            level,
+            message: message.to_owned(),
+            code: Some(code.to_owned()),
         })
         .collect();
-    sink.publish(project_root, &findings);
-}
-
-/// Reports why an exhausted task proposed nothing: every attempt was rejected
-/// by validation, so no pull request was opened. The error points at the files
-/// of the last rejected attempt, which is where the agent tried to write.
-/// Agents that fail before validation report their own failures, so this only
-/// fires when validation is the reason the task stopped.
-fn publish_validation_exhausted(
-    sink: &dyn TaskDiagnosticSink,
-    project_root: &str,
-    changes: &[ProposedChange],
-    summary: &str,
-    attempts: u32,
-) {
-    if project_root.is_empty() || changes.is_empty() {
+    if findings.is_empty() {
         return;
     }
-    let attempts_label = if attempts == 1 { "attempt" } else { "attempts" };
-    let message = format!(
-        "Ryoko proposed nothing: validation never passed after {attempts} {attempts_label}: {summary}"
-    );
-    let findings: Vec<TaskDiagnostic> = changes
-        .iter()
-        .map(|change| TaskDiagnostic {
-            file: change.path.clone(),
-            level: DiagnosticLevel::Error,
-            message: message.clone(),
-            code: Some("ryoko.validation.failed".to_owned()),
-        })
-        .collect();
     sink.publish(project_root, &findings);
 }
 
