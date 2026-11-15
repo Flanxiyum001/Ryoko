@@ -7,7 +7,8 @@ use std::thread;
 
 use tauri::{AppHandle, Emitter, State};
 
-use crate::lsp_frame::{frame, read_frame};
+use crate::lsp_frame::{MAX_FRAME_BYTES, frame, read_frame};
+use crate::workspace::{WorkspaceState, current_root};
 
 #[derive(Default)]
 pub struct LspState {
@@ -51,7 +52,12 @@ pub fn shutdown(state: &LspState) {
 }
 
 #[tauri::command]
-pub fn lsp_start(app: AppHandle, state: State<'_, LspState>, root: String) -> Result<(), String> {
+pub fn lsp_start(
+    app: AppHandle,
+    state: State<'_, LspState>,
+    workspace: State<'_, WorkspaceState>,
+    root: String,
+) -> Result<(), String> {
     stop_child(&state)?;
     let binary = resolve_binary()?;
     let root = PathBuf::from(&root)
@@ -59,6 +65,11 @@ pub fn lsp_start(app: AppHandle, state: State<'_, LspState>, root: String) -> Re
         .map_err(|error| format!("cannot open the language-server workspace: {error}"))?;
     if !root.is_dir() {
         return Err("language-server workspace is not a directory".to_owned());
+    }
+    // Only the workspace explicitly opened in the native shell may be used as
+    // an LSP process working directory. Never let webview input choose a new root.
+    if root != current_root(&workspace)? {
+        return Err("language-server root does not match the open workspace".to_owned());
     }
     let mut child = Command::new(&binary)
         .current_dir(&root)
@@ -127,6 +138,9 @@ pub fn lsp_start(app: AppHandle, state: State<'_, LspState>, root: String) -> Re
 
 #[tauri::command]
 pub fn lsp_send(state: State<'_, LspState>, message: String) -> Result<(), String> {
+    if message.len() > MAX_FRAME_BYTES {
+        return Err("outbound language-server message exceeds size limit".to_owned());
+    }
     serde_json::from_str::<serde_json::Value>(&message)
         .map_err(|error| format!("invalid LSP message: {error}"))?;
     let mut guard = state
