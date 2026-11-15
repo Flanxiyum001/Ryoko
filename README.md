@@ -101,6 +101,12 @@ ryoko run --team --max-concurrency 2 --repo . \
 
 **Review boundary:** QA and Security are separate sibling branches. Ryoko does not silently combine their changes or automatically merge to `main`; use `ryoko review --task <id>` and resolve any overlapping edits. Multiple independent dependency branches fail closed until an explicit integration step exists. Mission Control displays per-task ledger token totals and validation logs, but raw provider prompts and verified charges are deliberately *not* stored in the event log.
 
+## Selective hunk review (CLI alpha)
+
+In `ryoko review`, choose **[H]unks** to inspect numbered Git text hunks and enter IDs such as `1,3`. Ryoko creates an entirely new `ryoko/hunk-review/*` worktree at the target branch tip, applies only those hunks with `git apply --index` (no shell), commits the selection, and **reruns the full sandboxed validation**. Only an explicit `MERGE` confirmation after a passing validation can integrate the selection. Cancelling, failing validation, or failing merge preserves the separate selected branch for a later review. The original agent branch is never modified or discarded.
+
+Limits: only ordinary unified text hunks are selectable; binary, renames, deletions and mode changes are excluded. Newly created files can be selected only in full. Diff patches are capped at 1 MiB/128 hunks. This is Git staging, **not** an editor privilege to execute arbitrary commands or merge without approval.
+
 ## Desktop Mission Control
 
 The desktop app can inspect local agent orchestration events recorded as JSONL.
