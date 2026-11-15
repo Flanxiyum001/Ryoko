@@ -142,7 +142,9 @@ impl AgentRuntime for ModelAgent {
             ));
         }
 
-        let request = self.request(&task, &ctx.project.project_root, &ctx.project.active_branch);
+        let request = self
+            .request(&task, &ctx.project.project_root, &ctx.project.active_branch)
+            .with_scope(task.id.to_string());
         let completion = match ctx.models.complete(request).await {
             Ok(completion) => completion,
             Err(error) => {

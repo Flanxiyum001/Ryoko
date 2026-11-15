@@ -241,6 +241,15 @@ struct ModelArgs {
     /// Hard wall-clock cap in seconds for this command's model work.
     #[arg(long)]
     budget_secs: Option<u64>,
+    /// Per-DAG-task USD cap, applied independently to each task.
+    #[arg(long)]
+    task_budget_usd: Option<f64>,
+    /// Per-DAG-task token cap (input + output).
+    #[arg(long)]
+    task_budget_tokens: Option<u64>,
+    /// Per-DAG-task wall-clock cap in seconds.
+    #[arg(long)]
+    task_budget_secs: Option<u64>,
 }
 
 impl ModelArgs {
@@ -266,6 +275,29 @@ impl ModelArgs {
                 return Err(cli_error("--budget-secs must be greater than zero"));
             }
             budget.limit_seconds = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.task_budget_usd {
+            if !limit.is_finite() || limit <= 0.0 {
+                return Err(cli_error(
+                    "--task-budget-usd must be a positive finite number",
+                ));
+            }
+            budget.task_limit_usd = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.task_budget_tokens {
+            if limit == 0 {
+                return Err(cli_error("--task-budget-tokens must be greater than zero"));
+            }
+            budget.task_limit_tokens = Some(limit);
+            limited = true;
+        }
+        if let Some(limit) = self.task_budget_secs {
+            if limit == 0 {
+                return Err(cli_error("--task-budget-secs must be greater than zero"));
+            }
+            budget.task_limit_seconds = Some(limit);
             limited = true;
         }
         Ok(UsageLedger::new(limited.then_some(budget)))
@@ -1256,6 +1288,9 @@ mod tests {
             budget_usd: usd,
             budget_tokens: tokens,
             budget_secs: secs,
+            task_budget_usd: None,
+            task_budget_tokens: None,
+            task_budget_secs: None,
         }
     }
 
@@ -1268,6 +1303,20 @@ mod tests {
         assert_eq!(budget.limit_usd, 0.5);
         assert_eq!(budget.limit_tokens, Some(1_000));
         assert_eq!(budget.limit_seconds, Some(30));
+    }
+
+    #[test]
+    fn task_budget_flags_are_independent_of_the_run_cap() {
+        let mut args = model_args(Some(1.0), None, None);
+        args.task_budget_usd = Some(0.25);
+        args.task_budget_tokens = Some(2_000);
+        args.task_budget_secs = Some(45);
+        let ledger = args.ledger().unwrap();
+        let budget = ledger.budget().unwrap();
+        assert_eq!(budget.limit_usd, 1.0);
+        assert_eq!(budget.task_limit_usd, Some(0.25));
+        assert_eq!(budget.task_limit_tokens, Some(2_000));
+        assert_eq!(budget.task_limit_seconds, Some(45));
     }
 
     #[test]
