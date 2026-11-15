@@ -39,8 +39,8 @@ fn git_diff(root: &Path) -> Result<String, String> {
     if !top.status.success() {
         return Err("open a Git repository to stage hunks".into());
     }
-    let top_path = String::from_utf8(top.stdout)
-        .map_err(|_| "invalid Git repository path".to_owned())?;
+    let top_path =
+        String::from_utf8(top.stdout).map_err(|_| "invalid Git repository path".to_owned())?;
     let canonical = Path::new(top_path.trim())
         .canonicalize()
         .map_err(|error| format!("cannot resolve Git root: {error}"))?;
