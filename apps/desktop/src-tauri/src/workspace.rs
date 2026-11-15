@@ -234,7 +234,6 @@ pub async fn write_file(
     })
 }
 
-
 #[cfg(test)]
 mod permission_tests {
     use super::requires_sensitive_write_approval;
