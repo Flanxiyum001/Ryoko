@@ -4,12 +4,12 @@
 //! Transports and UI prompts are supplied by a trusted host (CLI/desktop).
 //! Tool output is untrusted data, never interpreted as agent instructions.
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_TOOLS: usize = 256;
@@ -86,7 +86,9 @@ impl<T: McpTransport> McpClient<T> {
         });
         let response = self.transport.request(&payload).await?;
         if response["jsonrpc"] != "2.0" || response["id"].as_u64() != Some(id) {
-            return Err(McpError::InvalidResponse("JSON-RPC version or response ID mismatch".into()));
+            return Err(McpError::InvalidResponse(
+                "JSON-RPC version or response ID mismatch".into(),
+            ));
         }
         if let Some(error) = response.get("error") {
             let message = error
@@ -101,7 +103,9 @@ impl<T: McpTransport> McpClient<T> {
         let encoded = serde_json::to_vec(result)
             .map_err(|error| McpError::InvalidResponse(error.to_string()))?;
         if encoded.len() > MAX_RESULT_BYTES {
-            return Err(McpError::InvalidResponse("result exceeds 1 MiB limit".into()));
+            return Err(McpError::InvalidResponse(
+                "result exceeds 1 MiB limit".into(),
+            ));
         }
         Ok(result.clone())
     }
@@ -121,7 +125,9 @@ impl<T: McpTransport> McpClient<T> {
             .as_str()
             .ok_or_else(|| McpError::InvalidResponse("missing protocolVersion".into()))?;
         if !matches!(version, "2025-06-18" | "2025-03-26") {
-            return Err(McpError::UnsupportedVersion(version.chars().take(80).collect()));
+            return Err(McpError::UnsupportedVersion(
+                version.chars().take(80).collect(),
+            ));
         }
         self.transport
             .notify(&json!({"jsonrpc":"2.0", "method":"notifications/initialized"}))
@@ -145,11 +151,13 @@ impl<T: McpTransport> McpClient<T> {
         for _ in 0..MAX_PAGES {
             let params = cursor.as_ref().map_or(json!({}), |c| json!({"cursor": c}));
             let response = self.request("tools/list", params).await?;
-            let tools = response["tools"]
-                .as_array()
-                .ok_or_else(|| McpError::InvalidResponse("tools/list missing tools array".into()))?;
+            let tools = response["tools"].as_array().ok_or_else(|| {
+                McpError::InvalidResponse("tools/list missing tools array".into())
+            })?;
             if result.len().saturating_add(tools.len()) > MAX_TOOLS {
-                return Err(McpError::InvalidResponse("tool catalogue exceeds limit".into()));
+                return Err(McpError::InvalidResponse(
+                    "tool catalogue exceeds limit".into(),
+                ));
             }
             for raw in tools {
                 let tool: McpTool = serde_json::from_value(raw.clone())
@@ -160,21 +168,27 @@ impl<T: McpTransport> McpClient<T> {
                     || !tool.input_schema.is_object()
                     || result.iter().any(|known: &McpTool| known.name == tool.name)
                 {
-                    return Err(McpError::InvalidResponse("invalid or duplicate MCP tool".into()));
+                    return Err(McpError::InvalidResponse(
+                        "invalid or duplicate MCP tool".into(),
+                    ));
                 }
                 result.push(tool);
             }
             match response.get("nextCursor").and_then(Value::as_str) {
                 Some(next) if !next.is_empty() => {
                     if !seen.insert(next.to_owned()) {
-                        return Err(McpError::InvalidResponse("cyclic MCP pagination cursor".into()));
+                        return Err(McpError::InvalidResponse(
+                            "cyclic MCP pagination cursor".into(),
+                        ));
                     }
                     cursor = Some(next.to_owned());
                 }
                 _ => return Ok(result),
             }
         }
-        Err(McpError::InvalidResponse("MCP pagination limit exceeded".into()))
+        Err(McpError::InvalidResponse(
+            "MCP pagination limit exceeded".into(),
+        ))
     }
 
     pub async fn call_tool(&self, tool: &str, arguments: Value) -> Result<Value, McpError> {
@@ -184,14 +198,17 @@ impl<T: McpTransport> McpClient<T> {
             || tool.chars().any(char::is_control)
             || !arguments.is_object()
         {
-            return Err(McpError::InvalidResponse("invalid tool name or arguments".into()));
+            return Err(McpError::InvalidResponse(
+                "invalid tool name or arguments".into(),
+            ));
         }
         // Approval is never inferred from successful initialization, discovery,
         // model choice or a previously approved call.
         if !self.approval.approve(tool, &arguments).await {
             return Err(McpError::PermissionDenied);
         }
-        self.request("tools/call", json!({"name": tool, "arguments": arguments})).await
+        self.request("tools/call", json!({"name": tool, "arguments": arguments}))
+            .await
     }
 }
 
@@ -210,8 +227,12 @@ mod tests {
             let method = payload["method"].as_str().unwrap().to_owned();
             self.calls.lock().unwrap().push(method.clone());
             let result = match method.as_str() {
-                "initialize" => json!({"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {}, "serverInfo": {"name": "mock", "version": "0.1"}}),
-                "tools/list" => json!({"tools": [{"name":"read_issue", "inputSchema":{"type":"object"}, "description":"read issue"}]}),
+                "initialize" => {
+                    json!({"protocolVersion": MCP_PROTOCOL_VERSION, "capabilities": {}, "serverInfo": {"name": "mock", "version": "0.1"}})
+                }
+                "tools/list" => {
+                    json!({"tools": [{"name":"read_issue", "inputSchema":{"type":"object"}, "description":"read issue"}]})
+                }
                 "tools/call" => json!({"content":[{"type":"text", "text":"mock result"}]}),
                 _ => return Err(McpError::Transport("unexpected request".into())),
             };
@@ -219,7 +240,10 @@ mod tests {
         }
 
         async fn notify(&self, payload: &Value) -> Result<(), McpError> {
-            self.calls.lock().unwrap().push(payload["method"].as_str().unwrap().to_owned());
+            self.calls
+                .lock()
+                .unwrap()
+                .push(payload["method"].as_str().unwrap().to_owned());
             Ok(())
         }
     }
@@ -235,10 +259,15 @@ mod tests {
     #[tokio::test]
     async fn handshake_and_list_validate_server_tools() {
         let client = McpClient::new(
-            FakeTransport { calls: Mutex::new(Vec::new()) },
+            FakeTransport {
+                calls: Mutex::new(Vec::new()),
+            },
             Arc::new(Approval(false)),
         );
-        assert!(matches!(client.list_tools().await, Err(McpError::NotInitialized)));
+        assert!(matches!(
+            client.list_tools().await,
+            Err(McpError::NotInitialized)
+        ));
         client.initialize().await.unwrap();
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
@@ -248,19 +277,49 @@ mod tests {
     #[tokio::test]
     async fn every_call_needs_host_approval() {
         let client = McpClient::new(
-            FakeTransport { calls: Mutex::new(Vec::new()) },
+            FakeTransport {
+                calls: Mutex::new(Vec::new()),
+            },
             Arc::new(Approval(false)),
         );
         client.initialize().await.unwrap();
-        assert!(matches!(client.call_tool("read_issue", json!({"id": 1})).await, Err(McpError::PermissionDenied)));
-        assert!(!client.transport.calls.lock().unwrap().iter().any(|method| method == "tools/call"));
+        assert!(matches!(
+            client.call_tool("read_issue", json!({"id": 1})).await,
+            Err(McpError::PermissionDenied)
+        ));
+        assert!(
+            !client
+                .transport
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "tools/call")
+        );
 
         let client = McpClient::new(
-            FakeTransport { calls: Mutex::new(Vec::new()) },
+            FakeTransport {
+                calls: Mutex::new(Vec::new()),
+            },
             Arc::new(Approval(true)),
         );
         client.initialize().await.unwrap();
-        assert!(client.call_tool("read_issue", json!({"id": 2})).await.is_ok());
-        assert_eq!(client.transport.calls.lock().unwrap().iter().filter(|method| *method == "tools/call").count(), 1);
+        assert!(
+            client
+                .call_tool("read_issue", json!({"id": 2}))
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            client
+                .transport
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "tools/call")
+                .count(),
+            1
+        );
     }
 }
