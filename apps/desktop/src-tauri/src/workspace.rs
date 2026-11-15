@@ -24,7 +24,7 @@ pub struct WorkspaceInfo {
     pub name: String,
 }
 
-fn current_root(state: &State<'_, WorkspaceState>) -> Result<PathBuf, String> {
+pub(crate) fn current_root(state: &State<'_, WorkspaceState>) -> Result<PathBuf, String> {
     state
         .root
         .lock()

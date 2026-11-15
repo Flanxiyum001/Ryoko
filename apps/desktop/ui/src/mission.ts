@@ -1,0 +1,303 @@
+/** Pure event-log parsing, reduction and layout for the Mission Control panel. */
+
+export interface MissionEvent {
+  type: string;
+  task_id?: string;
+  role?: unknown;
+  description?: string;
+  dependencies?: string[];
+  agent?: string;
+  attempt?: number;
+  message?: string;
+  passed?: boolean;
+  summary?: string;
+  logs?: string[];
+  duration_ms?: number;
+  files?: string[];
+  output?: string;
+  error?: string;
+  retrying?: boolean;
+  reason?: string;
+  attempts?: number;
+  run_id?: string;
+  task_count?: number;
+  pr_id?: string;
+  branch?: string;
+  succeeded?: number;
+  failed?: number;
+  skipped?: number;
+}
+
+export type MissionStatus =
+  | 'scheduled'
+  | 'running'
+  | 'retrying'
+  | 'validating'
+  | 'succeeded'
+  | 'failed'
+  | 'skipped';
+
+export interface MissionTask {
+  id: string;
+  role: string;
+  description: string;
+  dependencies: string[];
+  status: MissionStatus;
+  agent?: string;
+  attempt?: number;
+  progress?: string;
+  validation?: {
+    passed: boolean;
+    summary: string;
+    logs: string[];
+    durationMs: number;
+  };
+  pullRequest?: { id: string; branch: string; files: string[]; summary: string };
+  output?: string;
+  error?: string;
+  attempts?: number;
+}
+
+export interface MissionSnapshot {
+  runId?: string;
+  taskCount: number;
+  tasks: MissionTask[];
+  finished?: { succeeded: number; failed: number; skipped: number; durationMs: number };
+}
+
+export function parseMissionLog(text: string): MissionEvent[] {
+  const events: MissionEvent[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const value: unknown = JSON.parse(trimmed);
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        typeof (value as { type?: unknown }).type === 'string'
+      ) {
+        events.push(value as MissionEvent);
+      }
+    } catch {
+      // The writer flushes line by line; a trailing partial line is expected.
+    }
+  }
+  return events;
+}
+
+export function roleLabel(role: unknown): string {
+  if (typeof role === 'string') return role.replaceAll('_', '-');
+  if (typeof role === 'object' && role !== null) {
+    const custom = (role as { custom?: unknown }).custom;
+    if (typeof custom === 'string') return custom;
+  }
+  return 'agent';
+}
+
+function upsert(tasks: Map<string, MissionTask>, event: MissionEvent): MissionTask | null {
+  if (!event.task_id) return null;
+  let task = tasks.get(event.task_id);
+  if (!task) {
+    task = {
+      id: event.task_id,
+      role: roleLabel(event.role),
+      description: event.description ?? 'Task',
+      dependencies: event.dependencies ?? [],
+      status: 'scheduled',
+    };
+    tasks.set(task.id, task);
+  }
+  if (event.role !== undefined) task.role = roleLabel(event.role);
+  if (event.description) task.description = event.description;
+  if (event.dependencies) task.dependencies = event.dependencies;
+  return task;
+}
+
+export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
+  const tasks = new Map<string, MissionTask>();
+  let runId: string | undefined;
+  let taskCount = 0;
+  let finished: MissionSnapshot['finished'];
+
+  for (const event of events) {
+    switch (event.type) {
+      case 'run_started':
+        tasks.clear();
+        runId = event.run_id;
+        taskCount = event.task_count ?? 0;
+        finished = undefined;
+        break;
+      case 'task_scheduled':
+        upsert(tasks, event);
+        break;
+      case 'task_started': {
+        const task = upsert(tasks, event);
+        if (task) {
+          task.status = 'running';
+          task.agent = event.agent;
+          task.attempt = event.attempt;
+        }
+        break;
+      }
+      case 'task_progress': {
+        const task = tasks.get(event.task_id ?? '');
+        if (task) task.progress = event.message;
+        break;
+      }
+      case 'validation_started': {
+        const task = tasks.get(event.task_id ?? '');
+        if (task) task.status = 'validating';
+        break;
+      }
+      case 'validation_finished': {
+        const task = tasks.get(event.task_id ?? '');
+        if (task) {
+          task.validation = {
+            passed: Boolean(event.passed),
+            summary: event.summary ?? '',
+            logs: event.logs ?? [],
+            durationMs: event.duration_ms ?? 0,
+          };
+        }
+        break;
+      }
+      case 'pull_request_opened': {
+        const task = tasks.get(event.task_id ?? '');
+        if (task) {
+          task.pullRequest = {
+            id: event.pr_id ?? '',
+            branch: event.branch ?? '',
+            files: event.files ?? [],
+            summary: event.summary ?? '',
+          };
+        }
+        break;
+      }
+      case 'task_succeeded': {
+        const task = upsert(tasks, event);
+        if (task) {
+          task.status = 'succeeded';
+          task.output = event.output;
+          task.attempts = event.attempts;
+        }
+        break;
+      }
+      case 'task_failed': {
+        const task = upsert(tasks, event);
+        if (task) {
+          task.status = event.retrying ? 'retrying' : 'failed';
+          task.error = event.error;
+          task.attempts = event.attempts;
+        }
+        break;
+      }
+      case 'task_skipped': {
+        const task = upsert(tasks, event);
+        if (task) {
+          task.status = 'skipped';
+          task.error = event.reason;
+        }
+        break;
+      }
+      case 'run_finished':
+        finished = {
+          succeeded: event.succeeded ?? 0,
+          failed: event.failed ?? 0,
+          skipped: event.skipped ?? 0,
+          durationMs: event.duration_ms ?? 0,
+        };
+        break;
+      default:
+        break;
+    }
+  }
+
+  return {
+    runId,
+    taskCount: taskCount || tasks.size,
+    tasks: [...tasks.values()],
+    finished,
+  };
+}
+
+export interface PositionedTask {
+  task: MissionTask;
+  x: number;
+  y: number;
+  depth: number;
+}
+
+export interface MissionLayout {
+  width: number;
+  height: number;
+  nodes: PositionedTask[];
+  edges: { from: PositionedTask; to: PositionedTask }[];
+}
+
+const NODE_WIDTH = 154;
+const NODE_HEIGHT = 56;
+const X_GAP = 42;
+const Y_GAP = 20;
+const PADDING = 18;
+
+/** Deterministic layered layout: a task sits one column right of its deps. */
+export function layoutMission(tasks: MissionTask[]): MissionLayout {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const depths = new Map<string, number>();
+
+  const depthOf = (id: string, visiting: Set<string>): number => {
+    const cached = depths.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) return 0;
+    visiting.add(id);
+    const task = byId.get(id);
+    let depth = 0;
+    for (const dependency of task?.dependencies ?? []) {
+      if (byId.has(dependency)) depth = Math.max(depth, depthOf(dependency, visiting) + 1);
+    }
+    visiting.delete(id);
+    depths.set(id, depth);
+    return depth;
+  };
+
+  const groups = new Map<number, MissionTask[]>();
+  for (const task of tasks) {
+    const depth = depthOf(task.id, new Set());
+    const group = groups.get(depth) ?? [];
+    group.push(task);
+    groups.set(depth, group);
+  }
+
+  const nodes: PositionedTask[] = [];
+  for (const [depth, group] of [...groups.entries()].sort(([left], [right]) => left - right)) {
+    group.forEach((task, index) => {
+      nodes.push({
+        task,
+        depth,
+        x: PADDING + depth * (NODE_WIDTH + X_GAP),
+        y: PADDING + index * (NODE_HEIGHT + Y_GAP),
+      });
+    });
+  }
+
+  const positions = new Map(nodes.map((node) => [node.task.id, node]));
+  const edges: MissionLayout['edges'] = [];
+  for (const node of nodes) {
+    for (const dependency of node.task.dependencies) {
+      const from = positions.get(dependency);
+      if (from) edges.push({ from, to: node });
+    }
+  }
+
+  const columns = groups.size === 0 ? 1 : Math.max(...groups.keys()) + 1;
+  const rows = Math.max(1, ...[...groups.values()].map((group) => group.length));
+  return {
+    width: PADDING * 2 + columns * NODE_WIDTH + (columns - 1) * X_GAP,
+    height: PADDING * 2 + rows * NODE_HEIGHT + (rows - 1) * Y_GAP,
+    nodes,
+    edges,
+  };
+}
+
+export const missionNodeSize = { width: NODE_WIDTH, height: NODE_HEIGHT };
