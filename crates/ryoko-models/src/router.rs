@@ -342,8 +342,14 @@ mod tests {
         let mut router = ModelRouter::new("mock").with_ledger(ledger);
         router.register(mock);
 
-        router.complete(ChatRequest::new("mock-1")).await.unwrap();
+        let first = router
+            .complete(ChatRequest::new("mock-1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(first, ModelError::BudgetExceeded { .. }));
 
+        // An over-budget completion is not returned to its caller, and
+        // subsequent requests are rejected before reaching the provider.
         let err = router
             .complete(ChatRequest::new("mock-1"))
             .await
