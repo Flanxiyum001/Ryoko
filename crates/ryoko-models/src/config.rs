@@ -296,6 +296,21 @@ mod tests {
     }
 
     #[test]
+    fn native_gemini_profiles_require_credential_reference_and_https() {
+        let mut catalog = example();
+        catalog.providers[0].wire = Some(WireProtocol::Gemini);
+        catalog.providers[0].base_url = "https://generativelanguage.googleapis.com/v1beta".into();
+        assert!(catalog.validate().is_err());
+        catalog.providers[0].api_key_env = Some("GEMINI_API_KEY".into());
+        assert!(catalog.validate().is_ok());
+        catalog.providers[0].base_url = "http://api.example/v1beta".into();
+        assert!(catalog.validate().is_err());
+        catalog.providers[0].base_url = "https://generativelanguage.googleapis.com/v1beta".into();
+        catalog.providers[0].chat_path = Some("/chat/completions".into());
+        assert!(catalog.validate().is_err());
+    }
+
+    #[test]
     fn accepts_local_keyless_provider() {
         let catalog = example();
         catalog.validate().unwrap();
