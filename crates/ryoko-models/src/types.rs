@@ -143,6 +143,9 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
+    /// DAG task that owns this request, used for per-task budget accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl ChatRequest {
@@ -155,6 +158,7 @@ impl ChatRequest {
             temperature: None,
             max_tokens: None,
             metadata: BTreeMap::new(),
+            scope: None,
         }
     }
 
@@ -180,6 +184,11 @@ impl ChatRequest {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
         self
     }
 
@@ -348,8 +357,38 @@ pub enum ModelError {
     #[error("provider `{provider}` reported an error: {message}")]
     Provider { provider: String, message: String },
 
-    #[error("token budget of ${budget_usd:.4} exhausted (spent ${spent_usd:.4})")]
+    #[error("dollar budget of ${budget_usd:.4} exhausted (spent ${spent_usd:.4})")]
     BudgetExceeded { budget_usd: f64, spent_usd: f64 },
+
+    #[error("token budget of {budget_tokens} exhausted (spent {spent_tokens})")]
+    TokenBudgetExceeded {
+        budget_tokens: u64,
+        spent_tokens: u64,
+    },
+
+    #[error("latency budget of {budget_secs}s exhausted (elapsed {elapsed_ms}ms)")]
+    LatencyBudgetExceeded { budget_secs: u64, elapsed_ms: u64 },
+
+    #[error("task `{task}` exceeded its ${budget_usd:.4} dollar cap (spent ${spent_usd:.4})")]
+    TaskBudgetExceeded {
+        task: String,
+        budget_usd: f64,
+        spent_usd: f64,
+    },
+
+    #[error("task `{task}` exceeded its {budget_tokens} token cap (spent {spent_tokens})")]
+    TaskTokenBudgetExceeded {
+        task: String,
+        budget_tokens: u64,
+        spent_tokens: u64,
+    },
+
+    #[error("task `{task}` exceeded its {budget_secs}s latency cap (elapsed {elapsed_ms}ms)")]
+    TaskLatencyBudgetExceeded {
+        task: String,
+        budget_secs: u64,
+        elapsed_ms: u64,
+    },
 
     #[error("model request was cancelled")]
     Cancelled,
