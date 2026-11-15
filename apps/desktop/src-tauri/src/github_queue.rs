@@ -51,7 +51,9 @@ fn parse_github_repo(remote: &str) -> Result<(String, String), String> {
             && part != "."
             && part != ".."
             && part.len() <= 100
-            && part.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
     };
     if !valid(owner) || !valid(name) {
         return Err("Invalid GitHub owner or repository name".to_owned());
@@ -68,7 +70,10 @@ fn limited_output(mut command: Command, limit: u64) -> Result<String, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "GitHub CLI (gh) or Git is unavailable".to_owned())?;
-    let stdout = child.stdout.take().ok_or_else(|| "Missing process output".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Missing process output".to_owned())?;
     let mut bytes = Vec::new();
     let read = stdout.take(limit + 1).read_to_end(&mut bytes);
     if read.is_err() || bytes.len() as u64 > limit {
@@ -76,15 +81,24 @@ fn limited_output(mut command: Command, limit: u64) -> Result<String, String> {
         let _ = child.wait();
         return Err("GitHub queue response exceeded its output limit".to_owned());
     }
-    let exit = child.wait().map_err(|_| "GitHub queue subprocess failed".to_owned())?;
+    let exit = child
+        .wait()
+        .map_err(|_| "GitHub queue subprocess failed".to_owned())?;
     if !exit.success() {
-        return Err("GitHub CLI request failed. Run 'gh auth login' and verify repository access.".to_owned());
+        return Err(
+            "GitHub CLI request failed. Run 'gh auth login' and verify repository access."
+                .to_owned(),
+        );
     }
     String::from_utf8(bytes).map_err(|_| "GitHub queue response was not UTF-8".to_owned())
 }
 
 fn safe_title(raw: &Value) -> String {
-    raw.as_str().unwrap_or("(untitled)").chars().take(240).collect()
+    raw.as_str()
+        .unwrap_or("(untitled)")
+        .chars()
+        .take(240)
+        .collect()
 }
 
 fn parse_items(
@@ -95,7 +109,9 @@ fn parse_items(
 ) -> Result<Vec<QueueItem>, String> {
     let parsed: Value = serde_json::from_str(body)
         .map_err(|_| "GitHub returned an invalid queue response".to_owned())?;
-    let entries = parsed.as_array().ok_or_else(|| "GitHub queue is not an array".to_owned())?;
+    let entries = parsed
+        .as_array()
+        .ok_or_else(|| "GitHub queue is not an array".to_owned())?;
     if entries.len() > 30 {
         return Err("GitHub queue contains too many items".to_owned());
     }
@@ -105,7 +121,9 @@ fn parse_items(
         if kind == "issues" && entry.get("pull_request").is_some() {
             continue;
         }
-        let number = entry.get("number").and_then(Value::as_u64)
+        let number = entry
+            .get("number")
+            .and_then(Value::as_u64)
             .filter(|n| *n > 0)
             .ok_or_else(|| "Invalid GitHub queue entry number".to_owned())?;
         items.push(QueueItem {
@@ -121,14 +139,18 @@ fn parse_items(
 
 fn read_queue(root: &Path) -> Result<GitHubQueue, String> {
     let mut origin = Command::new("git");
-    origin.args(["remote", "get-url", "origin"]).current_dir(root);
+    origin
+        .args(["remote", "get-url", "origin"])
+        .current_dir(root);
     let remote = limited_output(origin, MAX_REMOTE_BYTES)?;
     let (owner, repo) = parse_github_repo(&remote)?;
     let target = format!("repos/{owner}/{repo}");
     let read = |resource: &str| -> Result<String, String> {
         let mut cmd = Command::new("gh");
         cmd.args([
-            "api", "--method", "GET",
+            "api",
+            "--method",
+            "GET",
             &format!("{target}/{resource}?state=open&per_page=30"),
         ])
         .env("GH_PROMPT_DISABLED", "1")
