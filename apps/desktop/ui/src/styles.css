@@ -251,3 +251,11 @@ pre.mission-detail-value {
 @media (max-width: 1180px) {
   .layout { grid-template-columns: 220px minmax(0, 1fr) 310px; }
 }
+
+.mission-toolbar { flex-wrap: wrap; }
+.mission-attempt {
+  margin: 6px 0; padding: 8px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--panel-raised); font-size: 11px;
+}
+.mission-attempt strong { color: var(--text); font-weight: 600; }
