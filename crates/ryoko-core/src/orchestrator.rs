@@ -220,6 +220,7 @@ impl Orchestrator {
                 task_id: task.id,
                 role: task.assigned_to.clone(),
                 description: task.description.clone(),
+                dependencies: task.dependencies.clone(),
             });
 
             let max_attempts = self.config.max_attempts.max(1);
