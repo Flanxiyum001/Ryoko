@@ -435,7 +435,14 @@ async fn mcp_command(args: McpArgs) -> Result<(), Box<dyn Error>> {
     match args.command {
         McpCommands::Tools => mcp::tools(&args.server, &args.server_args, &args.allow_env).await?,
         McpCommands::Call { tool, arguments } => {
-            mcp::call(&args.server, &args.server_args, &args.allow_env, &tool, &arguments).await?
+            mcp::call(
+                &args.server,
+                &args.server_args,
+                &args.allow_env,
+                &tool,
+                &arguments,
+            )
+            .await?
         }
     }
     Ok(())
