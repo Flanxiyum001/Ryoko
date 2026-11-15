@@ -123,7 +123,10 @@ mod tests {
             "C:relative.txt",
             "src/C:config.txt",
         ] {
-            assert!(safe_join(root, path).is_err(), "unexpectedly accepted {path}");
+            assert!(
+                safe_join(root, path).is_err(),
+                "unexpectedly accepted {path}"
+            );
         }
         assert!(safe_join(root, "src/.gitignore").is_ok());
         assert!(safe_join(root, "src/.env.example").is_ok());
