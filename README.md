@@ -75,7 +75,7 @@ cargo run -p ryoko-cli -- run \
 cargo run -p ryoko-cli -- review --repo .
 ```
 
-`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust.
+`run` auto-detects common Cargo, npm, Python and Go test commands; use `--check-command` to override it. `review` merges only after explicit human acceptance, removes the temporary worktree on accept or reject, and never pushes or deploys anything. The pre-flight command runs locally and is not isolated by the WASM sandbox, so only run Ryoko in a project you trust. Before acceptance, every proposal is also secret-scanned; `cargo audit` and `npm audit` run when their manifests, lockfiles and tools are available. Findings block the merge, while missing audit tools are reported as skipped rather than clean.
 
 ## Provider configuration
 
