@@ -22,7 +22,7 @@ use crate::diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 use crate::error::{CoreError, CoreResult};
 use crate::event::{EventSink, OrchestratorEvent};
 use crate::memory::SharedMemory;
-use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
+use crate::model::{AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::WorkspaceProvider;
 use ryoko_models::ModelRouter;
@@ -569,6 +569,20 @@ async fn execute_task(
             }
             last_error = reason;
             feedback = Some(next);
+            if attempt == max_attempts {
+                // Exhausted without a passing validation: no pull request will
+                // exist, so the editor is the only place that can explain the
+                // missing proposal.
+                if let Some(sink) = &diagnostic_sink {
+                    publish_validation_exhausted(
+                        sink.as_ref(),
+                        &context.project.project_root,
+                        &result.changes,
+                        &report.summary,
+                        max_attempts,
+                    );
+                }
+            }
             continue;
         }
 
@@ -648,6 +662,37 @@ fn publish_task_findings(
             level: DiagnosticLevel::Info,
             message: message.clone(),
             code: Some("ryoko.validation".to_owned()),
+        })
+        .collect();
+    sink.publish(project_root, &findings);
+}
+
+/// Reports why an exhausted task proposed nothing: every attempt was rejected
+/// by validation, so no pull request was opened. The error points at the files
+/// of the last rejected attempt, which is where the agent tried to write.
+/// Agents that fail before validation report their own failures, so this only
+/// fires when validation is the reason the task stopped.
+fn publish_validation_exhausted(
+    sink: &dyn TaskDiagnosticSink,
+    project_root: &str,
+    changes: &[ProposedChange],
+    summary: &str,
+    attempts: u32,
+) {
+    if project_root.is_empty() || changes.is_empty() {
+        return;
+    }
+    let attempts_label = if attempts == 1 { "attempt" } else { "attempts" };
+    let message = format!(
+        "Ryoko proposed nothing: validation never passed after {attempts} {attempts_label}: {summary}"
+    );
+    let findings: Vec<TaskDiagnostic> = changes
+        .iter()
+        .map(|change| TaskDiagnostic {
+            file: change.path.clone(),
+            level: DiagnosticLevel::Error,
+            message: message.clone(),
+            code: Some("ryoko.validation.failed".to_owned()),
         })
         .collect();
     sink.publish(project_root, &findings);
@@ -1176,5 +1221,50 @@ mod tests {
         assert_eq!(findings[0].level, DiagnosticLevel::Info);
         assert_eq!(findings[0].code.as_deref(), Some("ryoko.validation"));
         assert!(findings[0].message.contains("cargo test passed"));
+    }
+
+    #[tokio::test]
+    async fn exhausted_validation_publishes_an_error_for_the_rejected_files() {
+        let sink = Arc::new(RecordingSink::default());
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(DenyValidator), router())
+            .with_diagnostic_sink(sink.clone())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 1,
+                max_attempts: 2,
+            });
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+                vec![Arc::new(SleepAgent {
+                    identity: dev(),
+                    delay: Duration::ZERO,
+                })],
+                ProjectContext {
+                    project_root: "/workspace/demo".to_owned(),
+                    ..ProjectContext::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(report.succeeded.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].attempts, 2);
+
+        let published = sink.published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            1,
+            "rejected attempts stay quiet until the retries run out"
+        );
+        let (project_root, findings) = &published[0];
+        assert_eq!(project_root, "/workspace/demo");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/generated.rs");
+        assert_eq!(findings[0].level, DiagnosticLevel::Error);
+        assert_eq!(findings[0].code.as_deref(), Some("ryoko.validation.failed"));
+        assert!(findings[0].message.contains("validation never passed"));
+        assert!(findings[0].message.contains("cargo test failed"));
     }
 }
