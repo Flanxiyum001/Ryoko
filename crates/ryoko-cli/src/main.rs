@@ -812,7 +812,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         standard_team()
             .into_iter()
             .filter(|member| {
-                matches!(member.role, AgentRole::QaEngineer)
+                matches!(&member.role, AgentRole::QaEngineer)
                     || matches!(&member.role, AgentRole::Custom(name)
                         if matches!(name.as_str(), "software-architect" | "backend-engineer" | "security-engineer"))
             })
@@ -924,7 +924,9 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         eprintln!("Task {} skipped: {}", skipped.task_id, skipped.reason);
     }
     if !report.all_succeeded() {
-        return Err(cli_error("one or more agent tasks failed to publish a reviewable change"));
+        return Err(cli_error(
+            "one or more agent tasks failed to publish a reviewable change",
+        ));
     }
     Ok(())
 }
