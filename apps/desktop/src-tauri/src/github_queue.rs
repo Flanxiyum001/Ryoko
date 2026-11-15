@@ -102,7 +102,7 @@ fn parse_items(
     let mut items = Vec::new();
     for entry in entries {
         // The issues API also includes pull requests; only real issues appear here.
-        if kind == "issue" && entry.get("pull_request").is_some() {
+        if kind == "issues" && entry.get("pull_request").is_some() {
             continue;
         }
         let number = entry.get("number").and_then(Value::as_u64)
@@ -184,9 +184,9 @@ mod tests {
     fn issue_queue_excludes_pull_requests_and_constructs_safe_links() {
         let json = r#"[{"number":3,"title":"Fix a bug"},
             {"number":4,"title":"Actually a PR","pull_request":{}}]"#;
-        let items = parse_items(json, "acme", "project", "issue").unwrap();
+        let items = parse_items(json, "acme", "project", "issues").unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].url, "https://github.com/acme/project/issue/3");
+        assert_eq!(items[0].url, "https://github.com/acme/project/issues/3");
         assert!(parse_items(r#"[{"number":0}]"#, "acme", "project", "pull").is_err());
     }
 }
