@@ -21,6 +21,7 @@ Copy `configs/providers.example.json` to your own file, then edit the provider I
 ```sh
 export RYOKO_OPENAI_API_KEY="your-key-from-provider"
 cargo run -p ryoko-cli -- providers --config configs/providers.example.json
+cargo run -p ryoko-cli -- discover-local  # probes only local Ollama / LM Studio
 cargo run -p ryoko-cli -- roles
 cargo run -p ryoko-cli -- plan --goal "Build a collaborative task manager"
 cargo run -p ryoko-cli -- ask --config configs/providers.example.json --model ollama/qwen2.5-coder --prompt "Design a REST API for tasks"
