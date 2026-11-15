@@ -92,18 +92,21 @@ fn parse_models(provider: &str, base_url: &str, value: &Value) -> Vec<LocalModel
     let field = if provider == "ollama" { "name" } else { "id" };
     let mut models = Vec::new();
     for value in entries.iter().take(256) {
-        if let Some(name) = value.get(field).and_then(Value::as_str)
-            && !name.is_empty()
-            && name.len() <= 128
-            && !name.chars().any(char::is_control)
-            && !models.iter().any(|model: &LocalModel| model.model == name)
+        let Some(name) = value.get(field).and_then(Value::as_str) else {
+            continue;
+        };
+        if name.is_empty()
+            || name.len() > 128
+            || name.chars().any(char::is_control)
+            || models.iter().any(|model: &LocalModel| model.model == name)
         {
-            models.push(LocalModel {
-                provider: provider.to_owned(),
-                model: name.to_owned(),
-                base_url: base_url.to_owned(),
-            });
+            continue;
         }
+        models.push(LocalModel {
+            provider: provider.to_owned(),
+            model: name.to_owned(),
+            base_url: base_url.to_owned(),
+        });
     }
     models
 }
