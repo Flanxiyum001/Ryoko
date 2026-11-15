@@ -111,6 +111,7 @@ function setAuthenticated(session) {
     ? 'Authenticated as ' + session.user.login + '. Tokens are held only by the trusted server.'
     : session.configured ? 'Sign in to connect your GitHub installations.' : 'GitHub App server is not configured yet.';
   $('workspaceBadge').textContent = connected ? 'GitHub connected' : 'Offline preview';
+  $('pairDesktop').classList.toggle('hidden', !connected);
 }
 
 async function loadInstallations() {
@@ -465,6 +466,17 @@ async function initialize() {
       $('proposalForm').reset();
       renderProposalFields();
     } catch (error) { errorMessage(error); }
+  });
+  $('pairDesktop').addEventListener('click', async () => {
+    const output = $('pairDesktopCode');
+    output.textContent = 'Requesting single-use code…';
+    try {
+      const pair = await api('/api/desktop/pair', { method: 'POST' });
+      output.textContent = 'Enter this one-time code in the native Ryoko desktop: ' + pair.code
+        + ' (expires in 5 minutes; read-only access)';
+    } catch (error) {
+      output.textContent = 'Desktop pairing unavailable: ' + error.message;
+    }
   });
   $('disconnectButton').addEventListener('click', async () => {
     try {
