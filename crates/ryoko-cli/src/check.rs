@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ryoko_core::validation::{ChangeValidator, StagedChanges, ValidationReport};
-use ryoko_core::{CoreError, CoreResult};
+use ryoko_core::CoreResult;
 use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 
 /// Runs a project's own build/test command in the task's isolated worktree.
@@ -223,7 +223,8 @@ mod tests {
             "echo 'error[E0425]: missing' >&2; exit 7",
             SpecPolicy::default(),
             Duration::from_secs(5),
-        );
+        )
+        .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None));
         let report = validator
             .validate(&changes(dir.path(), true))
             .await
