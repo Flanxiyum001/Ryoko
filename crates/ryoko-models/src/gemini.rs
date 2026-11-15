@@ -269,7 +269,7 @@ mod tests {
     fn native_gemini_request_uses_system_and_function_schema() {
         let request = ChatRequest::new("gemini-2.5-flash")
             .with_system("Explain carefully")
-            .with_user_message("Hello")
+            .with_user("Hello")
             .with_tools(vec![ToolDefinition::new(
                 "lookup",
                 "Lookup a record",
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn maps_model_tool_roundtrip_without_losing_call_identity() {
         let request = ChatRequest::new("gemini")
-            .with_user_message("Query")
+            .with_user("Query")
             .with_message(Message::new(Role::Assistant, vec![
                 ContentBlock::ToolCall { id: "call-3".into(), name:"lookup".into(), arguments:json!({"x":1}) }
             ]))
