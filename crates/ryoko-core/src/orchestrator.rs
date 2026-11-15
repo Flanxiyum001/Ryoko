@@ -501,6 +501,21 @@ async fn execute_task(
             Ok(result) => result,
             Err(err) => TaskResult::failure(task.id, err.to_string()),
         };
+        if let Some(usage) = ctx
+            .models
+            .ledger()
+            .snapshot()
+            .by_task
+            .get(&task.id.to_string())
+        {
+            events.emit(OrchestratorEvent::TaskUsage {
+                task_id: task.id,
+                requests: usage.requests,
+                input_tokens: usage.usage.input_tokens,
+                output_tokens: usage.usage.output_tokens,
+                ledger_cost_usd: usage.cost_usd,
+            });
+        }
         attempted_files = result.changes.iter().map(|c| c.path.clone()).collect();
 
         if !result.success {
@@ -586,6 +601,10 @@ async fn execute_task(
 
         match lease.publish(task, &result.output).await {
             Ok(pr) => {
+                context.memory.insert(
+                    format!("ryoko.task.{}.summary", task.id),
+                    result.output.chars().take(2_000).collect::<String>(),
+                );
                 events.emit(OrchestratorEvent::PullRequestOpened {
                     task_id: task.id,
                     pr_id: pr.id.clone(),

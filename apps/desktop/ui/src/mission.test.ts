@@ -41,6 +41,17 @@ describe('mission event log', () => {
     expect(snapshot.finished?.succeeded).toBe(2);
   });
 
+  it('tracks per-task token usage', () => {
+    const usage = '{"type":"task_usage","task_id":"b","requests":2,"input_tokens":420,"output_tokens":125,"ledger_cost_usd":0.03}';
+    const task = reduceMissionEvents(parseMissionLog([log, usage].join(String.fromCharCode(10)))).tasks[1];
+    expect(task.usage).toEqual({
+      requests: 2,
+      inputTokens: 420,
+      outputTokens: 125,
+      ledgerCostUsd: 0.03,
+    });
+  });
+
   it('labels built-in and custom roles', () => {
     expect(roleLabel('qa_engineer')).toBe('qa-engineer');
     expect(roleLabel({ custom: 'security' })).toBe('security');

@@ -392,6 +392,13 @@ function renderMissionDetail(): void {
   addDetailRow(missionDetail, 'Agent', task.agent ?? '');
   addDetailRow(missionDetail, 'Attempts', task.attempts ? String(task.attempts) : '');
   addDetailRow(missionDetail, 'Progress', task.progress ?? '');
+  if (task.usage) {
+    addDetailRow(
+      missionDetail,
+      'Model usage',
+      `${task.usage.requests} request(s); ${task.usage.inputTokens} input + ${task.usage.outputTokens} output tokens; ledger ${task.usage.ledgerCostUsd.toFixed(4)} (not verified billed cost)`,
+    );
+  }
   if (task.validation) {
     addDetailRow(
       missionDetail,
@@ -399,7 +406,7 @@ function renderMissionDetail(): void {
       task.validation.summary,
     );
     if (task.validation.logs.length > 0) {
-      addDetailRow(missionDetail, 'Validation log', task.validation.logs.join('\n'), true);
+      addDetailRow(missionDetail, 'Container / validation log', task.validation.logs.join('\n'), true);
     }
   }
   if (task.pullRequest) {
