@@ -31,6 +31,15 @@ pub enum OrchestratorEvent {
         task_id: Uuid,
         message: String,
     },
+    /// Cumulative usage for this task. Unconfigured model pricing can make
+    /// ledger_cost_usd incomplete: never label it verified billed cost.
+    TaskUsage {
+        task_id: Uuid,
+        requests: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        ledger_cost_usd: f64,
+    },
     ValidationStarted {
         task_id: Uuid,
         file_count: usize,
