@@ -144,9 +144,7 @@ impl HunkPatch {
             return Err("select at least one and at most 128 hunk IDs".into());
         }
         let ids: HashSet<usize> = chosen.iter().copied().collect();
-        if ids.len() != chosen.len()
-            || ids.iter().any(|id| *id == 0 || *id > self.hunks.len())
-        {
+        if ids.len() != chosen.len() || ids.iter().any(|id| *id == 0 || *id > self.hunks.len()) {
             return Err("invalid or repeated hunk ID".into());
         }
         let mut result = Vec::new();
@@ -202,10 +200,9 @@ mod tests {
 
     #[test]
     fn excludes_binary_diffs_and_renames() {
-        let patch = HunkPatch::parse(
-            "diff --git a/a.bin b/a.bin\nGIT binary patch\nliteral 3\nabc\n",
-        )
-        .unwrap();
+        let patch =
+            HunkPatch::parse("diff --git a/a.bin b/a.bin\nGIT binary patch\nliteral 3\nabc\n")
+                .unwrap();
         assert!(patch.hunks().is_empty());
         let renamed = HunkPatch::parse(
             "diff --git a/a.rs b/b.rs\nsimilarity index 80%\nrename from a.rs\nrename to b.rs\n--- a/a.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-a\n+b\n",
