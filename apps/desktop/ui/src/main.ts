@@ -392,12 +392,11 @@ function renderMissionDetail(): void {
   addDetailRow(missionDetail, 'Agent', task.agent ?? '');
   addDetailRow(missionDetail, 'Attempts', task.attempts ? String(task.attempts) : '');
   addDetailRow(missionDetail, 'Progress', task.progress ?? '');
-  addDetailRow(missionDetail, 'Task prompt (summary)', task.description);
   if (task.usage) {
     addDetailRow(
       missionDetail,
       'Model usage',
-      `${task.usage.requests} request(s); ${task.usage.inputTokens} input + ${task.usage.outputTokens} output tokens; ledger $\${task.usage.ledgerCostUsd.toFixed(4)} (not verified billed cost)`,
+      `${task.usage.requests} request(s); ${task.usage.inputTokens} input + ${task.usage.outputTokens} output tokens; ledger ${task.usage.ledgerCostUsd.toFixed(4)} (not verified billed cost)`,
     );
   }
   if (task.validation) {
