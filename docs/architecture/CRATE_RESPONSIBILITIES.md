@@ -12,7 +12,7 @@ only when its first real consumer exists.
 | `ryoko-models` | Provider adapters, provider catalogue, model routing, streaming events, usage and budget ledger | Task planning, file access |
 | `ryoko-native` | LSP server over stdio, diagnostics publishing, code lenses, quick fixes, execute commands | Workspace lifetime, model calls |
 | `ryoko-vfs` | Virtual document store, incremental text edits, UTF-16 positions, snapshots | LSP transport, persistence |
-| `ryoko-sandbox` | WASM validation guardrail, execution limits, sandbox spec evidence | Project build isolation, container management |
+| `ryoko-sandbox` | WASM guardrail, OCI project pre-flight runner, process limits and spec evidence | VM isolation, image provenance, release attestation |
 | `ryoko-worktree` | Git worktrees, task branches, change proposals, publication and cleanup | Review UI, permission policy |
 | `ryoko-scripting` | Reserved scripting/plugin layer | Anything until its API is specified |
 
