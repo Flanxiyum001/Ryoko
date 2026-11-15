@@ -9,6 +9,10 @@ export interface MissionEvent {
   agent?: string;
   attempt?: number;
   message?: string;
+  requests?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  ledger_cost_usd?: number;
   passed?: boolean;
   summary?: string;
   logs?: string[];
@@ -46,6 +50,12 @@ export interface MissionTask {
   agent?: string;
   attempt?: number;
   progress?: string;
+  usage?: {
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    ledgerCostUsd: number;
+  };
   validation?: {
     passed: boolean;
     summary: string;
@@ -143,6 +153,18 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
       case 'task_progress': {
         const task = tasks.get(event.task_id ?? '');
         if (task) task.progress = event.message;
+        break;
+      }
+      case 'task_usage': {
+        const task = tasks.get(event.task_id ?? '');
+        if (task) {
+          task.usage = {
+            requests: event.requests ?? 0,
+            inputTokens: event.input_tokens ?? 0,
+            outputTokens: event.output_tokens ?? 0,
+            ledgerCostUsd: event.ledger_cost_usd ?? 0,
+          };
+        }
         break;
       }
       case 'validation_started': {
