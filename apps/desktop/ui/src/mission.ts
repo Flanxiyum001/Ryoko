@@ -41,6 +41,21 @@ export type MissionStatus =
   | 'failed'
   | 'skipped';
 
+export interface MissionAttempt {
+  number: number;
+  agent?: string;
+  status: MissionStatus;
+  progress?: string;
+  validation?: {
+    passed: boolean;
+    summary: string;
+    logs: string[];
+    durationMs: number;
+  };
+  error?: string;
+  output?: string;
+}
+
 export interface MissionTask {
   id: string;
   role: string;
@@ -50,6 +65,7 @@ export interface MissionTask {
   agent?: string;
   attempt?: number;
   progress?: string;
+  history?: MissionAttempt[];
   usage?: {
     requests: number;
     inputTokens: number;
@@ -124,6 +140,17 @@ function upsert(tasks: Map<string, MissionTask>, event: MissionEvent): MissionTa
   return task;
 }
 
+function recordAttempt(task: MissionTask, number?: number): MissionAttempt {
+  const target = number ?? task.attempt ?? task.attempts ?? 1;
+  task.history ??= [];
+  let attempt = task.history.find((item) => item.number === target);
+  if (!attempt) {
+    attempt = { number: target, status: 'scheduled' };
+    task.history.push(attempt);
+  }
+  return attempt;
+}
+
 export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
   const tasks = new Map<string, MissionTask>();
   let runId: string | undefined;
@@ -147,12 +174,18 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
           task.status = 'running';
           task.agent = event.agent;
           task.attempt = event.attempt;
+          const attempt = recordAttempt(task, event.attempt);
+          attempt.status = 'running';
+          attempt.agent = event.agent;
         }
         break;
       }
       case 'task_progress': {
         const task = tasks.get(event.task_id ?? '');
-        if (task) task.progress = event.message;
+        if (task) {
+          task.progress = event.message;
+          recordAttempt(task).progress = event.message;
+        }
         break;
       }
       case 'task_usage': {
@@ -169,7 +202,10 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
       }
       case 'validation_started': {
         const task = tasks.get(event.task_id ?? '');
-        if (task) task.status = 'validating';
+        if (task) {
+          task.status = 'validating';
+          recordAttempt(task).status = 'validating';
+        }
         break;
       }
       case 'validation_finished': {
@@ -178,9 +214,10 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
           task.validation = {
             passed: Boolean(event.passed),
             summary: event.summary ?? '',
-            logs: event.logs ?? [],
+            logs: (event.logs ?? []).slice(0, 100),
             durationMs: event.duration_ms ?? 0,
           };
+          recordAttempt(task).validation = task.validation;
         }
         break;
       }
@@ -202,6 +239,9 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
           task.status = 'succeeded';
           task.output = event.output;
           task.attempts = event.attempts;
+          const attempt = recordAttempt(task);
+          attempt.status = 'succeeded';
+          attempt.output = event.output;
         }
         break;
       }
@@ -211,6 +251,9 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
           task.status = event.retrying ? 'retrying' : 'failed';
           task.error = event.error;
           task.attempts = event.attempts;
+          const attempt = recordAttempt(task);
+          attempt.status = task.status;
+          attempt.error = event.error;
         }
         break;
       }
@@ -219,6 +262,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         if (task) {
           task.status = 'skipped';
           task.error = event.reason;
+          // No attempt was dispatched when an upstream dependency skipped this task.
         }
         break;
       }
@@ -241,6 +285,26 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
     tasks: [...tasks.values()],
     finished,
   };
+}
+
+/** Show the selected node, its complete prerequisite chain, and its direct consumers. */
+export function focusMissionTasks(tasks: MissionTask[], selectedId: string | null): MissionTask[] {
+  if (!selectedId || !tasks.some((task) => task.id === selectedId)) return tasks;
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const included = new Set([selectedId]);
+  const visitDependencies = (id: string): void => {
+    for (const dependency of byId.get(id)?.dependencies ?? []) {
+      if (byId.has(dependency) && !included.has(dependency)) {
+        included.add(dependency);
+        visitDependencies(dependency);
+      }
+    }
+  };
+  visitDependencies(selectedId);
+  for (const task of tasks) {
+    if (task.dependencies.includes(selectedId)) included.add(task.id);
+  }
+  return tasks.filter((task) => included.has(task.id));
 }
 
 export interface PositionedTask {
