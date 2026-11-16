@@ -22,8 +22,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Verify requested Rust command sequence
-        run: cargo check --workspace --locked --all-targets && cargo clippy --workspace --locked --all-targets -- -D warnings && cargo fmt --all -- --check && cargo test --workspace --locked
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --locked
       - name: Verify container filesystem and network isolation
         run: |
           docker pull alpine:3.21
