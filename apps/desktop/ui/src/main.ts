@@ -5,6 +5,7 @@ import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
 import { LspClient, type LspState } from './lsp';
 import {
+  focusMissionTasks,
   layoutMission,
   missionNodeSize,
   parseMissionLog,
@@ -103,6 +104,7 @@ const problemList = element('problemList');
 const problemCount = element('problemCount');
 const missionLogSelect = element<HTMLSelectElement>('missionLog');
 const missionRefresh = element<HTMLButtonElement>('missionRefresh');
+const missionFocus = element<HTMLButtonElement>('missionFocus');
 const missionGraph = element('missionGraph');
 const missionDetail = element('missionDetail');
 const missionSummary = element('missionSummary');
@@ -130,6 +132,7 @@ const state: {
 let missionLogs: MissionLog[] = [];
 let missionSnapshot: MissionSnapshot | null = null;
 let missionSelection: string | null = null;
+let missionFocusEnabled = false;
 let missionPolling = false;
 let agentSessions: AgentSession[] = [];
 let agentSessionPolling = false;
@@ -234,6 +237,9 @@ async function openFolder(): Promise<void> {
     missionLogs = [];
     missionSnapshot = null;
     missionSelection = null;
+    missionFocusEnabled = false;
+    missionFocus.disabled = true;
+    missionFocus.textContent = 'Focus';
     missionLogSelect.replaceChildren();
     missionGraph.replaceChildren();
     missionDetail.replaceChildren();
@@ -566,7 +572,12 @@ function renderMission(): void {
     ? `${snapshot.finished.succeeded} ok · ${snapshot.finished.failed} failed · ${snapshot.finished.durationMs}ms`
     : `${snapshot.tasks.length}/${snapshot.taskCount} tasks`;
 
-  const layout = layoutMission(snapshot.tasks);
+  missionFocus.disabled = !missionSelection;
+  missionFocus.textContent = missionFocusEnabled ? 'Show all' : 'Focus';
+  const visible = missionFocusEnabled
+    ? focusMissionTasks(snapshot.tasks, missionSelection)
+    : snapshot.tasks;
+  const layout = layoutMission(visible);
   const canvas = document.createElement('div');
   canvas.className = 'mission-canvas';
   canvas.style.width = `${layout.width}px`;
@@ -622,6 +633,7 @@ function renderMission(): void {
   missionGraph.append(canvas);
   if (missionSelection && !snapshot.tasks.some((task) => task.id === missionSelection)) {
     missionSelection = null;
+    missionFocusEnabled = false;
   }
   renderMissionDetail();
 }
@@ -684,6 +696,29 @@ function renderMissionDetail(): void {
   if (task.pullRequest) {
     addDetailRow(missionDetail, 'Pull request', `${task.pullRequest.id} → ${task.pullRequest.branch}`);
     addDetailRow(missionDetail, 'Files', task.pullRequest.files.join('\n'), true);
+  }
+  if (task.history?.length) {
+    const section = document.createElement('p');
+    section.className = 'mission-detail-label';
+    section.textContent = 'Attempt timeline';
+    missionDetail.append(section);
+    for (const attempt of [...task.history].reverse()) {
+      const row = document.createElement('section');
+      row.className = 'mission-attempt';
+      const label = document.createElement('strong');
+      label.textContent = `Attempt ${attempt.number} · ${attempt.status}`;
+      row.append(label);
+      if (attempt.agent) addDetailRow(row, 'Agent', attempt.agent);
+      if (attempt.progress) addDetailRow(row, 'Progress', attempt.progress);
+      if (attempt.validation) {
+        addDetailRow(row, 'Validation', attempt.validation.summary);
+        if (attempt.validation.logs.length) {
+          addDetailRow(row, 'Container / validation logs', attempt.validation.logs.join('\n'), true);
+        }
+      }
+      if (attempt.error) addDetailRow(row, 'Error', attempt.error);
+      missionDetail.append(row);
+    }
   }
   addDetailRow(missionDetail, 'Output', task.output ?? '', true);
   addDetailRow(missionDetail, task.status === 'failed' ? 'Error' : 'Note', task.error ?? '');
@@ -882,6 +917,11 @@ hunkRefresh.addEventListener('click', () => {
 });
 hunkStage.addEventListener('click', () => {
   void stageSelectedHunks();
+});
+missionFocus.addEventListener('click', () => {
+  if (!missionSelection) return;
+  missionFocusEnabled = !missionFocusEnabled;
+  renderMission();
 });
 githubQueueRefresh.addEventListener('click', () => {
   void refreshGitHubQueue();
