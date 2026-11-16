@@ -98,3 +98,19 @@ workspace, reject path traversal, disallow symlinks outside the workspace,
 and bound log reads to 4 MiB. The panel never executes event payloads or
 accepts agent-supplied executable paths. Enable optional logging with
 `ryoko run --event-log .ryoko/events/run.jsonl`.
+
+## Native GitHub review queue
+
+The Tauri sidebar can display a read-only snapshot of up to 30 open pull requests
+and 30 open issues from the selected workspace's `origin` on `github.com`.
+Click **Load open PRs & issues** to refresh; it does not poll or mutate anything.
+The shell uses the operator's **existing authenticated GitHub CLI** (`gh`):
+install `gh` and run `gh auth login` separately. No OAuth token or installation
+secret is read by the frontend or passed over IPC.
+
+The backend accepts only a strict `github.com` owner/repo remote, executes fixed
+`git remote get-url origin` and `gh api --method GET` commands **without a shell**,
+bounds JSON responses to 2 MiB, suppresses subprocess stderr, and constructs
+repository links itself. GitHub CLI authentication and the separate GitHub App
+broker remain distinct; this is not embedded broker OAuth, and the queue is not
+a permission to merge or modify GitHub content.
