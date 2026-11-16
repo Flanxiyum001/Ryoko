@@ -1,3 +1,4 @@
+mod github_queue;
 mod lsp;
 mod lsp_frame;
 mod mission;
@@ -22,6 +23,7 @@ pub fn run() {
             lsp::lsp_stop,
             mission::list_mission_logs,
             mission::read_mission_log,
+            github_queue::github_review_queue,
             review::list_review_hunks,
             review::stage_review_hunks,
         ])
