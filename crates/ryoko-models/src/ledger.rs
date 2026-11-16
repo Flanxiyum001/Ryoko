@@ -306,9 +306,10 @@ impl UsageLedger {
     /// the request. A task may start well after the overall run clock.
     pub fn timeout_error(&self, scope: Option<&str>) -> ModelError {
         let run_remaining = self.remaining_time();
-        if let (Some(scope), Some(limit_seconds)) =
-            (scope, self.budget.and_then(|budget| budget.task_limit_seconds))
-        {
+        if let (Some(scope), Some(limit_seconds)) = (
+            scope,
+            self.budget.and_then(|budget| budget.task_limit_seconds),
+        ) {
             let started = self
                 .inner
                 .lock()
@@ -318,8 +319,7 @@ impl UsageLedger {
                 .copied();
             if let Some(started) = started {
                 let elapsed = started.elapsed();
-                let task_remaining =
-                    Duration::from_secs(limit_seconds).saturating_sub(elapsed);
+                let task_remaining = Duration::from_secs(limit_seconds).saturating_sub(elapsed);
                 if run_remaining.is_none_or(|run| task_remaining < run) {
                     return ModelError::TaskLatencyBudgetExceeded {
                         task: scope.to_owned(),
@@ -556,10 +556,7 @@ mod tests {
         run_tighter.check_budget_for(Some("task-a")).unwrap();
         assert!(matches!(
             run_tighter.timeout_error(Some("task-a")),
-            ModelError::LatencyBudgetExceeded {
-                budget_secs: 5,
-                ..
-            }
+            ModelError::LatencyBudgetExceeded { budget_secs: 5, .. }
         ));
     }
 
