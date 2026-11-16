@@ -24,7 +24,7 @@ use ryoko_models::{
 };
 use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 use ryoko_worktree::{
-    GitWorktreeManager, WorktreeDiff, WorktreeRecord, WorktreeSession, WorktreeState,
+    GitWorktreeManager, HunkPatch, WorktreeDiff, WorktreeRecord, WorktreeSession, WorktreeState,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command;
@@ -984,7 +984,7 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         print_diff(&diff, show_patch);
         print_report(&report);
 
-        println!("\n[A]ccept  [R]eject and discard  [F]eedback  [D]iff toggle  [Q]uit");
+        println!("\n[A]ccept  [H]unks  [R]eject and discard  [F]eedback  [D]iff toggle  [Q]uit");
         print!("> ");
         std::io::Write::flush(&mut std::io::stdout())?;
         let choice = read_line(&mut reader).await?;
@@ -1014,6 +1014,86 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                         continue;
                     }
                 }
+            }
+            "h" | "hunks" => {
+                let parsed = match HunkPatch::parse(&diff.patch) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        eprintln!("Cannot enumerate hunks: {error}");
+                        continue;
+                    }
+                };
+                if parsed.hunks().is_empty() {
+                    eprintln!(
+                        "No selectable text hunks; binary, rename and mode changes are excluded."
+                    );
+                    continue;
+                }
+                println!("\nChoose text hunks to stage on a NEW review branch:");
+                for hunk in parsed.hunks() {
+                    println!("[{}] {} {}", hunk.id, hunk.path, hunk.header);
+                    if !hunk.preview.is_empty() {
+                        println!("{}", hunk.preview);
+                    }
+                }
+                println!("Enter comma-separated IDs (e.g. 1,3), or empty to cancel:");
+                print!("> ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let input = read_line(&mut reader).await?;
+                if input.is_empty() {
+                    continue;
+                }
+                let chosen = match parse_hunk_ids(&input, parsed.hunks().len()) {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        continue;
+                    }
+                };
+                let selected = match manager.select_hunks(&session, &target, &chosen).await {
+                    Ok(selected) => selected,
+                    Err(error) => {
+                        eprintln!("Could not stage selected hunks: {error}");
+                        continue;
+                    }
+                };
+                let selected_diff = manager.diff_worktree(&selected, &target).await?;
+                let selected_report =
+                    validate_worktree(&validator, &selected, &selected_diff).await?;
+                clean_after_check(&manager, &selected).await;
+                print_diff(&selected_diff, false);
+                print_report(&selected_report);
+                println!(
+                    "Selected hunks are on a separate published branch. Source {} is unchanged.",
+                    session.branch_name
+                );
+                if selected_report.passed {
+                    println!(
+                        "Type MERGE to accept this validated selection into {target}; any other input keeps it:"
+                    );
+                    print!("> ");
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                    if read_line(&mut reader).await? == "MERGE" {
+                        match manager
+                            .merge_worktree(&selected, &target, &selected_report)
+                            .await
+                        {
+                            Ok(receipt) => {
+                                println!("Merged selected hunks at {}", receipt.merge_commit);
+                                manager.clean_worktree(&selected).await?;
+                                manager.release_worktree(&session).await?;
+                                return Ok(());
+                            }
+                            Err(error) => eprintln!("Selective merge refused: {error}"),
+                        }
+                    }
+                }
+                manager.release_worktree(&selected).await?;
+                println!(
+                    "Kept selected branch for review: ryoko review --repo {} --task {}",
+                    root.display(),
+                    selected.id
+                );
             }
             "r" | "reject" => {
                 manager.abandon_worktree(&session).await?;
@@ -1083,6 +1163,24 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+}
+
+fn parse_hunk_ids(input: &str, limit: usize) -> Result<Vec<usize>, Box<dyn Error>> {
+    let mut ids = Vec::new();
+    for entry in input.split(',') {
+        let id: usize = entry
+            .trim()
+            .parse()
+            .map_err(|_| cli_error("hunks must be comma-separated positive integers"))?;
+        if id == 0 || id > limit || ids.contains(&id) {
+            return Err(cli_error("invalid, duplicate or out-of-range hunk ID"));
+        }
+        ids.push(id);
+    }
+    if ids.is_empty() || ids.len() > 128 {
+        return Err(cli_error("select between 1 and 128 hunks"));
+    }
+    Ok(ids)
 }
 
 fn select_record(
@@ -1585,6 +1683,15 @@ mod tests {
                 .budget()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn parses_only_distinct_in_range_hunks() {
+        assert_eq!(parse_hunk_ids("1, 3", 4).unwrap(), vec![1, 3]);
+        assert!(parse_hunk_ids("0", 4).is_err());
+        assert!(parse_hunk_ids("1,1", 4).is_err());
+        assert!(parse_hunk_ids("5", 4).is_err());
+        assert!(parse_hunk_ids("1-2", 4).is_err());
     }
 
     #[test]

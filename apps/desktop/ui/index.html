@@ -65,6 +65,16 @@
             <p class="hint">Open a GitHub workspace, then load the queue using your local <code>gh</code> login.</p>
           </div>
         </section>
+        <details class="hunk-review">
+          <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>
+          <div class="hunk-toolbar">
+            <button id="hunkRefresh" class="button ghost compact" type="button">Scan</button>
+            <button id="hunkStage" class="button primary compact" type="button" disabled>Stage selected…</button>
+          </div>
+          <div id="hunkList" class="hunk-list" aria-label="Selectable Git hunks">
+            <p class="hint">Open a Git repository to inspect unstaged text hunks.</p>
+          </div>
+        </details>
         <div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
         <div id="problemList" class="problem-list">
           <p class="hint">No diagnostics yet.</p>
