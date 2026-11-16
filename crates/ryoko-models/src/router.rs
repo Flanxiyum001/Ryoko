@@ -156,19 +156,7 @@ impl ModelRouter {
         if let Some(duration) = remaining {
             match tokio::time::timeout(duration, work).await {
                 Ok(result) => result,
-                Err(_) => {
-                    // Preserve task-specific failures rather than attributing a
-                    // task timeout to the global run's (possibly absent) cap.
-                    self.ledger.check_budget_for(scope.as_deref())?;
-                    Err(ModelError::LatencyBudgetExceeded {
-                        budget_secs: self
-                            .ledger
-                            .budget()
-                            .and_then(|budget| budget.limit_seconds)
-                            .unwrap_or(0),
-                        elapsed_ms: self.ledger.elapsed().as_millis() as u64,
-                    })
-                }
+                Err(_) => Err(self.ledger.timeout_error(scope.as_deref())),
             }
         } else {
             work.await

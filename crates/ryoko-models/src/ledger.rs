@@ -302,6 +302,42 @@ impl UsageLedger {
         Some(Duration::from_secs(seconds).saturating_sub(self.elapsed()))
     }
 
+    /// Attribute a deadline-triggered timeout to the cap which constrained
+    /// the request. A task may start well after the overall run clock.
+    pub fn timeout_error(&self, scope: Option<&str>) -> ModelError {
+        let run_remaining = self.remaining_time();
+        if let (Some(scope), Some(limit_seconds)) = (
+            scope,
+            self.budget.and_then(|budget| budget.task_limit_seconds),
+        ) {
+            let started = self
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .task_started
+                .get(scope)
+                .copied();
+            if let Some(started) = started {
+                let elapsed = started.elapsed();
+                let task_remaining = Duration::from_secs(limit_seconds).saturating_sub(elapsed);
+                if run_remaining.is_none_or(|run| task_remaining < run) {
+                    return ModelError::TaskLatencyBudgetExceeded {
+                        task: scope.to_owned(),
+                        budget_secs: limit_seconds,
+                        elapsed_ms: elapsed.as_millis() as u64,
+                    };
+                }
+            }
+        }
+        ModelError::LatencyBudgetExceeded {
+            budget_secs: self
+                .budget
+                .and_then(|budget| budget.limit_seconds)
+                .unwrap_or(0),
+            elapsed_ms: self.elapsed().as_millis() as u64,
+        }
+    }
+
     /// Shortest remaining time across the run and task caps.
     pub fn remaining_time_for(&self, scope: Option<&str>) -> Option<Duration> {
         let run = self.remaining_time();
@@ -469,6 +505,59 @@ mod tests {
             Err(ModelError::TaskBudgetExceeded { task, .. }) if task == "task-a"
         ));
         assert!(ledger.check_budget_for(Some("task-b")).is_ok());
+    }
+
+    #[test]
+    fn timeout_error_attributes_the_binding_cap() {
+        let task_only = UsageLedger::new(Some(
+            Budget::unlimited().with_task_time_limit(Duration::from_secs(11)),
+        ));
+        task_only.check_budget_for(Some("task-a")).unwrap();
+        assert!(matches!(
+            task_only.timeout_error(Some("task-a")),
+            ModelError::TaskLatencyBudgetExceeded {
+                task,
+                budget_secs: 11,
+                ..
+            } if task == "task-a"
+        ));
+
+        let run_only = UsageLedger::new(Some(
+            Budget::unlimited().with_time_limit(Duration::from_secs(12)),
+        ));
+        assert!(matches!(
+            run_only.timeout_error(Some("task-a")),
+            ModelError::LatencyBudgetExceeded {
+                budget_secs: 12,
+                ..
+            }
+        ));
+
+        let task_tighter = UsageLedger::new(Some(
+            Budget::unlimited()
+                .with_time_limit(Duration::from_secs(30))
+                .with_task_time_limit(Duration::from_secs(8)),
+        ));
+        task_tighter.check_budget_for(Some("task-a")).unwrap();
+        assert!(matches!(
+            task_tighter.timeout_error(Some("task-a")),
+            ModelError::TaskLatencyBudgetExceeded {
+                task,
+                budget_secs: 8,
+                ..
+            } if task == "task-a"
+        ));
+
+        let run_tighter = UsageLedger::new(Some(
+            Budget::unlimited()
+                .with_time_limit(Duration::from_secs(5))
+                .with_task_time_limit(Duration::from_secs(20)),
+        ));
+        run_tighter.check_budget_for(Some("task-a")).unwrap();
+        assert!(matches!(
+            run_tighter.timeout_error(Some("task-a")),
+            ModelError::LatencyBudgetExceeded { budget_secs: 5, .. }
+        ));
     }
 
     #[test]
