@@ -4,6 +4,8 @@ mod lsp_frame;
 mod mission;
 mod paths;
 mod review;
+mod sessions;
+mod sessions_projection;
 mod workspace;
 
 use tauri::Manager;
@@ -24,6 +26,7 @@ pub fn run() {
             mission::list_mission_logs,
             mission::read_mission_log,
             github_queue::github_review_queue,
+            sessions::list_agent_sessions,
             review::list_review_hunks,
             review::stage_review_hunks,
         ])

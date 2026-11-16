@@ -111,6 +111,26 @@ history. The **Focus** control narrows the DAG to the selected node, its
 prerequisite chain and direct consumers. No event payload is executed, and
 only trusted local log files are read.
 
+## Agent Sessions
+
+The **Agent Sessions** panel is a read-only view of Ryoko's own persisted
+worktree leases, not a JetBrains Air integration and not a copy of its UI. It
+fills the gap between Mission Control (one run's event log) and the CLI
+(`ryoko sessions`): the operator can see which agents currently have active or
+published worktrees, their branch and base, changed files, state and last
+update.
+
+The `list_agent_sessions` command opens `.ryoko/state/worktrees.sqlite3` only
+when it is a regular file inside the open workspace. It performs no Git, model
+or subprocess calls, creates no worktree, and exposes no merge, abandon or
+resume operation. Results are capped at 40 sessions, 40 file names and a
+240-character summary; every string is rendered as text in the frontend, never
+as HTML. A missing database simply means no sessions have been recorded.
+
+The panel refreshes when a workspace opens and when the operator presses
+**Refresh**. It does not poll, so a stale view is visible rather than silently
+changing while the operator reads it.
+
 ## Native GitHub review queue
 
 The Tauri sidebar can display a read-only snapshot of up to 30 open pull requests

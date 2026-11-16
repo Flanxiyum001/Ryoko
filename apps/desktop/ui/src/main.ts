@@ -22,6 +22,11 @@ import {
   type LspDiagnostic,
   type PublishDiagnosticsParams,
 } from './protocol';
+import {
+  sessionMeta,
+  sessionTitle,
+  type AgentSession,
+} from './sessions';
 
 interface WorkspaceInfo {
   root: string;
@@ -103,6 +108,9 @@ const missionFocus = element<HTMLButtonElement>('missionFocus');
 const missionGraph = element('missionGraph');
 const missionDetail = element('missionDetail');
 const missionSummary = element('missionSummary');
+const agentSessionRefresh = element<HTMLButtonElement>('agentSessionRefresh');
+const agentSessionList = element('agentSessionList');
+const agentSessionSummary = element('agentSessionSummary');
 const hunkRefresh = element<HTMLButtonElement>('hunkRefresh');
 const hunkStage = element<HTMLButtonElement>('hunkStage');
 const hunkList = element('hunkList');
@@ -126,6 +134,8 @@ let missionSnapshot: MissionSnapshot | null = null;
 let missionSelection: string | null = null;
 let missionFocusEnabled = false;
 let missionPolling = false;
+let agentSessions: AgentSession[] = [];
+let agentSessionPolling = false;
 let gitHunks: GitHunkSnapshot | null = null;
 let hunkPolling = false;
 
@@ -233,6 +243,10 @@ async function openFolder(): Promise<void> {
     missionLogSelect.replaceChildren();
     missionGraph.replaceChildren();
     missionDetail.replaceChildren();
+    agentSessions = [];
+    agentSessionList.replaceChildren();
+    agentSessionSummary.textContent = '0 sessions';
+    agentSessionRefresh.disabled = false;
     gitHunks = null;
     hunkList.replaceChildren();
     hunkCount.textContent = '0';
@@ -251,11 +265,83 @@ async function openFolder(): Promise<void> {
     setStatus('Loading files…');
     await loadFiles();
     setStatus(`${state.files.length} files from ${info.name}`);
+    void refreshAgentSessions();
     void refreshMissionLogs();
     void refreshHunks();
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function sessionStateLabel(session: AgentSession): string {
+  return session.state === 'active' ? 'working' : session.state;
+}
+
+function renderAgentSessions(): void {
+  agentSessionList.replaceChildren();
+  agentSessionSummary.textContent = agentSessions.length === 1
+    ? '1 session'
+    : `${agentSessions.length} sessions`;
+  if (agentSessions.length === 0) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'No active or published worktree sessions. Start one with ryoko run.';
+    agentSessionList.append(hint);
+    return;
+  }
+  for (const session of agentSessions) {
+    const item = document.createElement('article');
+    item.className = 'agent-session';
+    item.dataset.state = session.state;
+    const heading = document.createElement('div');
+    heading.className = 'agent-session-head';
+    const title = document.createElement('span');
+    title.className = 'agent-session-title';
+    title.textContent = sessionTitle(session);
+    title.title = session.id;
+    const state = document.createElement('span');
+    state.className = 'agent-session-state';
+    state.textContent = sessionStateLabel(session);
+    heading.append(title, state);
+    const meta = document.createElement('span');
+    meta.className = 'agent-session-meta';
+    meta.textContent = sessionMeta(session);
+    const branch = document.createElement('span');
+    branch.className = 'agent-session-branch';
+    branch.textContent = `${session.branch} → ${session.baseBranch}`;
+    item.append(heading, meta, branch);
+    if (session.files.length > 0) {
+      const files = document.createElement('span');
+      files.className = 'agent-session-files';
+      files.textContent = session.files.slice(0, 4).join(' · ')
+        + (session.files.length > 4 ? ` · +${session.files.length - 4}` : '');
+      item.append(files);
+    }
+    agentSessionList.append(item);
+  }
+}
+
+async function refreshAgentSessions(): Promise<void> {
+  if (!state.root || agentSessionPolling) return;
+  const openedRoot = state.root;
+  agentSessionPolling = true;
+  agentSessionRefresh.disabled = true;
+  try {
+    const sessions = await invoke<AgentSession[]>('list_agent_sessions');
+    if (openedRoot !== state.root) return;
+    agentSessions = sessions;
+    renderAgentSessions();
+  } catch (error) {
+    agentSessions = [];
+    agentSessionSummary.textContent = 'unavailable';
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = error instanceof Error ? error.message : String(error);
+    agentSessionList.replaceChildren(hint);
+  } finally {
+    agentSessionPolling = false;
+    agentSessionRefresh.disabled = false;
   }
 }
 
@@ -823,6 +909,9 @@ saveButton.addEventListener('click', () => {
   void saveCurrent();
 });
 fileFilter.addEventListener('input', renderFiles);
+agentSessionRefresh.addEventListener('click', () => {
+  void refreshAgentSessions();
+});
 hunkRefresh.addEventListener('click', () => {
   void refreshHunks();
 });
