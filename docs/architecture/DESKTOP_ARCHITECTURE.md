@@ -73,6 +73,12 @@ process, not in the browser.
 
 ## Not implemented yet
 
+- Persisting raw provider prompts or credentials in event logs is intentionally
+  unsupported. The node's task brief is the safe, operator-visible prompt summary.
+- Native push-based event streaming is not yet implemented; Mission Control
+  currently polls bounded private JSONL logs.
+- Side-by-side worktree hunk review (the CLI still accepts or rejects a whole
+  patch).
 - Signing/notarisation credentials and automatic release publishing.
 
 ## Packaging
@@ -94,6 +100,16 @@ workspace, reject path traversal, disallow symlinks outside the workspace,
 and bound log reads to 4 MiB. The panel never executes event payloads or
 accepts agent-supplied executable paths. Enable optional logging with
 `ryoko run --event-log .ryoko/events/run.jsonl`.
+
+### Mission Control attempt inspection
+
+The interactive DAG presents task dependency edges, current agent status,
+operator-visible task briefs, and reported per-task token usage (ledger costs
+are estimates, **not verified billing**). Select a node to inspect the agent's
+validation results, bounded container/test logs and the chronological retry
+history. The **Focus** control narrows the DAG to the selected node, its
+prerequisite chain and direct consumers. No event payload is executed, and
+only trusted local log files are read.
 
 ## Agent Sessions
 
