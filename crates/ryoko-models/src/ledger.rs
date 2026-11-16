@@ -472,6 +472,62 @@ mod tests {
     }
 
     #[test]
+    fn timeout_error_attributes_the_binding_cap() {
+        let task_only = UsageLedger::new(Some(
+            Budget::unlimited().with_task_time_limit(Duration::from_secs(11)),
+        ));
+        task_only.check_budget_for(Some("task-a")).unwrap();
+        assert!(matches!(
+            task_only.timeout_error(Some("task-a")),
+            ModelError::TaskLatencyBudgetExceeded {
+                task,
+                budget_secs: 11,
+                ..
+            } if task == "task-a"
+        ));
+
+        let run_only = UsageLedger::new(Some(
+            Budget::unlimited().with_time_limit(Duration::from_secs(12)),
+        ));
+        assert!(matches!(
+            run_only.timeout_error(Some("task-a")),
+            ModelError::LatencyBudgetExceeded {
+                budget_secs: 12,
+                ..
+            }
+        ));
+
+        let task_tighter = UsageLedger::new(Some(
+            Budget::unlimited()
+                .with_time_limit(Duration::from_secs(30))
+                .with_task_time_limit(Duration::from_secs(8)),
+        ));
+        task_tighter.check_budget_for(Some("task-a")).unwrap();
+        assert!(matches!(
+            task_tighter.timeout_error(Some("task-a")),
+            ModelError::TaskLatencyBudgetExceeded {
+                task,
+                budget_secs: 8,
+                ..
+            } if task == "task-a"
+        ));
+
+        let run_tighter = UsageLedger::new(Some(
+            Budget::unlimited()
+                .with_time_limit(Duration::from_secs(5))
+                .with_task_time_limit(Duration::from_secs(20)),
+        ));
+        run_tighter.check_budget_for(Some("task-a")).unwrap();
+        assert!(matches!(
+            run_tighter.timeout_error(Some("task-a")),
+            ModelError::LatencyBudgetExceeded {
+                budget_secs: 5,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn task_wall_clock_cap_is_tracked_per_scope() {
         let ledger = UsageLedger::new(Some(
             Budget::unlimited().with_task_time_limit(Duration::ZERO),
