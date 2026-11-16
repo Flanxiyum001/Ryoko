@@ -73,10 +73,6 @@ process, not in the browser.
 
 ## Not implemented yet
 
-- Task DAG visualizer and per-agent token telemetry (requires persisted
-  orchestrator events).
-- Side-by-side worktree hunk review (the CLI still accepts or rejects a whole
-  patch).
 - Signing/notarisation credentials and automatic release publishing.
 
 ## Packaging
@@ -98,6 +94,26 @@ workspace, reject path traversal, disallow symlinks outside the workspace,
 and bound log reads to 4 MiB. The panel never executes event payloads or
 accepts agent-supplied executable paths. Enable optional logging with
 `ryoko run --event-log .ryoko/events/run.jsonl`.
+
+## Agent Sessions
+
+The **Agent Sessions** panel is a read-only view of Ryoko's own persisted
+worktree leases, not a JetBrains Air integration and not a copy of its UI. It
+fills the gap between Mission Control (one run's event log) and the CLI
+(`ryoko sessions`): the operator can see which agents currently have active or
+published worktrees, their branch and base, changed files, state and last
+update.
+
+The `list_agent_sessions` command opens `.ryoko/state/worktrees.sqlite3` only
+when it is a regular file inside the open workspace. It performs no Git, model
+or subprocess calls, creates no worktree, and exposes no merge, abandon or
+resume operation. Results are capped at 40 sessions, 40 file names and a
+240-character summary; every string is rendered as text in the frontend, never
+as HTML. A missing database simply means no sessions have been recorded.
+
+The panel refreshes when a workspace opens and when the operator presses
+**Refresh**. It does not poll, so a stale view is visible rather than silently
+changing while the operator reads it.
 
 ## Native GitHub review queue
 
