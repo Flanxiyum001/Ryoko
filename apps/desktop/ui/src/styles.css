@@ -99,6 +99,34 @@ button, input { font: inherit; color: inherit; }
 .file-list, .problem-list { overflow: auto; flex: 1; padding: 0 6px 12px; }
 .problem-list { padding: 4px 10px 12px; }
 
+/* Hunk review remains collapsed unless the operator opens it. No agent runs
+   or Git index writes are initiated automatically by the desktop shell. */
+.hunk-review {
+  flex-shrink: 0; border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.hunk-review[open] { max-height: 42%; display: flex; flex-direction: column; }
+.hunk-review summary {
+  padding: 10px 14px; font-size: 11px; letter-spacing: 0.1em;
+  color: var(--muted); cursor: pointer;
+}
+.hunk-review summary .counter { float: right; }
+.hunk-toolbar { display: flex; gap: 8px; padding: 0 10px 8px; }
+.hunk-list { overflow: auto; min-height: 0; padding: 0 10px 10px; }
+.hunk-item {
+  display: grid; grid-template-columns: 17px minmax(0, 1fr) auto;
+  align-items: start; gap: 5px; padding: 8px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.hunk-item input { margin: 3px 0 0; accent-color: var(--accent); }
+.hunk-title { font-size: 11px; overflow-wrap: anywhere; }
+.hunk-preview {
+  grid-column: 2 / 4; margin: 0; max-height: 65px;
+  overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 10px; color: var(--muted);
+}
+
+
 .file-link {
   display: block; width: 100%; text-align: left; border: 0; background: transparent;
   padding: 6px 8px; border-radius: 6px; cursor: pointer;
