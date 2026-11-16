@@ -563,9 +563,7 @@ mod tests {
             let _ = socket.write_all(body.as_bytes());
         });
 
-        let response = reqwest::get(format!("http://{address}/"))
-            .await
-            .unwrap();
+        let response = reqwest::get(format!("http://{address}/")).await.unwrap();
         let mut stream = decode_sse(response, "test".to_owned());
         let error = stream.next().await.unwrap().unwrap_err();
         assert!(
