@@ -252,6 +252,7 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
         let mut bytes = response.bytes_stream();
         let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);
         let mut data_lines: Vec<String> = Vec::new();
+        let mut event_bytes: usize = 0;
 
         'outer: while let Some(chunk) = bytes.next().await {
             let chunk = match chunk {
@@ -278,6 +279,7 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
                     }
                     let data = data_lines.join("\n");
                     data_lines.clear();
+                    event_bytes = 0;
                     if data.trim() == "[DONE]" {
                         break 'outer;
                     }
@@ -290,7 +292,15 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
                         Err(error) => yield Err(error),
                     }
                 } else if let Some(rest) = line.strip_prefix("data:") {
-                    data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+                    let data = rest.strip_prefix(' ').unwrap_or(rest);
+                    // A stream of short, unterminated data lines must not
+                    // evade the per-line buffer cap indefinitely.
+                    event_bytes = event_bytes.saturating_add(data.len().saturating_add(1));
+                    if event_bytes > 2 * 1024 * 1024 {
+                        yield Err(ModelError::Decode("SSE event exceeded 2 MiB".to_owned()));
+                        return;
+                    }
+                    data_lines.push(data.to_owned());
                 }
             }
         }
@@ -545,7 +555,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "temporarily isolate the unfixed child-worktree regression"]
     async fn rejects_unbounded_sse_event() {
         use std::io::{Read, Write};
 

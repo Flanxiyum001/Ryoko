@@ -1369,21 +1369,29 @@ impl WorkspaceProvider for GitWorktreeManager {
         } else {
             None
         };
-        let session = self
+        let mut session = self
             .create_worktree(&agent.name, task.id)
             .await
             .map_err(CoreError::from)?;
-        if let Some(head) = parent_head
-            && let Err(error) = self
+        if let Some(head) = parent_head {
+            if let Err(error) = self
                 .checked(
                     "inherit validated parent",
                     &["reset", "--hard", &head],
                     &session.path,
                 )
                 .await
-        {
-            let _ = self.abandon_worktree(&session).await;
-            return Err(CoreError::from(error));
+            {
+                let _ = self.abandon_worktree(&session).await;
+                return Err(CoreError::from(error));
+            }
+            // Report only this task's changes, not the validated parent
+            // inherited as its starting snapshot. Persist this for recovery.
+            session.base_commit = head;
+            if let Err(error) = self.save_session(&session) {
+                let _ = self.abandon_worktree(&session).await;
+                return Err(CoreError::from(error));
+            }
         }
         let root = tokio::fs::canonicalize(&session.path)
             .await
