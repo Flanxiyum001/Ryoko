@@ -62,6 +62,18 @@ interface MissionLog {
   modified_ms: number;
 }
 
+interface GitHunk {
+  id: number;
+  path: string;
+  header: string;
+  preview: string;
+}
+
+interface GitHunkSnapshot {
+  patch: string;
+  hunks: GitHunk[];
+}
+
 (globalThis as unknown as Record<string, unknown>).MonacoEnvironment = {
   getWorker: () => new EditorWorker(),
 };
@@ -89,6 +101,10 @@ const missionRefresh = element<HTMLButtonElement>('missionRefresh');
 const missionGraph = element('missionGraph');
 const missionDetail = element('missionDetail');
 const missionSummary = element('missionSummary');
+const hunkRefresh = element<HTMLButtonElement>('hunkRefresh');
+const hunkStage = element<HTMLButtonElement>('hunkStage');
+const hunkList = element('hunkList');
+const hunkCount = element('hunkCount');
 const githubQueueRefresh = element<HTMLButtonElement>('githubQueueRefresh');
 const githubQueueList = element('githubQueueList');
 const githubQueueSummary = element('githubQueueSummary');
@@ -107,6 +123,8 @@ let missionLogs: MissionLog[] = [];
 let missionSnapshot: MissionSnapshot | null = null;
 let missionSelection: string | null = null;
 let missionPolling = false;
+let gitHunks: GitHunkSnapshot | null = null;
+let hunkPolling = false;
 
 const openFiles = new Map<string, OpenFile>();
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
@@ -209,6 +227,10 @@ async function openFolder(): Promise<void> {
     missionLogSelect.replaceChildren();
     missionGraph.replaceChildren();
     missionDetail.replaceChildren();
+    gitHunks = null;
+    hunkList.replaceChildren();
+    hunkCount.textContent = '0';
+    hunkStage.disabled = true;
     githubQueueSummary.textContent = 'not loaded';
     githubQueueList.replaceChildren();
     githubQueueRefresh.disabled = false;
@@ -224,9 +246,102 @@ async function openFolder(): Promise<void> {
     await loadFiles();
     setStatus(`${state.files.length} files from ${info.name}`);
     void refreshMissionLogs();
+    void refreshHunks();
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function chosenHunks(): number[] {
+  return [...hunkList.querySelectorAll<HTMLInputElement>('input[data-hunk-id]')]
+    .filter((input) => input.checked)
+    .map((input) => Number(input.dataset.hunkId));
+}
+
+function updateHunkStageButton(): void {
+  hunkStage.disabled = !gitHunks || chosenHunks().length === 0 || hunkPolling;
+}
+
+async function refreshHunks(): Promise<void> {
+  if (!state.root || hunkPolling) return;
+  const openedRoot = state.root;
+  hunkPolling = true;
+  hunkStage.disabled = true;
+  try {
+    const snapshot = await invoke<GitHunkSnapshot>('list_review_hunks');
+    if (openedRoot !== state.root) return;
+    gitHunks = snapshot;
+    hunkList.replaceChildren();
+    hunkCount.textContent = String(snapshot.hunks.length);
+    if (snapshot.hunks.length === 0) {
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = 'No unstaged selectable text hunks. Binary, rename and mode changes are excluded.';
+      hunkList.append(hint);
+      return;
+    }
+    for (const hunk of snapshot.hunks) {
+      const item = document.createElement('div');
+      item.className = 'hunk-item';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.dataset.hunkId = String(hunk.id);
+      checkbox.setAttribute('aria-label', 'Select hunk ' + hunk.id + ' in ' + hunk.path);
+      checkbox.addEventListener('change', updateHunkStageButton);
+      const title = document.createElement('span');
+      title.className = 'hunk-title';
+      title.textContent = '#' + hunk.id + ' ' + hunk.path + ' ' + hunk.header;
+      const jump = document.createElement('button');
+      jump.type = 'button';
+      jump.className = 'button ghost compact';
+      jump.textContent = 'Open';
+      jump.title = 'Navigate to this hunk in Monaco';
+      jump.addEventListener('click', () => {
+        void (async () => {
+          await openFile(hunk.path);
+          const match = hunk.header.match(/\+(\d+)/);
+          if (match) {
+            const line = Number(match[1]);
+            editor.revealLineInCenter(line);
+            editor.setPosition({ lineNumber: line, column: 1 });
+          }
+        })();
+      });
+      const preview = document.createElement('pre');
+      preview.className = 'hunk-preview';
+      preview.textContent = hunk.preview;
+      item.append(checkbox, title, jump, preview);
+      hunkList.append(item);
+    }
+  } catch (error) {
+    gitHunks = null;
+    hunkCount.textContent = 'unavailable';
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = error instanceof Error ? error.message : String(error);
+    hunkList.replaceChildren(hint);
+  } finally {
+    hunkPolling = false;
+    updateHunkStageButton();
+  }
+}
+
+async function stageSelectedHunks(): Promise<void> {
+  if (!gitHunks || chosenHunks().length === 0) return;
+  if ([...openFiles.values()].some((file) => file.dirty)) {
+    setStatus('Save or discard unsaved Monaco edits before staging hunks.');
+    return;
+  }
+  hunkStage.disabled = true;
+  const ids = chosenHunks();
+  try {
+    await invoke('stage_review_hunks', { ids, expectedPatch: gitHunks.patch });
+    setStatus('Staged ' + ids.length + ' selected text hunk(s) in Git index. No commit or merge was made.');
+    await refreshHunks();
+  } catch (error) {
+    setStatus('Staging denied or failed: ' + (error instanceof Error ? error.message : String(error)));
+    updateHunkStageButton();
   }
 }
 
@@ -543,6 +658,7 @@ async function saveCurrent(): Promise<void> {
     lsp.change(file.uri, file.version, content);
     renderFiles();
     setStatus(`Saved ${file.path}`);
+    void refreshHunks();
   } catch (error) {
     setStatus(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -672,6 +788,12 @@ saveButton.addEventListener('click', () => {
   void saveCurrent();
 });
 fileFilter.addEventListener('input', renderFiles);
+hunkRefresh.addEventListener('click', () => {
+  void refreshHunks();
+});
+hunkStage.addEventListener('click', () => {
+  void stageSelectedHunks();
+});
 githubQueueRefresh.addEventListener('click', () => {
   void refreshGitHubQueue();
 });
