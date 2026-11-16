@@ -115,6 +115,12 @@ base, changed files, state and last update). It reads only
 `.ryoko/state/worktrees.sqlite3`, performs no Git or agent action, and offers no
 merge or resume control. Press **Refresh** to reload it.
 
+Mission Control shows each task's live phase (Waiting, Thinking, Coding or
+Testing), a timestamped agent activity timeline, per-task and run token totals
+with estimated ledger cost, validation logs, and a failure explanation naming
+the stage that stopped the task. The DAG is read-only and never executes event
+payloads; ledger cost is not verified billing.
+
 The desktop app can inspect local agent orchestration events recorded as JSONL.
 Use the optional `--event-log .ryoko/events/run.jsonl` flag with a sandboxed
 `ryoko run` invocation (and a reviewed `--sandbox-image`). The Mission
