@@ -550,9 +550,7 @@ mod tests {
             // unread request bytes can reset the connection on some platforms.
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];
-            while request.len() <= 8192
-                && !request.windows(4).any(|bytes| bytes == b"\r\n\r\n")
-            {
+            while request.len() <= 8192 && !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
                 let count = socket.read(&mut chunk).unwrap();
                 if count == 0 {
                     return;
