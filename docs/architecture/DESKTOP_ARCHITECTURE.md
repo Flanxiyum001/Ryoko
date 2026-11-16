@@ -103,13 +103,21 @@ accepts agent-supplied executable paths. Enable optional logging with
 
 ### Mission Control attempt inspection
 
-The interactive DAG presents task dependency edges, current agent status,
-operator-visible task briefs, and reported per-task token usage (ledger costs
-are estimates, **not verified billing**). Select a node to inspect the agent's
-validation results, bounded container/test logs and the chronological retry
-history. The **Focus** control narrows the DAG to the selected node, its
-prerequisite chain and direct consumers. No event payload is executed, and
-only trusted local log files are read.
+The interactive DAG presents task dependency edges, live agent phase, and
+operator-visible task briefs. Live phase is deliberately coarse: **Waiting**
+for an unscheduled or dependency-blocked task, **Thinking** while the agent
+call runs, **Coding** once a proposal is being staged, and **Testing** during
+pre-flight validation. A terminal task shows its result instead. Every event
+record is timestamped by the local log writer, so selecting a node shows an
+agent activity timeline, a chronological retry history, validation results,
+bounded container/test logs, and a failure explanation that names the stage
+(workspace, agent, staging, validation or publish) that stopped the task.
+
+The panel also shows reported per-task token usage and run totals. Ledger
+costs are estimates from configured pricing, **not verified billing**. The
+**Focus** control narrows the DAG to the selected node, its prerequisite chain
+and direct consumers. No event payload is executed, and only trusted local log
+files are read.
 
 ## Agent Sessions
 

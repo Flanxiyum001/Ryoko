@@ -9,7 +9,7 @@ use std::error::Error;
 use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ryoko_core::{
@@ -1466,7 +1466,17 @@ async fn write_event_log(
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         };
-        let mut line = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
+        // Timestamp every record so Mission Control can build a relative
+        // timeline without trusting agent-supplied timestamps.
+        let at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let mut value = serde_json::to_value(&event).map_err(std::io::Error::other)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("at_ms".to_owned(), serde_json::Value::from(at_ms));
+        }
+        let mut line = serde_json::to_vec(&value).map_err(std::io::Error::other)?;
         line.push(b'\n');
         if written.saturating_add(line.len() as u64) > MAX_EVENT_LOG_BYTES {
             eprintln!("warning: Mission Control log reached the 4 MiB limit");

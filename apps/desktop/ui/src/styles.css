@@ -317,6 +317,26 @@ pre.mission-detail-value {
   background: var(--panel-raised); font-size: 11px;
 }
 .mission-attempt strong { color: var(--text); font-weight: 600; }
+.mission-activity-timeline {
+  display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px;
+  padding-left: 8px; border-left: 1px solid var(--border);
+}
+.mission-activity {
+  display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 6px;
+  align-items: baseline; font-size: 11px;
+}
+.mission-activity-time {
+  color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+}
+.mission-activity-label { overflow-wrap: anywhere; }
+.mission-activity-detail {
+  grid-column: 2; margin: 2px 0 4px; max-height: 90px; overflow: auto;
+  padding: 5px 6px; color: var(--muted); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 
 /* Read-only GitHub queue backed by the user's authenticated gh CLI. */
 .github-queue {
