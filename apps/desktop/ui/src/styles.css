@@ -138,9 +138,39 @@ button, input { font: inherit; color: inherit; }
 
 .hint { color: var(--muted); font-size: 12px; padding: 8px; line-height: 1.5; }
 
+/* Agent Sessions: a read-only projection of persisted worktree leases. */
+.agent-sessions {
+  display: flex; flex-direction: column; flex-shrink: 0; max-height: 30%;
+  min-height: 0; border-bottom: 1px solid var(--border);
+}
+.agent-session-toolbar { display: flex; justify-content: flex-end; padding: 0 10px 6px; }
+.agent-session-list { overflow: auto; min-height: 0; padding: 0 10px 8px; }
+.agent-session {
+  display: flex; flex-direction: column; gap: 3px; padding: 7px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.agent-session:last-child { border-bottom: 0; }
+.agent-session-head { display: flex; align-items: baseline; gap: 8px; }
+.agent-session-title {
+  min-width: 0; flex: 1; font-size: 12px; line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.agent-session-state {
+  flex: none; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px;
+  font-size: 9px; letter-spacing: 0.06em; color: var(--muted);
+}
+.agent-session[data-state='active'] .agent-session-state { color: var(--accent); border-color: var(--accent-soft); }
+.agent-session[data-state='published'] .agent-session-state { color: #9fd8b4; border-color: #2f5c42; }
+.agent-session-meta, .agent-session-branch, .agent-session-files {
+  color: var(--muted); font-size: 10px; overflow-wrap: anywhere;
+}
+.agent-session-branch, .agent-session-files {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* Mission Control: a compact, read-only DAG over orchestrator event logs. */
 .mission {
-  display: flex; flex-direction: column; min-height: 0; height: 51%;
+  display: flex; flex-direction: column; min-height: 140px; flex: 1 1 34%;
   border-bottom: 1px solid var(--border);
 }
 .mission-toolbar {
