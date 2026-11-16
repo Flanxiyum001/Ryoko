@@ -47,6 +47,20 @@ interface FlatProblem {
   diagnostic: LspDiagnostic;
 }
 
+interface GitHubQueueItem {
+  number: number;
+  title: string;
+  url: string;
+  kind: 'pull' | 'issues';
+  draft: boolean;
+}
+
+interface GitHubQueue {
+  repository: string;
+  pulls: GitHubQueueItem[];
+  issues: GitHubQueueItem[];
+}
+
 interface MissionLog {
   name: string;
   bytes: number;
@@ -99,6 +113,9 @@ const hunkRefresh = element<HTMLButtonElement>('hunkRefresh');
 const hunkStage = element<HTMLButtonElement>('hunkStage');
 const hunkList = element('hunkList');
 const hunkCount = element('hunkCount');
+const githubQueueRefresh = element<HTMLButtonElement>('githubQueueRefresh');
+const githubQueueList = element('githubQueueList');
+const githubQueueSummary = element('githubQueueSummary');
 const lspStatus = element('lspStatus');
 const editorStatus = element('editorStatus');
 const cursorPos = element('cursorPos');
@@ -228,6 +245,9 @@ async function openFolder(): Promise<void> {
     hunkList.replaceChildren();
     hunkCount.textContent = '0';
     hunkStage.disabled = true;
+    githubQueueSummary.textContent = 'not loaded';
+    githubQueueList.replaceChildren();
+    githubQueueRefresh.disabled = false;
     editor.setModel(null);
     clearProblems();
     state.root = info.root;
@@ -408,6 +428,57 @@ async function stageSelectedHunks(): Promise<void> {
   } catch (error) {
     setStatus('Staging denied or failed: ' + (error instanceof Error ? error.message : String(error)));
     updateHunkStageButton();
+  }
+}
+
+/** Read-only GitHub queue. Credentials remain in the local gh CLI, never in Monaco. */
+async function refreshGitHubQueue(): Promise<void> {
+  if (!state.root || githubQueueRefresh.disabled) return;
+  githubQueueRefresh.disabled = true;
+  githubQueueSummary.textContent = 'loading…';
+  githubQueueList.replaceChildren();
+  try {
+    const queue = await invoke<GitHubQueue>('github_review_queue');
+    githubQueueSummary.textContent = `${queue.pulls.length} PRs · ${queue.issues.length} issues`;
+    const heading = document.createElement('p');
+    heading.className = 'github-repository';
+    heading.textContent = queue.repository;
+    githubQueueList.append(heading);
+    const renderGroup = (label: string, items: GitHubQueueItem[]) => {
+      const title = document.createElement('p');
+      title.className = 'github-queue-heading';
+      title.textContent = label;
+      githubQueueList.append(title);
+      if (items.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'hint';
+        empty.textContent = 'No open items';
+        githubQueueList.append(empty);
+      }
+      for (const item of items) {
+        // Never trust a URL from an external tool without checking the host.
+        const url = new URL(item.url);
+        if (url.protocol !== 'https:' || url.hostname !== 'github.com') continue;
+        const link = document.createElement('a');
+        link.className = 'github-queue-item';
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = `#${item.number} ${item.title}${item.draft ? ' (draft)' : ''}`;
+        link.title = 'Open on GitHub';
+        githubQueueList.append(link);
+      }
+    };
+    renderGroup('Pull requests', queue.pulls);
+    renderGroup('Issues', queue.issues);
+  } catch (error) {
+    githubQueueSummary.textContent = 'unavailable';
+    const notice = document.createElement('p');
+    notice.className = 'hint';
+    notice.textContent = String(error);
+    githubQueueList.append(notice);
+  } finally {
+    githubQueueRefresh.disabled = false;
   }
 }
 
@@ -811,6 +882,9 @@ hunkRefresh.addEventListener('click', () => {
 });
 hunkStage.addEventListener('click', () => {
   void stageSelectedHunks();
+});
+githubQueueRefresh.addEventListener('click', () => {
+  void refreshGitHubQueue();
 });
 missionRefresh.addEventListener('click', () => {
   void refreshMissionLogs();

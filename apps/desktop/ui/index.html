@@ -65,6 +65,15 @@
             <p class="hint">Select a task to inspect its brief, validation and output.</p>
           </div>
         </section>
+        <section class="github-queue" aria-label="GitHub review queue">
+          <div class="panel-head"><span>GITHUB QUEUE</span><span id="githubQueueSummary" class="counter">not connected</span></div>
+          <div class="github-queue-toolbar">
+            <button id="githubQueueRefresh" type="button" class="button ghost compact">Load open PRs &amp; issues</button>
+          </div>
+          <div id="githubQueueList" class="github-queue-list" aria-live="polite">
+            <p class="hint">Open a GitHub workspace, then load the queue using your local <code>gh</code> login.</p>
+          </div>
+        </section>
         <details class="hunk-review">
           <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>
           <div class="hunk-toolbar">
