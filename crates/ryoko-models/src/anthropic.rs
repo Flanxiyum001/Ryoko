@@ -544,6 +544,38 @@ mod tests {
         assert_eq!(config.endpoint(), "https://api.anthropic.com/v1/messages");
     }
 
+    #[tokio::test]
+    async fn rejects_unbounded_sse_event() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            // Every individual line is small, but the event has no blank
+            // terminator and grows beyond the 2 MiB limit.
+            let body = format!("data: {}\n", "x".repeat(1024)).repeat(2048);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).unwrap();
+            let _ = socket.write_all(body.as_bytes());
+        });
+
+        let response = reqwest::get(format!("http://{address}/"))
+            .await
+            .unwrap();
+        let mut stream = decode_sse(response, "test".to_owned());
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, ModelError::Decode(ref message) if message == "SSE event exceeded 2 MiB"),
+            "unexpected SSE decoder error: {error}"
+        );
+        drop(stream);
+        server.join().unwrap();
+    }
+
     #[test]
     fn provider_errors_redact_response_bodies() {
         let error = dispatch_event(
