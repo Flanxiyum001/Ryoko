@@ -109,6 +109,12 @@ Limits: only ordinary unified text hunks are selectable; binary, renames, deleti
 
 ## Desktop Mission Control
 
+The desktop sidebar also shows **Agent Sessions**: a read-only list of the
+active and published worktree leases recorded by `ryoko run` (agent, branch,
+base, changed files, state and last update). It reads only
+`.ryoko/state/worktrees.sqlite3`, performs no Git or agent action, and offers no
+merge or resume control. Press **Refresh** to reload it.
+
 The desktop app can inspect local agent orchestration events recorded as JSONL.
 Use the optional `--event-log .ryoko/events/run.jsonl` flag with a sandboxed
 `ryoko run` invocation (and a reviewed `--sandbox-image`). The Mission
