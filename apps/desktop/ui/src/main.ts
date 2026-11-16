@@ -6,7 +6,10 @@ import './styles.css';
 import { LspClient, type LspState } from './lsp';
 import {
   focusMissionTasks,
+  formatLedgerCost,
+  formatTokens,
   layoutMission,
+  liveStatus,
   missionNodeSize,
   parseMissionLog,
   reduceMissionEvents,
@@ -489,13 +492,24 @@ async function refreshGitHubQueue(): Promise<void> {
 }
 
 function missionStatusLabel(task: MissionTask): string {
-  if (task.status === 'succeeded') return 'succeeded';
-  if (task.status === 'failed') return 'failed';
-  if (task.status === 'skipped') return 'skipped';
-  if (task.status === 'retrying') return `retry ${task.attempt ?? ''}`.trim();
-  if (task.status === 'validating') return 'validating';
-  if (task.status === 'running') return 'running';
-  return 'scheduled';
+  const status = liveStatus(task).toLowerCase();
+  return task.status === 'retrying' ? `retry ${task.attempt ?? ''} · ${status}`.trim() : status;
+}
+
+function failureExplanation(task: MissionTask): string {
+  const stage = task.failureStage;
+  const lead = stage === 'workspace'
+    ? 'The workspace lease could not be created, so the agent never ran.'
+    : stage === 'agent'
+      ? 'The agent did not return a usable result.'
+      : stage === 'staging'
+        ? 'The proposed changes could not be written to the isolated worktree.'
+        : stage === 'validation'
+          ? 'The project check rejected the changes before publication.'
+          : stage === 'publish'
+            ? 'The changes passed validation but the worktree could not be published.'
+            : 'The task did not complete.';
+  return task.error ? `${lead} ${task.error}` : lead;
 }
 
 function renderMissionOptions(): void {
@@ -568,9 +582,11 @@ function renderMission(): void {
     renderMissionDetail();
     return;
   }
+  const tokens = formatTokens(snapshot.totals.inputTokens + snapshot.totals.outputTokens);
+  const usage = `${tokens} tok · est. ${formatLedgerCost(snapshot.totals.ledgerCostUsd)}`;
   missionSummary.textContent = snapshot.finished
-    ? `${snapshot.finished.succeeded} ok · ${snapshot.finished.failed} failed · ${snapshot.finished.durationMs}ms`
-    : `${snapshot.tasks.length}/${snapshot.taskCount} tasks`;
+    ? `${snapshot.finished.succeeded} ok · ${snapshot.finished.failed} failed · ${snapshot.finished.durationMs}ms · ${usage}`
+    : `${snapshot.tasks.length}/${snapshot.taskCount} tasks · ${usage}`;
 
   missionFocus.disabled = !missionSelection;
   missionFocus.textContent = missionFocusEnabled ? 'Show all' : 'Focus';
@@ -672,6 +688,7 @@ function renderMissionDetail(): void {
   heading.append(title, status);
   missionDetail.append(heading);
 
+  addDetailRow(missionDetail, 'Live status', liveStatus(task));
   addDetailRow(missionDetail, 'Task brief', task.description);
   addDetailRow(missionDetail, 'Agent', task.agent ?? '');
   addDetailRow(missionDetail, 'Attempts', task.attempts ? String(task.attempts) : '');
@@ -679,9 +696,12 @@ function renderMissionDetail(): void {
   if (task.usage) {
     addDetailRow(
       missionDetail,
-      'Model usage',
-      `${task.usage.requests} request(s); ${task.usage.inputTokens} input + ${task.usage.outputTokens} output tokens; ledger ${task.usage.ledgerCostUsd.toFixed(4)} (not verified billed cost)`,
+      'Token usage and estimated cost',
+      `${task.usage.requests} request(s); ${task.usage.inputTokens} input + ${task.usage.outputTokens} output tokens; estimated ledger ${formatLedgerCost(task.usage.ledgerCostUsd)} (not verified billed cost)`,
     );
+  }
+  if (task.error || task.failureStage) {
+    addDetailRow(missionDetail, 'Failure explanation', failureExplanation(task));
   }
   if (task.validation) {
     addDetailRow(
@@ -696,6 +716,36 @@ function renderMissionDetail(): void {
   if (task.pullRequest) {
     addDetailRow(missionDetail, 'Pull request', `${task.pullRequest.id} → ${task.pullRequest.branch}`);
     addDetailRow(missionDetail, 'Files', task.pullRequest.files.join('\n'), true);
+  }
+  if (task.activity?.length) {
+    const section = document.createElement('p');
+    section.className = 'mission-detail-label';
+    section.textContent = 'Agent activity timeline';
+    missionDetail.append(section);
+    const first = task.activity.find((entry) => entry.atMs > 0)?.atMs;
+    const timeline = document.createElement('div');
+    timeline.className = 'mission-activity-timeline';
+    for (const entry of task.activity.slice(-40).reverse()) {
+      const row = document.createElement('div');
+      row.className = 'mission-activity';
+      const time = document.createElement('span');
+      time.className = 'mission-activity-time';
+      time.textContent = first && entry.atMs >= first
+        ? `+${((entry.atMs - first) / 1000).toFixed(1)}s`
+        : '—';
+      const label = document.createElement('span');
+      label.className = 'mission-activity-label';
+      label.textContent = entry.attempt ? `Attempt ${entry.attempt} · ${entry.label}` : entry.label;
+      row.append(time, label);
+      if (entry.detail) {
+        const detail = document.createElement('pre');
+        detail.className = 'mission-activity-detail';
+        detail.textContent = entry.detail;
+        row.append(detail);
+      }
+      timeline.append(row);
+    }
+    missionDetail.append(timeline);
   }
   if (task.history?.length) {
     const section = document.createElement('p');
