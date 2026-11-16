@@ -42,6 +42,15 @@
       </main>
 
       <aside class="problems" aria-label="Mission Control and diagnostics">
+        <section class="agent-sessions" aria-label="Agent sessions">
+          <div class="panel-head"><span>AGENT SESSIONS</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
+          <div class="agent-session-toolbar">
+            <button id="agentSessionRefresh" class="button ghost compact" type="button">Refresh</button>
+          </div>
+          <div id="agentSessionList" class="agent-session-list" aria-live="polite">
+            <p class="hint">Open a workspace to see active and published agent worktrees.</p>
+          </div>
+        </section>
         <section class="mission" aria-label="Mission Control">
           <div class="panel-head"><span>MISSION CONTROL</span><span id="missionSummary" class="counter">no events</span></div>
           <div class="mission-toolbar">
