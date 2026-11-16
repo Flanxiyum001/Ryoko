@@ -262,6 +262,7 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
         let mut bytes = response.bytes_stream();
         let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);
         let mut data_lines: Vec<String> = Vec::new();
+        let mut event_bytes: usize = 0;
         let mut finished = false;
 
         'outer: while let Some(chunk) = bytes.next().await {
@@ -290,6 +291,7 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
                     }
                     let data = data_lines.join("\n");
                     data_lines.clear();
+                    event_bytes = 0;
                     if is_done(&data) {
                         finished = true;
                         break 'outer;
@@ -303,7 +305,15 @@ fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
                         Err(err) => yield Err(err),
                     }
                 } else if let Some(rest) = line.strip_prefix("data:") {
-                    data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+                    let data = rest.strip_prefix(' ').unwrap_or(rest);
+                    // A stream of short, unterminated data lines must not
+                    // evade the per-line buffer cap indefinitely.
+                    event_bytes = event_bytes.saturating_add(data.len().saturating_add(1));
+                    if event_bytes > 2 * 1024 * 1024 {
+                        yield Err(ModelError::Decode("SSE event exceeded 2 MiB".to_owned()));
+                        return;
+                    }
+                    data_lines.push(data.to_owned());
                 }
                 // `event:`, `id:`, `retry:` and comment lines are not needed:
                 // the OpenAI protocol puts the type inside the JSON payload.
@@ -535,6 +545,47 @@ mod tests {
                 arguments_delta
             } if id == "call_1" && name == "read_file" && arguments_delta == r#"{"path":"#
         ));
+    }
+
+    #[tokio::test]
+    async fn rejects_unbounded_sse_event() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            // Consume the request headers before sending and closing: leaving
+            // unread request bytes can reset the connection on some platforms.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while request.len() <= 8192 && !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = socket.read(&mut chunk).unwrap();
+                if count == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..count]);
+            }
+            // Every individual line is small, but the event has no blank
+            // terminator and grows beyond the 2 MiB limit.
+            let body = format!("data: {}\n", "x".repeat(1024)).repeat(2048);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).unwrap();
+            let _ = socket.write_all(body.as_bytes());
+        });
+
+        let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+        let mut stream = decode_sse(response, "test".to_owned());
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, ModelError::Decode(ref message) if message == "SSE event exceeded 2 MiB"),
+            "unexpected SSE decoder error: {error}"
+        );
+        drop(stream);
+        server.join().unwrap();
     }
 
     #[test]

@@ -1369,21 +1369,29 @@ impl WorkspaceProvider for GitWorktreeManager {
         } else {
             None
         };
-        let session = self
+        let mut session = self
             .create_worktree(&agent.name, task.id)
             .await
             .map_err(CoreError::from)?;
-        if let Some(head) = parent_head
-            && let Err(error) = self
+        if let Some(head) = parent_head {
+            if let Err(error) = self
                 .checked(
                     "inherit validated parent",
                     &["reset", "--hard", &head],
                     &session.path,
                 )
                 .await
-        {
-            let _ = self.abandon_worktree(&session).await;
-            return Err(CoreError::from(error));
+            {
+                let _ = self.abandon_worktree(&session).await;
+                return Err(CoreError::from(error));
+            }
+            // Report only this task's changes, not the validated parent
+            // inherited as its starting snapshot. Persist this for recovery.
+            session.base_commit = head;
+            if let Err(error) = self.save_session(&session) {
+                let _ = self.abandon_worktree(&session).await;
+                return Err(CoreError::from(error));
+            }
         }
         let root = tokio::fs::canonicalize(&session.path)
             .await
@@ -1771,6 +1779,40 @@ mod tests {
                 .unwrap(),
             "contract"
         );
+        lease.discard().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dependent_publish_reports_only_child_changes() {
+        let (_dir, manager) = repo().await;
+        let parent = Task::new("architecture", AgentRole::SeniorDeveloper);
+        let session = manager
+            .create_worktree("architect", parent.id)
+            .await
+            .unwrap();
+        tokio::fs::write(session.path.join("architecture.txt"), "contract\n")
+            .await
+            .unwrap();
+        manager
+            .publish_worktree(&session, "architecture")
+            .await
+            .unwrap();
+        manager.clean_worktree(&session).await.unwrap();
+
+        let child = Task::new("tests", AgentRole::QaEngineer).depends_on(&parent);
+        let identity = AgentIdentity::new(AgentRole::QaEngineer, "qa", "tests");
+        let lease = manager.allocate(&child, &identity).await.unwrap();
+        lease
+            .apply(&[ProposedChange::new(
+                "tests/child.rs",
+                "#[test]\nfn child() {}\n",
+            )])
+            .await
+            .unwrap();
+        let pr = lease.publish(&child, "child tests").await.unwrap();
+        assert_eq!(pr.files, vec!["tests/child.rs"]);
+        assert!(pr.patch.contains("tests/child.rs"));
+        assert!(!pr.patch.contains("architecture.txt"));
         lease.discard().await.unwrap();
     }
 
