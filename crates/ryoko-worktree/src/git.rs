@@ -19,7 +19,10 @@ use ryoko_core::{
     WorkspaceLease, WorkspaceProvider,
 };
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+use crate::hunks::HunkPatch;
 use uuid::Uuid;
 
 const STATE_SCHEMA: &str = r#"
@@ -558,6 +561,93 @@ impl GitWorktreeManager {
             )
             .await?;
         Ok(WorktreeDiff { files, patch })
+    }
+
+    /// Builds a *new* published review branch from operator-selected text
+    /// hunks. The source agent branch is never rewritten or partially merged.
+    /// Only a checkout at the target branch tip is accepted as the base.
+    /// The resulting branch still needs independent validation and approval.
+    pub async fn select_hunks(
+        &self,
+        source: &WorktreeSession,
+        target: &str,
+        chosen: &[usize],
+    ) -> Result<WorktreeSession, WorktreeError> {
+        let record = self
+            .load_session(source.id)?
+            .ok_or_else(|| WorktreeError::NotPublished(source.branch_name.clone()))?;
+        if record.state != WorktreeState::Published {
+            return Err(WorktreeError::NotPublished(source.branch_name.clone()));
+        }
+        if !self
+            .git(
+                &self.base_project_path,
+                &["check-ref-format", "--branch", target],
+            )
+            .await?
+            .status
+            .success()
+        {
+            return Err(WorktreeError::InvalidBranch(target.to_owned()));
+        }
+        let target_head = self
+            .checked(
+                "resolve hunk review target",
+                &["rev-parse", &format!("refs/heads/{target}")],
+                &self.base_project_path,
+            )
+            .await?;
+        let checkout_head = self
+            .checked(
+                "resolve checkout HEAD",
+                &["rev-parse", "HEAD"],
+                &self.base_project_path,
+            )
+            .await?;
+        if target_head != checkout_head {
+            return Err(WorktreeError::State(
+                "hunk selection requires the checkout to be at the target branch tip".into(),
+            ));
+        }
+        let diff = self.diff_worktree(source, target).await?;
+        let selection = HunkPatch::parse(&diff.patch).map_err(WorktreeError::State)?;
+        let patch = selection.select(chosen).map_err(WorktreeError::State)?;
+        let session = self.create_worktree("hunk-review", Uuid::new_v4()).await?;
+        let applied = async {
+            let mut process = Command::new("git")
+                .current_dir(&session.path)
+                .args(["apply", "--index", "--whitespace=nowarn", "-"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .kill_on_drop(true)
+                .spawn()?;
+            let mut input = process
+                .stdin
+                .take()
+                .ok_or_else(|| WorktreeError::State("git apply stdin unavailable".into()))?;
+            input.write_all(patch.as_bytes()).await?;
+            drop(input);
+            let output = tokio::time::timeout(Duration::from_secs(20), process.wait_with_output())
+                .await
+                .map_err(|_| WorktreeError::State("git apply timed out".into()))??;
+            if !output.status.success() {
+                return Err(self.git_error("apply selected hunks", output));
+            }
+            self.publish_worktree(
+                &session,
+                &format!("Selected validated hunks from {}", source.branch_name),
+            )
+            .await?;
+            Ok::<(), WorktreeError>(())
+        }
+        .await;
+        if let Err(error) = applied {
+            let _ = self.abandon_worktree(&session).await;
+            return Err(error);
+        }
+        Ok(session)
     }
 
     /// Discards uncommitted agent output after a failed revision while keeping
@@ -1714,6 +1804,52 @@ mod tests {
         assert!(right.path.join("README.md").exists());
         manager.clean_worktree(&left).await.unwrap();
         manager.clean_worktree(&right).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn selects_one_hunk_into_independent_published_branch() {
+        let (dir, manager) = repo().await;
+        let original = (1..=28).map(|i| format!("line-{i}\n")).collect::<String>();
+        tokio::fs::write(dir.path().join("notes.txt"), &original)
+            .await
+            .unwrap();
+        git(dir.path(), &["add", "notes.txt"]).await;
+        git(dir.path(), &["commit", "-m", "notes"]).await;
+        let source = manager
+            .create_worktree("dev", Uuid::new_v4())
+            .await
+            .unwrap();
+        let changed = original
+            .replace("line-1\n", "changed-1\n")
+            .replace("line-28\n", "changed-28\n");
+        tokio::fs::write(source.path.join("notes.txt"), changed)
+            .await
+            .unwrap();
+        manager
+            .publish_worktree(&source, "two hunks")
+            .await
+            .unwrap();
+
+        let diff = manager.diff_worktree(&source, "main").await.unwrap();
+        let hunks = HunkPatch::parse(&diff.patch).unwrap();
+        assert_eq!(hunks.hunks().len(), 2);
+        let selected = manager.select_hunks(&source, "main", &[1]).await.unwrap();
+        let text = tokio::fs::read_to_string(selected.path.join("notes.txt"))
+            .await
+            .unwrap();
+        assert!(text.contains("changed-1"));
+        assert!(text.contains("line-28"));
+        assert!(!text.contains("changed-28"));
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join("notes.txt"))
+                .await
+                .unwrap(),
+            original
+        );
+        let record = manager.load_session(selected.id).unwrap().unwrap();
+        assert_eq!(record.state, WorktreeState::Published);
+        manager.abandon_worktree(&selected).await.unwrap();
+        manager.abandon_worktree(&source).await.unwrap();
     }
 
     #[tokio::test]
