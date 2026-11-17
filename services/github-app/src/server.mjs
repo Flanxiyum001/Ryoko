@@ -5,6 +5,7 @@ import { resolve, isAbsolute } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { GitHubBroker } from './github.mjs';
+import { issueAgentRequest, runIssuePipeline } from './pipeline.mjs';
 import { isAllowedOrigin, validateProposal, verifyWebhookSignature } from './security.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -73,6 +74,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     ryokoBinary: config?.ryokoBinary || '',
     projectRoot: config?.projectRoot || '',
     projectsRoot: config?.projectsRoot || '',
+    pipelineTimeoutMs: config?.pipelineTimeoutMs || 15 * 60_000,
   };
   const client = broker || new GitHubBroker(config || {});
   const pagesRoot = frontendPath || resolve('apps/desktop');
@@ -83,6 +85,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
   const subscribers = new Set();
   const desktopPairings = new Map();
   const desktopSessions = new Map();
+  const pipelineJobs = new Map();
   const isSecure = new URL(settings.origin).protocol === 'https:';
 
   function sessionFor(req) {
@@ -213,6 +216,39 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       deliveries.set(delivery, Date.now());
       if (deliveries.size > 1000) deliveries.delete(deliveries.keys().next().value);
       if (allowed.includes(type) && payload.installation?.id) emit(summarizeWebhook(type, payload));
+      const pipelineRequest = issueAgentRequest(type, payload);
+      if (pipelineRequest) {
+        const key = `${pipelineRequest.repoId}:${pipelineRequest.number}`;
+        if (!pipelineJobs.has(key)) {
+          const started = {
+            id: randomUUID(), type: 'pipeline', action: 'started',
+            installationId: pipelineRequest.installationId,
+            repositoryId: pipelineRequest.repoId,
+            repository: pipelineRequest.fullName,
+            summary: `Issue #${pipelineRequest.number}: ${pipelineRequest.title}`.slice(0, 180),
+            timestamp: new Date().toISOString(),
+          };
+          pipelineJobs.set(key, { status: 'running', startedAt: Date.now() });
+          emit(started);
+          void runIssuePipeline({ broker: client, request: pipelineRequest, settings })
+            .then((result) => {
+              pipelineJobs.set(key, { status: 'completed', ...result, finishedAt: Date.now() });
+              emit({
+                ...started, id: randomUUID(), action: 'completed',
+                summary: `Draft PR #${result.number} opened`.slice(0, 180),
+                timestamp: new Date().toISOString(),
+              });
+            })
+            .catch((error) => {
+              const message = safeError(error).message;
+              pipelineJobs.set(key, { status: 'failed', error: message, finishedAt: Date.now() });
+              emit({
+                ...started, id: randomUUID(), action: 'failed', summary: message.slice(0, 180),
+                timestamp: new Date().toISOString(),
+              });
+            });
+        }
+      }
       return json(res, 202, { accepted: true });
     }
     if (req.method === 'GET' && path === '/auth/github/start') {
