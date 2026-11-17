@@ -27,8 +27,10 @@ tool **only** if the operator types `YES` for that invocation. A fresh
 approval is required for every call. Server tools cannot grant themselves
 permissions, and listing tools does not imply approval.
 
-Servers may need credentials. The child gets a minimal PATH/HOME/temporary
-directory environment; all other variables are denied by default. Explicitly
+Servers may need credentials. The child gets a minimal PATH and
+temporary-directory environment; all other variables are denied by default.
+`HOME` and `USERPROFILE` are deliberately not forwarded because they expose
+per-user credential directories such as `~/.ssh` and `~/.aws`. Explicitly
 forward only the variable a reviewed server requires:
 
 ```sh
