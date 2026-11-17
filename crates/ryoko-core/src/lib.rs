@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod orchestrator;
+pub mod project_memory;
 pub mod team;
 pub mod validation;
 pub mod workspace;
@@ -49,5 +50,6 @@ pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, 
 pub use orchestrator::{
     OrchestrationReport, Orchestrator, OrchestratorConfig, SkippedTask, TaskFailure, TaskSuccess,
 };
+pub use project_memory::{MemoryEntry, MemoryKind, ProjectMemory};
 pub use validation::{AllowAllValidator, ChangeValidator, StagedChanges, ValidationReport};
 pub use workspace::{InMemoryWorkspaceProvider, PullRequest, WorkspaceLease, WorkspaceProvider};
