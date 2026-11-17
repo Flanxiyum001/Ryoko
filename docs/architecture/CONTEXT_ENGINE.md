@@ -6,8 +6,9 @@ intra-file call edges and focused bodies). `ryoko run` scans supported source
 files with bounded size/depth limits and injects their outlines into the
 developer agent's prompt; the review revise flow injects the same outline
 alongside the changed file contents. `SharedMemory` is an in-process
-blackboard. Durable indexing, semantic retrieval and persistent memory do not
-exist yet.
+blackboard. A bounded, human-editable project memory store now lives under
+`.ryoko/memory/`. Durable semantic retrieval and automatic memory promotion
+do not exist yet.
 
 ## Indexing pipeline
 
@@ -47,7 +48,21 @@ to recover from missed events and from changes made while the indexer was stoppe
 
 ## Project memory
 
-Memory categories:
+`ryoko-core::ProjectMemory` loads three Markdown files from
+`.ryoko/memory/`: `decisions.md`, `conventions.md` and `rejections.md`. Entries
+are separated by `## ` headings and may contain freeform Markdown, so an
+operator can inspect and edit them directly. `ryoko run` and the review revise
+flow include a bounded rendering of these files as reference context. When the
+operator rejects a published task, the CLI prepends an entry to
+`rejections.md` so later runs can avoid repeating the same proposal.
+
+The store is intentionally conservative: memory files must be regular files
+beneath the workspace, symlinks are rejected, each file is capped at 256 KiB
+and each entry is capped at 8 KiB. Memory is untrusted project text and is
+never executed. Automatic memory writing by agents remains out of scope; only
+an explicit human edit or review rejection changes the store.
+
+The longer-term memory categories remain:
 
 | Kind | Example |
 | --- | --- |
