@@ -125,6 +125,10 @@ pub struct PluginManifest {
     pub kind: PluginKind,
     #[serde(default)]
     pub description: String,
+    /// SHA-256 of the `.wasm` module. Required for registry installs; the host
+    /// also verifies it when present.
+    #[serde(default)]
+    pub wasm_sha256: Option<String>,
 }
 
 impl PluginManifest {
@@ -173,6 +177,15 @@ impl PluginManifest {
         if self.description.len() > 1024 || self.description.chars().any(char::is_control) {
             return Err(PluginError::Manifest(
                 "description must be at most 1024 printable characters".into(),
+            ));
+        }
+        if let Some(hash) = &self.wasm_sha256
+            && (hash.len() != 64
+                || !hash.chars().all(|ch| ch.is_ascii_hexdigit())
+                || hash.chars().any(|ch| ch.is_ascii_uppercase()))
+        {
+            return Err(PluginError::Manifest(
+                "wasm_sha256 must be 64 lowercase hexadecimal characters".into(),
             ));
         }
         Ok(())
@@ -260,6 +273,15 @@ impl PluginHost {
         }
         let limits = policy.limits.capped_by(self.max_limits);
         let bytes = read_regular_file(wasm_path, MAX_WASM_BYTES)?;
+        if let Some(expected) = &manifest.wasm_sha256 {
+            let actual = sha256_hex(&bytes);
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err(PluginError::Manifest(format!(
+                    "wasm hash mismatch for `{}`",
+                    manifest.id
+                )));
+            }
+        }
         let engine = self.engine.clone();
         let module = tokio::task::spawn_blocking(move || Module::new(&engine, &bytes))
             .await
@@ -291,6 +313,18 @@ fn read_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, PluginError
         )));
     }
     std::fs::read(path).map_err(|error| PluginError::Io(format!("{}: {error}", path.display())))
+}
+
+/// Lowercase hex SHA-256 used by registry installs and host verification.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn join_error(error: JoinError) -> PluginError {
@@ -542,6 +576,7 @@ pub(crate) mod tests {
                 version: "1.0.0".into(),
                 kind,
                 description: "test fixture".into(),
+                wasm_sha256: None,
             })
             .unwrap(),
         )
@@ -665,6 +700,7 @@ pub(crate) mod tests {
                 version: "1.0.0".into(),
                 kind: PluginKind::Context,
                 description: String::new(),
+                wasm_sha256: None,
             })
             .unwrap(),
         )
@@ -705,6 +741,7 @@ pub(crate) mod tests {
             version: "1".into(),
             kind: PluginKind::Agent,
             description: String::new(),
+            wasm_sha256: None,
         };
         assert!(manifest.validate().is_err());
         manifest.id = "ok".into();
