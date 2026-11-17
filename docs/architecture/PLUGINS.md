@@ -21,13 +21,15 @@ a context outline.
   "name": "Acme Python linter",
   "version": "1.0.0",
   "kind": "linter",
-  "description": "Checks Acme framework conventions"
+  "description": "Checks Acme framework conventions",
+  "wasm_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 }
 ```
 
 `schema` must be `1`. `id` is 1-64 lowercase ASCII letters, digits, `.`, `_` or
 `-`. `kind` is one of `agent`, `linter` or `context`. The manifest is limited to
-64 KiB.
+64 KiB. `wasm_sha256` is an optional lowercase SHA-256 pin; when present the host
+rejects a module whose bytes do not match before compiling it.
 
 ## Host policy
 
@@ -179,6 +181,24 @@ The command also fails when the module's declared kind does not match the
 subcommand, when the plugin response violates the typed ABI, or when any fuel,
 time, memory or output limit is exceeded.
 
+## Install from a registry source
+
+`ryoko plugin install` copies a reviewed manifest/module pair into a local
+plugin directory. The source is either a directory containing `plugin.json` (or
+`manifest.json`) and `plugin.wasm`, or an HTTPS git repository URL that is
+cloned with `--depth=1` into a temporary directory.
+
+```sh
+ryoko plugin install ./acme-linter --dir .ryoko/plugins
+ryoko plugin install https://github.com/acme/ryoko-linter.git --dir .ryoko/plugins
+```
+
+The installer requires a SHA-256 pin, either from `--sha256` or the manifest's
+`wasm_sha256`, and refuses a mismatch. It validates the manifest id/kind and
+writes owner-only files to `<dir>/<id>/`. Existing installs are refused unless
+`--force` is passed. Installation does **not** grant permission: the host policy
+must still allow the id and kind before the plugin can run.
+
 ## Isolation properties
 
 - Fresh wasmtime store per invocation.
@@ -193,9 +213,10 @@ time, memory or output limit is exceeded.
 
 ## Limitations
 
-- No streaming protocol, host callbacks, capability grants or plugin signing
-  yet. A plugin that needs repository data must receive it in the bounded
-  request; it cannot read the workspace.
+- No streaming protocol, host callbacks, capability grants or cryptographic
+  plugin signatures yet. SHA-256 pinning detects changed bytes but does not
+  prove who published them. A plugin that needs repository data must receive it
+  in the bounded request; it cannot read the workspace.
 - Module compilation happens before the per-invocation fuel, time and memory
   limits apply and is not interruptible. Load only reviewed wasm files from
   paths the operator selected; a hostile module can make compilation expensive.

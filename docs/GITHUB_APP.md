@@ -97,13 +97,41 @@ The clone uses a short-lived installation token via a temporary owner-only Git a
 
 The broker blocks workflow edits, Git metadata changes, credential files, default-branch direct commits, administration, and automatic merges. GitHub branch protection and rulesets also continue to apply. A proposal expires after 10 minutes; approval requires a valid logged-in session, same-origin CSRF header, and a fresh authorization check. Failed writes are never silently retried.
 
-## 5. Desktop workbench
+## 5. Issue-to-PR agent pipeline
+
+A signed webhook for an issue labeled `ryoko:agent` can start the full team
+pipeline. The repository must be listed in `RYOKO_AGENT_ALLOWED_REPO_IDS`, and
+the server also needs the CLI and clone root:
+
+    export RYOKO_CLI_BIN="/absolute/path/to/ryoko"
+    export RYOKO_PROJECTS_ROOT="/srv/ryoko/projects"
+    export RYOKO_AGENT_ALLOWED_REPO_IDS="123456789"
+
+The broker then:
+
+1. clones the repository with a short-lived, read-only installation token;
+2. runs `ryoko run --team --repo <clone> --report <clone>/.ryoko/issue-report.json`
+   with the issue title and body as the goal;
+3. reads the report's published branch, token ledger and validation events;
+4. pushes that branch with a separate contents-write token; and
+5. opens a **draft** pull request whose body embeds the ledger and validation
+   evidence.
+
+The job is started asynchronously after the webhook is accepted, emits
+`pipeline` timeline events, and is deduplicated in memory by repository/issue.
+Jobs are not durable across restarts. Model keys stay in the service
+environment; they are never included in the webhook, clone, report or PR body.
+Cloned code and model output remain untrusted, and the PR is never merged
+automatically. Docker/container audit and worktree behavior follow the CLI's
+normal isolation configuration.
+
+## 6. Desktop workbench
 
 The web shell provides repository installation selection, read-only file browser, branches/issues/PRs/CI, dark/light appearance, reduced motion, a persistent sidebar, a Mission Control board with eight agents, a verified GitHub event timeline, and a user approval queue. It is **not yet packaged as a Tauri/native desktop binary**, and the file panel is a read-only inspector rather than a Monaco editor.
 
 **Still required for the full product:** native desktop packaging, LSP/Monaco editor, terminal, live per-agent inference events, durable audit/job queue, native OAuth token refresh, a first-party Rust agent bridge submitting proposals, bulk patch staging, and staged deployment with proper production controls.
 
-## 6. Tests and release gates
+## 7. Tests and release gates
 
 CI runs Rust workspace formatting/Clippy/tests and the Node workbench syntax/security tests. Locally:
 
