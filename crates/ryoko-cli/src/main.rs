@@ -16,8 +16,8 @@ use ignore::WalkBuilder;
 use ryoko_core::{
     AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, ContextExtractor,
     EventSink, FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig,
-    OrchestratorEvent, ProjectContext, ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory,
-    StagedChanges, Task, TaskContext, WorkspaceIndex, goal_terms,
+    OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA,
+    SharedMemory, StagedChanges, Task, TaskContext, WorkspaceIndex, goal_terms,
     team::{application_plan, engineering_execution_plan, standard_team},
     validation::ValidationReport,
 };
@@ -36,7 +36,9 @@ use uuid::Uuid;
 
 use crate::check::{CommandValidator, detect_check_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
-use ryoko_scripting::{PluginAgent, PluginHost, PluginLimits, PluginPolicy};
+use ryoko_scripting::{
+    PluginAgent, PluginHost, PluginLimits, PluginManifest, PluginPolicy, sha256_hex,
+};
 
 /// Outline budget shared by the run and review agent contexts.
 const STRUCTURAL_CONTEXT_BYTES: usize = 5_000;
@@ -122,13 +124,13 @@ enum McpCommands {
 struct PluginArgs {
     /// Path to the plugin manifest JSON.
     #[arg(long)]
-    manifest: PathBuf,
+    manifest: Option<PathBuf>,
     /// Path to the plugin .wasm module.
     #[arg(long)]
-    wasm: PathBuf,
+    wasm: Option<PathBuf>,
     /// Path to the host-owned plugin policy JSON.
     #[arg(long)]
-    policy: PathBuf,
+    policy: Option<PathBuf>,
     #[command(subcommand)]
     command: PluginCommands,
 }
@@ -162,6 +164,23 @@ enum PluginCommands {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Install a plugin from a local directory or HTTPS git repository.
+    Install(PluginInstallArgs),
+}
+
+#[derive(Debug, Args)]
+struct PluginInstallArgs {
+    /// Local directory or HTTPS git URL containing plugin.json and plugin.wasm.
+    source: String,
+    /// Installation directory. Each plugin is stored in <dir>/<id>.
+    #[arg(long, default_value = ".ryoko/plugins")]
+    dir: PathBuf,
+    /// Expected SHA-256 of plugin.wasm. Defaults to the manifest's wasm_sha256.
+    #[arg(long)]
+    sha256: Option<String>,
+    /// Replace an existing installation.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -286,6 +305,9 @@ struct RunArgs {
     /// Write agent events to a private JSONL file beneath the repository.
     #[arg(long, value_name = "PATH")]
     event_log: Option<PathBuf>,
+    /// Write a machine-readable run report with ledger and validation events.
+    #[arg(long, value_name = "PATH")]
+    report: Option<PathBuf>,
     /// Execute a four-role code/test DAG instead of a single developer.
     #[arg(long)]
     team: bool,
@@ -665,13 +687,29 @@ async fn mcp_command(args: McpArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn plugin_command(args: PluginArgs) -> Result<(), Box<dyn Error>> {
-    let policy_text = std::fs::read_to_string(&args.policy)?;
+    let command = args.command;
+    if matches!(command, PluginCommands::Install(_)) {
+        let PluginCommands::Install(install) = command else {
+            unreachable!();
+        };
+        return install_plugin(install).await;
+    }
+    let manifest = args
+        .manifest
+        .ok_or_else(|| cli_error("--manifest is required for this plugin command"))?;
+    let wasm = args
+        .wasm
+        .ok_or_else(|| cli_error("--wasm is required for this plugin command"))?;
+    let policy_path = args
+        .policy
+        .ok_or_else(|| cli_error("--policy is required for this plugin command"))?;
+    let policy_text = std::fs::read_to_string(&policy_path)?;
     let policy = PluginPolicy::from_json(&policy_text)
         .map_err(|error| cli_error(format!("invalid plugin policy: {error}")))?;
     let host = PluginHost::new(PluginLimits::default())
         .map_err(|error| cli_error(format!("could not create plugin host: {error}")))?;
     let plugin = host
-        .load(&args.manifest, &args.wasm, &policy)
+        .load(&manifest, &wasm, &policy)
         .await
         .map_err(|error| cli_error(format!("could not load plugin: {error}")))?;
     eprintln!(
@@ -679,7 +717,7 @@ async fn plugin_command(args: PluginArgs) -> Result<(), Box<dyn Error>> {
         plugin.manifest().id,
         plugin.manifest().kind.label()
     );
-    match args.command {
+    match command {
         PluginCommands::Lint { path, source_file } => {
             let source = read_plugin_source(source_file.as_deref())?;
             let diagnostics = plugin
@@ -723,6 +761,153 @@ async fn plugin_command(args: PluginArgs) -> Result<(), Box<dyn Error>> {
             let result = agent.execute_task(ctx, task).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        PluginCommands::Install(_) => unreachable!(),
+    }
+    Ok(())
+}
+
+async fn install_plugin(args: PluginInstallArgs) -> Result<(), Box<dyn Error>> {
+    if args.source.starts_with("https://")
+        && (args.source.contains('@') || args.source.contains('?') || args.source.contains('#'))
+    {
+        return Err(cli_error(
+            "plugin repository URLs must not contain credentials, query strings or fragments",
+        ));
+    }
+    if args
+        .dir
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        return Err(cli_error("plugin install directory must not be a symlink"));
+    }
+    let temp = if args.source.starts_with("https://") {
+        let temp = tempfile::tempdir()?;
+        let destination = temp.path().join("plugin");
+        let status = tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "credential.helper=",
+                "-c",
+                "http.followRedirects=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "protocol.file.allow=never",
+                "-c",
+                "protocol.ext.allow=never",
+                "clone",
+                "--depth=1",
+                "--no-tags",
+                "--",
+                &args.source,
+            ])
+            .arg(&destination)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
+        if !status.success() {
+            return Err(cli_error(
+                "plugin repository clone failed; only HTTPS git URLs are accepted",
+            ));
+        }
+        Some((temp, destination))
+    } else {
+        None
+    };
+    let source = match &temp {
+        Some((_, destination)) => destination.clone(),
+        None => std::fs::canonicalize(&args.source)
+            .map_err(|error| cli_error(format!("invalid plugin source: {error}")))?,
+    };
+    let manifest_path = ["plugin.json", "manifest.json"]
+        .into_iter()
+        .map(|name| source.join(name))
+        .find(|path| path.is_file())
+        .ok_or_else(|| cli_error("plugin source must contain plugin.json or manifest.json"))?;
+    let mut manifest = PluginManifest::load(&manifest_path)
+        .map_err(|error| cli_error(format!("invalid plugin manifest: {error}")))?;
+    let wasm_path = source.join("plugin.wasm");
+    let metadata = std::fs::symlink_metadata(&wasm_path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(cli_error("plugin.wasm must be a regular file"));
+    }
+    if metadata.len() > 64 * 1024 * 1024 {
+        return Err(cli_error("plugin.wasm exceeds the 64 MiB limit"));
+    }
+    let wasm = std::fs::read(&wasm_path)?;
+    let actual = sha256_hex(&wasm);
+    let expected = args
+        .sha256
+        .clone()
+        .or_else(|| manifest.wasm_sha256.clone())
+        .ok_or_else(|| {
+            cli_error("no SHA-256 supplied; pass --sha256 or declare wasm_sha256 in the manifest")
+        })?;
+    if !actual.eq_ignore_ascii_case(expected.trim()) {
+        return Err(cli_error(format!(
+            "plugin.wasm hash mismatch: expected {}, got {actual}",
+            expected.trim()
+        )));
+    }
+    manifest.wasm_sha256 = Some(actual);
+    let destination = args.dir.join(&manifest.id);
+    if destination.exists() && !args.force {
+        return Err(cli_error(format!(
+            "{} already exists; pass --force to replace it",
+            destination.display()
+        )));
+    }
+    if destination
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        return Err(cli_error("plugin destination must not be a symlink"));
+    }
+    std::fs::create_dir_all(&destination)?;
+    let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+    write_private_file(&destination.join("plugin.json"), &manifest_json)?;
+    write_private_file(&destination.join("plugin.wasm"), &wasm)?;
+    println!(
+        "Installed {} {} ({}) at {}",
+        manifest.id,
+        manifest.version,
+        manifest.kind.label(),
+        destination.display()
+    );
+    println!(
+        "Review the manifest, then allow `{}` and kind `{}` in your policy.",
+        manifest.id,
+        manifest.kind.label()
+    );
+    Ok(())
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        file.write_all(bytes)?;
     }
     Ok(())
 }
@@ -1435,18 +1620,32 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let mut receiver = events.subscribe();
     let event_writer =
         event_log.map(|path| tokio::spawn(write_event_log(events.subscribe(), path)));
+    let validations = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let validation_sink = validations.clone();
     let validation_logs = tokio::spawn(async move {
         while let Ok(event) = receiver.recv().await {
             if let OrchestratorEvent::ValidationFinished {
-                passed: false,
+                task_id,
+                passed,
                 summary,
                 logs,
-                ..
+                duration_ms,
             } = event
             {
-                eprintln!("Pre-flight rejected an attempt: {summary}");
-                for line in logs {
-                    eprintln!("  {line}");
+                if let Ok(mut values) = validation_sink.lock() {
+                    values.push(serde_json::json!({
+                        "task_id": task_id,
+                        "passed": passed,
+                        "summary": summary,
+                        "logs": logs,
+                        "duration_ms": duration_ms,
+                    }));
+                }
+                if !passed {
+                    eprintln!("Pre-flight rejected an attempt: {summary}");
+                    for line in logs {
+                        eprintln!("  {line}");
+                    }
                 }
             }
         }
@@ -1475,7 +1674,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             None
         }
     };
-    let orchestrator = Orchestrator::new(Arc::new(manager), validator, router)
+    let orchestrator = Orchestrator::new(Arc::new(manager), validator, router.clone())
         .with_config(OrchestratorConfig {
             max_concurrency: if args.team { args.max_concurrency } else { 1 },
             max_attempts: args.attempts.max(1),
@@ -1493,6 +1692,27 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if let Some(path) = &args.report {
+        let values = validations
+            .lock()
+            .map(|values| values.clone())
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "run": &report,
+            "ledger": router.ledger().snapshot(),
+            "validation": values,
+        });
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_vec_pretty(&payload)?)?;
+        println!("Wrote run report to {}", path.display());
+    }
     for success in &report.succeeded {
         println!(
             "Published {} ({} attempt(s)) on {}",
@@ -1687,6 +1907,17 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                 );
             }
             "r" | "reject" => {
+                let rejection = record
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| format!("Rejected {}", session.branch_name));
+                if let Err(error) = ProjectMemory::append_rejection(
+                    &root,
+                    &rejection,
+                    "Rejected during human review. Do not resubmit the same proposal without addressing the review concern.",
+                ) {
+                    eprintln!("warning: could not record project memory: {error}");
+                }
                 manager.abandon_worktree(&session).await?;
                 println!(
                     "Discarded {}. The main checkout is untouched.",
@@ -1867,7 +2098,14 @@ async fn revise(
         .resume_lease(session.id)
         .await
         .map_err(|error| error.to_string())?;
-    let context = worktree_context(session, revision.diff).await;
+    let mut context = worktree_context(session, revision.diff).await;
+    if let Ok(memory) = ProjectMemory::load(Path::new(&revision.project.project_root)) {
+        let memory_context = memory.render_for_context(3_000);
+        if !memory_context.is_empty() {
+            context.push_str("\n--- project memory ---\n");
+            context.push_str(&memory_context);
+        }
+    }
     let mut feedback = feedback.to_owned();
     let mut last_error = String::from("revision did not run");
 
@@ -2150,11 +2388,24 @@ async fn project_brief(root: &Path) -> String {
         }
     }
     append_structural_outline(&mut brief, root);
+    append_project_memory(&mut brief, root);
     if brief.trim().is_empty() {
         "No project manifest was found.".to_owned()
     } else {
         brief
     }
+}
+
+fn append_project_memory(brief: &mut String, root: &Path) {
+    let Ok(memory) = ProjectMemory::load(root) else {
+        return;
+    };
+    let rendered = memory.render_for_context(4_000);
+    if rendered.is_empty() {
+        return;
+    }
+    brief.push_str("\n--- project memory ---\n");
+    brief.push_str(&rendered);
 }
 
 fn truncate(text: &str, max_bytes: usize) -> String {
@@ -2209,6 +2460,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_brief_includes_human_editable_memory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ryoko/memory")).unwrap();
+        std::fs::write(
+            dir.path().join(".ryoko/memory/decisions.md"),
+            "## Keep the index local\nDo not upload source to an embedding service.\n",
+        )
+        .unwrap();
+
+        let brief = project_brief(dir.path()).await;
+        assert!(brief.contains("--- project memory ---"));
+        assert!(brief.contains("Keep the index local"));
+    }
+
+    #[tokio::test]
     async fn worktree_context_includes_changed_files_and_structural_outline() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -2249,6 +2515,51 @@ mod tests {
             task_budget_tokens: None,
             task_budget_secs: None,
         }
+    }
+
+    #[tokio::test]
+    async fn plugin_install_verifies_manifest_hash_before_copying() {
+        let source = tempfile::TempDir::new().unwrap();
+        let destination = tempfile::TempDir::new().unwrap();
+        let empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        std::fs::write(source.path().join("plugin.wasm"), b"").unwrap();
+        std::fs::write(
+            source.path().join("plugin.json"),
+            format!(
+                r#"{{"schema":1,"id":"test-installer","name":"Test installer","version":"1.0.0","kind":"linter","description":"","wasm_sha256":"{empty_hash}"}}"#
+            ),
+        )
+        .unwrap();
+        install_plugin(PluginInstallArgs {
+            source: source.path().display().to_string(),
+            dir: destination.path().join("plugins"),
+            sha256: None,
+            force: false,
+        })
+        .await
+        .unwrap();
+        let installed = destination.path().join("plugins/test-installer");
+        assert!(installed.join("plugin.json").is_file());
+        assert!(installed.join("plugin.wasm").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(installed.join("plugin.wasm"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let error = install_plugin(PluginInstallArgs {
+            source: source.path().display().to_string(),
+            dir: destination.path().join("plugins"),
+            sha256: Some("0".repeat(64)),
+            force: true,
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("hash mismatch"));
     }
 
     #[test]
