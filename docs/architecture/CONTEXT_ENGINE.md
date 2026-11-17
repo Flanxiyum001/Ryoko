@@ -1,8 +1,9 @@
 # Context engine and project memory
 
 Status: `ryoko-core` provides tree-sitter context extraction for Rust,
-TypeScript/TSX, JavaScript, Python, Go and C/C++ (imports, symbol outline,
-intra-file call edges and focused bodies). `ryoko run` scans supported source
+TypeScript/TSX, JavaScript, Python, Go, C/C++, Java, Kotlin, C#, Swift and SQL
+(imports, symbol outline, intra-file call edges, focused bodies, and SQL schema
+objects such as tables, views and indexes). `ryoko run` scans supported source
 files with bounded size/depth limits and injects their outlines into the
 developer agent's prompt; the review revise flow injects the same outline
 alongside the changed file contents. `SharedMemory` is an in-process
