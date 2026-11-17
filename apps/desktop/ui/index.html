@@ -138,15 +138,24 @@
             <p class="hint">Select a task to inspect its brief, validation and output.</p>
           </div>
         </section>
-        <section class="github-queue" aria-label="GitHub review queue">
-          <div class="panel-head"><span>GITHUB QUEUE</span><span id="githubQueueSummary" class="counter">not connected</span></div>
+        <details class="github-queue">
+          <summary>GITHUB PR / ISSUE QUEUE <span id="githubQueueCount" class="counter">not connected</span></summary>
+          <div class="github-pair">
+            <p class="hint">Sign in to the local GitHub App workbench, select “Pair native desktop”, then paste its single-use code here. OAuth secrets stay server-side.</p>
+            <label class="sr-only" for="githubPairCode">Single-use GitHub desktop code</label>
+            <input id="githubPairCode" type="password" autocomplete="off" spellcheck="false" placeholder="Single-use pairing code">
+            <button id="githubPair" class="button ghost compact" type="button">Pair read-only</button>
+          </div>
           <div class="github-queue-toolbar">
-            <button id="githubQueueRefresh" type="button" class="button ghost compact">Load open PRs &amp; issues</button>
+            <label class="sr-only" for="githubRepo">Authorized GitHub repository</label>
+            <select id="githubRepo" aria-label="Authorized GitHub repository"></select>
+            <button id="githubRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="githubUnpair" class="button ghost compact" type="button">Disconnect</button>
           </div>
-          <div id="githubQueueList" class="github-queue-list" aria-live="polite">
-            <p class="hint">Open a GitHub workspace, then load the queue using your local <code>gh</code> login.</p>
+          <div id="githubQueueList" class="github-queue-list">
+            <p class="hint">No repository queue loaded.</p>
           </div>
-        </section>
+        </details>
         <details class="hunk-review">
           <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>
           <div class="hunk-toolbar">

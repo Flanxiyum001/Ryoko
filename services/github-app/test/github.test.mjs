@@ -246,3 +246,38 @@ test('webhook delivers only signature-verified requests and deduplicates event I
   assert.equal(duplicate.status, 202);
   assert.equal((await duplicate.json()).duplicate, true);
 });
+
+test('desktop pairing requires browser CSRF, is single-use, read-only and revokes on logout', async () => {
+  const { cookie, csrf } = await login();
+  const denied = await req('/api/desktop/pair', { method: 'POST', sessionCookie: cookie });
+  assert.equal(denied.status, 403);
+  const created = await req('/api/desktop/pair', { method: 'POST', sessionCookie: cookie, csrf });
+  assert.equal(created.status, 201);
+  const { code } = await created.json();
+  assert.match(code, /^[A-Za-z0-9_-]{43}$/);
+  const exchanged = await req('/api/desktop/exchange', {
+    method: 'POST', body: { code },
+  });
+  assert.equal(exchanged.status, 200);
+  const { token } = await exchanged.json();
+  assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+  const replay = await req('/api/desktop/exchange', { method: 'POST', body: { code } });
+  assert.equal(replay.status, 401);
+  const unauthenticated = await req('/api/desktop/repositories');
+  assert.equal(unauthenticated.status, 401);
+  const headers = { Authorization: 'Bearer ' + token };
+  const repos = await req('/api/desktop/repositories', { headers });
+  assert.equal(repos.status, 200);
+  assert.deepEqual((await repos.json()).repositories.map((repo) => repo.repoId), [41]);
+  const queue = await req('/api/desktop/queue?installationId=17&repoId=41', { headers });
+  assert.equal(queue.status, 200);
+  const body = await queue.json();
+  assert.equal(body.repository, 'approved-owner/repo');
+  assert.deepEqual(body.pulls, []);
+  assert.deepEqual(body.issues, []);
+  const forbidden = await req('/api/desktop/queue?installationId=17&repoId=100', { headers });
+  assert.equal(forbidden.status, 403);
+  await req('/api/disconnect', { method: 'POST', sessionCookie: cookie, csrf });
+  const revoked = await req('/api/desktop/repositories', { headers });
+  assert.equal(revoked.status, 401);
+});
