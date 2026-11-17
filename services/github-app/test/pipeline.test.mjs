@@ -17,6 +17,16 @@ const payload = {
   },
 };
 
+test('either agent label starts an issue pipeline', () => {
+  for (const name of ['ryoko-fix', 'ryoko:agent']) {
+    const labeled = { ...payload, issue: { ...payload.issue, labels: [{ name }] } };
+    assert.equal(issueAgentRequest('issues', labeled)?.number, 9, name);
+  }
+  assert.equal(issueAgentRequest('issues', {
+    ...payload, issue: { ...payload.issue, labels: [{ name: 'ryoko' }] },
+  }), null);
+});
+
 test('only a human agent label starts an issue pipeline', () => {
   const request = issueAgentRequest('issues', payload);
   assert.equal(request.repoId, 41);
@@ -45,6 +55,31 @@ test('pull request body carries bounded ledger and validation evidence', () => {
     validation: [{ value: 'y'.repeat(100_000) }],
   });
   assert.ok(huge.length <= 12_000);
+});
+
+test('pull request body attaches the pre-merge security audit', () => {
+  const body = buildPullRequestBody(payload.issue, {
+    ledger: {},
+    validation: [{
+      passed: true,
+      logs: [
+        'spec test files: tests/api.rs',
+        'security audit: passed',
+        'security audit: cargo audit skipped (no manifest)',
+      ],
+    }],
+  });
+  assert.match(body, /## Security audit/);
+  assert.match(body, /cargo audit skipped/);
+  // Only audit lines belong in the dedicated section, not the raw log dump.
+  const section = body.split('## Security audit')[1].split('## Validation report')[0];
+  assert.match(section, /```text\npassed\ncargo audit skipped \(no manifest\)\n```/);
+  assert.doesNotMatch(section, /spec test files/);
+
+  const empty = buildPullRequestBody(payload.issue, {
+    ledger: {}, validation: [{ passed: true, logs: [] }],
+  });
+  assert.match(empty, /no security audit output was recorded/);
 });
 
 test('pipeline clones, runs the team, pushes the branch and opens a draft PR', async () => {
