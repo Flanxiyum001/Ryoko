@@ -21,6 +21,7 @@ pub mod memory;
 pub mod model;
 pub mod orchestrator;
 pub mod project_memory;
+pub mod spec_link;
 pub mod team;
 pub mod validation;
 pub mod workspace;

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 clap.workspace = true
 ignore.workspace = true
 ryoko-core = { path = "../ryoko-core" }
