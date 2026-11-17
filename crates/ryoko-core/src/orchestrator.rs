@@ -17,10 +17,11 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{AgentRuntime, TaskContext};
-use crate::agents::RETRY_FEEDBACK_METADATA;
+use crate::agents::{RETRY_FEEDBACK_METADATA, task_branch_key, task_summary_key};
 use crate::diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 use crate::error::{CoreError, CoreResult};
 use crate::event::{AgentPhase, EventSink, OrchestratorEvent, TaskFailureStage};
+use crate::mcp::McpToolService;
 use crate::memory::SharedMemory;
 use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
@@ -113,6 +114,8 @@ pub struct Orchestrator {
     events: EventSink,
     /// Optional editor channel; absent when no editor host is attached.
     diagnostic_sink: Option<Arc<dyn TaskDiagnosticSink>>,
+    /// Optional host-approved external tool surface shared by every model agent.
+    mcp: Option<Arc<dyn McpToolService>>,
 }
 
 impl Orchestrator {
@@ -128,6 +131,7 @@ impl Orchestrator {
             config: OrchestratorConfig::default(),
             events: EventSink::default(),
             diagnostic_sink: None,
+            mcp: None,
         }
     }
 
@@ -138,6 +142,13 @@ impl Orchestrator {
 
     pub fn with_events(mut self, events: EventSink) -> Self {
         self.events = events;
+        self
+    }
+
+    /// Attaches a host-approved MCP toolbox to every model agent. Approval,
+    /// allowlisting and budget checks remain inside the toolbox.
+    pub fn with_mcp(mut self, mcp: Option<Arc<dyn McpToolService>>) -> Self {
+        self.mcp = mcp;
         self
     }
 
@@ -204,6 +215,7 @@ impl Orchestrator {
                 models: self.models.clone(),
                 validator: self.validator.clone(),
                 workspace: None,
+                mcp: self.mcp.clone(),
                 events: self.events.clone(),
             };
             let agent = registry[&task.assigned_to].clone();
@@ -640,9 +652,12 @@ async fn execute_task(
         match lease.publish(task, &result.output).await {
             Ok(pr) => {
                 context.memory.insert(
-                    format!("ryoko.task.{}.summary", task.id),
+                    task_summary_key(task.id),
                     result.output.chars().take(2_000).collect::<String>(),
                 );
+                context
+                    .memory
+                    .insert(task_branch_key(task.id), pr.branch.clone());
                 events.emit(OrchestratorEvent::PullRequestOpened {
                     task_id: task.id,
                     pr_id: pr.id.clone(),

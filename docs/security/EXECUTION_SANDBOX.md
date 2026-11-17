@@ -35,9 +35,19 @@ the worktree while validation runs. Treat cross-tenant malicious builds as
 requiring a stronger VM-based runner.
 
 Prepare an image with all required Cargo/npm/Python/Go compilers and offline
-dependencies outside of untrusted validation. For reproducibility, pin the
-exact image digest and project lockfiles. Absent dependencies make the check
-fail; the pre-flight runner never enables network access to fetch them.
+dependencies outside of untrusted validation. `ryoko sandbox init` can generate
+and build a starting image from `Cargo.toml`, `package.json` or `pyproject.toml`;
+it writes `.ryoko/sandbox/Dockerfile` and `Dockerfile.dockerignore`, caches
+Cargo/npm/Python dependencies during the build, and sets the runtime to offline
+mode. The generated Dockerfile is a convenience, not a reviewed trust anchor:
+inspect it, pin a digest, and confirm the dependency install step before using
+it for untrusted code. The build itself needs network access; validation still
+uses `--network=none` and `--pull=never`. Mixed-language repositories use one
+detected ecosystem (Rust, then Node, then Python) in the generated image.
+
+For reproducibility, pin the exact image digest and project lockfiles. Absent
+dependencies make the check fail; the pre-flight runner never enables network
+access to fetch them.
 
 ## Current guardrail
 
@@ -112,6 +122,7 @@ use a trusted repository or arrange to run them separately in controlled CI.
 
 ## Remaining work
 
-VM backend, runner image build and pinning, artifact export rules, secret
-injection interface, cancellation that terminates the process tree, and a hostile
-test suite covering escape attempts, symlink tricks, fork bombs and output floods.
+VM backend, image digest pinning and attestation, mixed-language image
+generation, artifact export rules, secret injection interface, cancellation that
+terminates the process tree, and a hostile test suite covering escape attempts,
+symlink tricks, fork bombs and output floods.
