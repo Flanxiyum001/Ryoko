@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { buildPullRequestBody, issueAgentRequest, runIssuePipeline } from '../src/pipeline.mjs';
+import { buildPullRequestBody, buildRunArgs, issueAgentRequest, runIssuePipeline } from '../src/pipeline.mjs';
 
 const payload = {
   action: 'labeled',
@@ -80,6 +80,48 @@ test('pull request body attaches the pre-merge security audit', () => {
     ledger: {}, validation: [{ passed: true, logs: [] }],
   });
   assert.match(empty, /no security audit output was recorded/);
+});
+
+test('run arguments forward the operator MCP policy', () => {
+  const args = buildRunArgs({
+    cwd: '/repo',
+    goal: 'Fix the bug',
+    reportPath: '/repo/.ryoko/issue-report.json',
+    mcp: {
+      server: '/srv/ryoko-mcp',
+      serverArgs: ['--stdio'],
+      allowEnv: ['GITHUB_TOKEN'],
+      allowTools: ['list_issues', 'get_issue'],
+      headlessApprove: ['list_issues'],
+      maxCalls: 8,
+    },
+  });
+  assert.deepEqual(args.slice(0, 6), [
+    'run', '--team', '--repo', '/repo', '--report', '/repo/.ryoko/issue-report.json',
+  ]);
+  assert.equal(args.at(-1), 'Fix the bug', 'the goal stays the last positional argument');
+  const valuesFor = (flag) => args.filter((_value, index) => index > 0 && args[index - 1] === flag);
+  assert.deepEqual(valuesFor('--mcp-headless-approve'), ['list_issues']);
+  assert.deepEqual(valuesFor('--mcp-allow-tool'), ['list_issues', 'get_issue']);
+  assert.deepEqual(valuesFor('--mcp-server'), ['/srv/ryoko-mcp']);
+  assert.deepEqual(valuesFor('--mcp-max-calls'), ['8']);
+});
+
+test('run arguments default to no MCP configuration', () => {
+  const args = buildRunArgs({ cwd: '/repo', goal: 'g', reportPath: '/p' });
+  assert.ok(!args.some((value) => value.startsWith('--mcp-')));
+  assert.deepEqual(args, ['run', '--team', '--repo', '/repo', '--report', '/p', 'g']);
+});
+
+test('a flag-like MCP value never becomes an argument', () => {
+  const args = buildRunArgs({
+    cwd: '/repo',
+    goal: 'g',
+    reportPath: '/p',
+    mcp: { server: '/srv/mcp', serverArgs: ['--danger', '  real-arg  '] },
+  });
+  assert.ok(!args.includes('--danger'));
+  assert.ok(args.includes('real-arg'));
 });
 
 test('pipeline clones, runs the team, pushes the branch and opens a draft PR', async () => {

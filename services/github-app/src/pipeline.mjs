@@ -105,8 +105,39 @@ export function buildPullRequestBody(issue, report) {
   return body.slice(0, MAX_PR_BODY);
 }
 
-async function defaultRunCli({ binary, cwd, goal, reportPath, timeoutMs }) {
-  const args = ['run', '--team', '--repo', cwd, '--report', reportPath, goal];
+const MCP_FLAGS = [
+  ['server', '--mcp-server'],
+  ['serverArgs', '--mcp-server-arg'],
+  ['allowEnv', '--mcp-allow-env'],
+  ['allowTools', '--mcp-allow-tool'],
+  ['headlessApprove', '--mcp-headless-approve'],
+];
+
+/**
+ * Builds the `ryoko run` argv. MCP settings are operator configuration, so they
+ * are forwarded verbatim as separate argv entries - never through a shell - and a
+ * value that looks like a flag is dropped rather than allowed to become one.
+ */
+export function buildRunArgs({ cwd, goal, reportPath, mcp }) {
+  const args = ['run', '--team', '--repo', cwd, '--report', reportPath];
+  for (const [key, flag] of MCP_FLAGS) {
+    const value = mcp?.[key];
+    const values = Array.isArray(value) ? value : value == null ? [] : [value];
+    for (const item of values) {
+      const text = String(item).trim();
+      if (!text || text.startsWith('-')) continue;
+      args.push(flag, text);
+    }
+  }
+  if (Number.isSafeInteger(mcp?.maxCalls) && mcp.maxCalls > 0) {
+    args.push('--mcp-max-calls', String(mcp.maxCalls));
+  }
+  args.push(goal);
+  return args;
+}
+
+async function defaultRunCli({ binary, cwd, goal, reportPath, timeoutMs, mcp }) {
+  const args = buildRunArgs({ cwd, goal, reportPath, mcp });
   try {
     await exec(binary, args, {
       cwd, timeout: timeoutMs, maxBuffer: 4_000_000, shell: false,
@@ -154,6 +185,7 @@ export async function runIssuePipeline({
     goal: goal.slice(0, MAX_GOAL),
     reportPath,
     timeoutMs: settings.pipelineTimeoutMs || 15 * 60_000,
+    mcp: settings.mcp || null,
   });
   const report = JSON.parse(await readFile(reportPath, 'utf8'));
   const success = Array.isArray(report?.run?.succeeded) ? report.run.succeeded[0] : null;

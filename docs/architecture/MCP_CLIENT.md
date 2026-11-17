@@ -58,6 +58,42 @@ The CLI wires this gate to `TerminalScopeAsker`. Selecting `[r]` prints the
 tool that was granted for the run, and the run's gate lives for the duration of
 that `ryoko run` invocation only.
 
+## Headless policy
+
+A run with no approval prompt cannot ask anyone, so the operator pre-approves
+named tools instead:
+
+```sh
+ryoko run --team --repo . \
+  --mcp-server /srv/ryoko-mcp --mcp-server-arg --stdio \
+  --mcp-allow-tool list_issues --mcp-allow-tool get_issue \
+  --mcp-headless-approve list_issues \
+  "Fix the failing parser test"
+```
+
+`--mcp-headless-approve` (or `RYOKO_MCP_HEADLESS_APPROVE`, a comma-separated
+list) is consulted **only** when no prompt is possible, that is when
+`RYOKO_NONINTERACTIVE` is set. An interactive session always asks, so a stale
+policy can never answer a question on a human's behalf.
+
+The policy is an approval, not a permission grant:
+
+- every pre-approved tool must also appear in `--mcp-allow-tool`, otherwise the
+  run fails before connecting (`headless-approved MCP tool ... is not on the
+  host allowlist`); the allowlist remains the outer boundary;
+- a pre-approval becomes a `ForRun` scope for that one tool, so the call budget,
+  argument limits and per-call gate still apply;
+- **every tool not named is denied.** An empty or absent policy denies all tool
+  calls, which is the default for a headless run;
+- entries are trimmed, de-duplicated and dropped when blank or containing control
+  characters, and dropping an entry can only ever deny a call.
+
+The GitHub App passes the same settings through its own environment
+(`RYOKO_MCP_SERVER`, `RYOKO_MCP_SERVER_ARGS`, `RYOKO_MCP_ALLOW_ENV`,
+`RYOKO_MCP_ALLOW_TOOLS`, `RYOKO_MCP_HEADLESS_APPROVE`, `RYOKO_MCP_MAX_CALLS`),
+so the issue-to-PR pipeline can use a small, explicitly approved tool set and
+nothing more.
+
 Servers may need credentials. The child gets a minimal PATH and
 temporary-directory environment; all other variables are denied by default.
 `HOME` and `USERPROFILE` are deliberately not forwarded because they expose
