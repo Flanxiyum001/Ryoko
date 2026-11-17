@@ -18,6 +18,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(workspace::WorkspaceState::default())
+        .manage(github_queue::GitHubQueueState::default())
         .manage(lsp::LspState::default())
         .manage(run::RunState::default())
         .manage(completion::CompletionState::default())
@@ -33,7 +34,10 @@ pub fn run() {
             lsp::lsp_stop,
             mission::list_mission_logs,
             mission::read_mission_log,
-            github_queue::github_review_queue,
+            github_queue::pair_github_queue,
+            github_queue::disconnect_github_queue,
+            github_queue::list_github_repositories,
+            github_queue::get_github_queue,
             sessions::list_agent_sessions,
             review::list_review_hunks,
             review::stage_review_hunks,
