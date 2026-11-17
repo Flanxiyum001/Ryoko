@@ -235,7 +235,7 @@ cargo run -p ryoko-native --bin ryoko-lsp
 
 The server supports incremental document sync, diagnostics, code lenses, quick fixes and `ryoko.fix` / `ryoko.explain` / `ryoko.review` commands. An agent host can publish findings through `ryoko_native::diagnostic_channel()`; the server forwards those diagnostics to the editor. It does not start an editor UI or execute editor commands automatically.
 
-`ryoko_core::ContextExtractor` uses tree-sitter to return imports, a symbol outline, intra-file call edges and targeted bodies for Rust, TypeScript/TSX, JavaScript, Python, Go and C/C++. `ryoko run` scans supported source files under the repository root and injects a bounded structural outline into the developer agent's context; the review revise flow includes the same outline alongside the changed file contents.
+`ryoko_core::ContextExtractor` uses tree-sitter to return imports, a symbol outline, intra-file call edges and targeted bodies for Rust, TypeScript/TSX, JavaScript, Python, Go, C/C++, Java, Kotlin, C#, Swift and SQL (schema objects). `ryoko run` scans supported source files under the repository root and injects a bounded structural outline into the developer agent's context; the review revise flow includes the same outline alongside the changed file contents.
 
 ## Development
 

@@ -3,8 +3,9 @@
 //! Reading whole files is expensive and noisy. This module parses a source file
 //! with tree-sitter, exposes a compact symbol outline, records the call edges
 //! inside the file, and can return only the imports plus the requested symbol
-//! bodies. Rust, TypeScript/TSX, JavaScript, Python, Go and C/C++ are supported;
-//! the language is chosen from the file extension.
+//! bodies. Rust, TypeScript/TSX, JavaScript, Python, Go, C/C++, Java, Kotlin,
+//! C#, Swift and SQL are supported; the language is chosen from the file
+//! extension.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -23,6 +24,11 @@ pub enum Language {
     Go,
     C,
     Cpp,
+    Java,
+    Kotlin,
+    CSharp,
+    Swift,
+    Sql,
 }
 
 impl Language {
@@ -39,6 +45,11 @@ impl Language {
             "go" => Some(Self::Go),
             "c" | "h" => Some(Self::C),
             "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => Some(Self::Cpp),
+            "java" => Some(Self::Java),
+            "kt" | "kts" => Some(Self::Kotlin),
+            "cs" => Some(Self::CSharp),
+            "swift" => Some(Self::Swift),
+            "sql" => Some(Self::Sql),
             _ => None,
         }
     }
@@ -54,6 +65,11 @@ impl Language {
             Self::Go => "go",
             Self::C => "c",
             Self::Cpp => "cpp",
+            Self::Java => "java",
+            Self::Kotlin => "kotlin",
+            Self::CSharp => "csharp",
+            Self::Swift => "swift",
+            Self::Sql => "sql",
         }
     }
 
@@ -67,6 +83,11 @@ impl Language {
             Self::Go => tree_sitter_go::LANGUAGE.into(),
             Self::C => tree_sitter_c::LANGUAGE.into(),
             Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::Java => tree_sitter_java::LANGUAGE.into(),
+            Self::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+            Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Self::Swift => tree_sitter_swift::LANGUAGE.into(),
+            Self::Sql => tree_sitter_sequel::LANGUAGE.into(),
         }
     }
 }
@@ -331,22 +352,68 @@ fn is_import(language: Language, kind: &str) -> bool {
         Language::Python => kind == "import_statement" || kind == "import_from_statement",
         Language::Go => kind == "import_declaration",
         Language::C | Language::Cpp => kind == "preproc_include",
+        Language::Java => kind == "import_declaration",
+        Language::Kotlin => kind == "import",
+        Language::CSharp => kind == "using_directive",
+        Language::Swift => kind == "import_declaration",
+        Language::Sql => false,
     }
 }
 
 fn is_call(language: Language, kind: &str) -> bool {
     match language {
-        Language::Rust | Language::Go | Language::C | Language::Cpp => kind == "call_expression",
+        Language::Rust
+        | Language::Go
+        | Language::C
+        | Language::Cpp
+        | Language::Kotlin
+        | Language::Swift => kind == "call_expression",
         Language::TypeScript | Language::Tsx | Language::JavaScript => {
             kind == "call_expression" || kind == "new_expression"
         }
+        Language::Java => kind == "method_invocation" || kind == "object_creation_expression",
+        Language::CSharp => kind == "invocation_expression" || kind == "object_creation_expression",
         Language::Python => kind == "call",
+        Language::Sql => kind == "invocation",
     }
 }
 
 /// Maps an AST node to a symbol kind and declared name. Language-specific node
 /// names are kept here so the rest of the traversal stays generic.
 fn symbol_for(node: Node<'_>, source: &str, language: Language) -> Option<(&'static str, String)> {
+    if language == Language::Sql {
+        let kind = match node.kind() {
+            "create_table" => "table",
+            "create_view" | "create_materialized_view" => "view",
+            "create_index" => "index",
+            "create_function" => "function",
+            "create_procedure" => "procedure",
+            "create_schema" => "schema",
+            "create_type" => "type",
+            "create_sequence" => "sequence",
+            "create_database" => "database",
+            "create_trigger" => "trigger",
+            _ => return None,
+        };
+        let name = sql_object_name(node, source)?;
+        return Some((kind, name));
+    }
+
+    if language == Language::Swift && node.kind() == "class_declaration" {
+        let declaration = node
+            .child_by_field_name("declaration_kind")
+            .map(|kind| text(kind, source))
+            .unwrap_or_else(|| "class".to_owned());
+        let kind = match declaration.as_str() {
+            "struct" => "struct",
+            "enum" => "enum",
+            "actor" => "actor",
+            "extension" => "extension",
+            _ => "class",
+        };
+        return symbol_name(node, source).map(|name| (kind, name));
+    }
+
     if language == Language::Go && node.kind() == "type_declaration" {
         let mut cursor = node.walk();
         let spec = node
@@ -416,6 +483,35 @@ fn symbol_for(node: Node<'_>, source: &str, language: Language) -> Option<(&'sta
         (Language::Cpp, "union_specifier") => "union",
         (Language::Cpp, "namespace_definition") => "namespace",
         (Language::Cpp, "type_definition") => "type",
+
+        (Language::Java, "class_declaration") => "class",
+        (Language::Java, "interface_declaration") => "interface",
+        (Language::Java, "enum_declaration") => "enum",
+        (Language::Java, "record_declaration") => "record",
+        (Language::Java, "annotation_type_declaration") => "annotation",
+        (Language::Java, "method_declaration") => "method",
+        (Language::Java, "constructor_declaration") => "constructor",
+
+        (Language::Kotlin, "class_declaration") => "class",
+        (Language::Kotlin, "object_declaration") => "object",
+        (Language::Kotlin, "function_declaration") => "function",
+
+        (Language::CSharp, "class_declaration") => "class",
+        (Language::CSharp, "interface_declaration") => "interface",
+        (Language::CSharp, "struct_declaration") => "struct",
+        (Language::CSharp, "enum_declaration") => "enum",
+        (Language::CSharp, "record_declaration") => "record",
+        (Language::CSharp, "namespace_declaration") => "namespace",
+        (Language::CSharp, "method_declaration") => "method",
+        (Language::CSharp, "constructor_declaration") => "constructor",
+        (Language::CSharp, "property_declaration") => "property",
+        (Language::CSharp, "delegate_declaration") => "delegate",
+
+        (Language::Swift, "protocol_declaration") => "protocol",
+        (Language::Swift, "function_declaration") => "function",
+        (Language::Swift, "init_declaration") => "initializer",
+        (Language::Swift, "property_declaration") => "property",
+        (Language::Swift, "typealias_declaration") => "type",
         _ => {
             let name = function_variable_name(node, source, language)?;
             return Some(("function", name));
@@ -530,14 +626,38 @@ fn is_identifier(kind: &str) -> bool {
             | "namespace_identifier"
             | "operator_name"
             | "destructor_name"
+            | "simple_identifier"
+            | "constant_identifier"
     )
 }
 
+/// SQL object names are the first identifier-like child after the CREATE
+/// keyword. Picking the first child avoids column and type identifiers deeper
+/// in the statement.
+fn sql_object_name(node: Node<'_>, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "object_reference" | "identifier") {
+            let name = text(child, source);
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
 fn call_target(node: Node<'_>, source: &str) -> Option<String> {
-    let function = node
+    if let Some(function) = node
         .child_by_field_name("function")
-        .or_else(|| node.child_by_field_name("constructor"))?;
-    callee_name(function, source)
+        .or_else(|| node.child_by_field_name("constructor"))
+        .or_else(|| node.child_by_field_name("name"))
+    {
+        return callee_name(function, source);
+    }
+    let mut cursor = node.walk();
+    let callee = node.named_children(&mut cursor).next()?;
+    callee_name(callee, source)
 }
 
 /// Returns the last name segment of a call target: `read_file`, `store.save`,
@@ -716,6 +836,88 @@ int main(void) {
 }
 "#;
 
+    const JAVA_SOURCE: &str = r#"
+import java.util.List;
+
+public class Store {
+    public Store() {}
+
+    public void save(String value) {
+        write(value);
+    }
+
+    private void write(String value) {
+        System.out.println(value);
+    }
+}
+"#;
+
+    const KOTLIN_SOURCE: &str = r#"
+import kotlin.io.path.Path
+
+class Store {
+    fun save(value: String) {
+        write(value)
+    }
+
+    fun write(value: String) {
+        println(value)
+    }
+}
+
+fun load(path: String): String = Path(path).readText()
+"#;
+
+    const CSHARP_SOURCE: &str = r#"
+using System;
+
+namespace Demo {
+    public class Store {
+        public Store() {}
+
+        public void Save(string value) {
+            Write(value);
+        }
+
+        private void Write(string value) {
+            Console.WriteLine(value);
+        }
+    }
+}
+"#;
+
+    const SWIFT_SOURCE: &str = r#"
+import Foundation
+
+struct Store {
+    func save(_ value: String) {
+        write(value)
+    }
+
+    func write(_ value: String) {
+        print(value)
+    }
+}
+
+class Loader {
+    func load() -> String {
+        read()
+    }
+}
+"#;
+
+    const SQL_SOURCE: &str = r#"
+CREATE TABLE users (
+    id INT PRIMARY KEY,
+    email TEXT NOT NULL
+);
+
+CREATE VIEW active_users AS
+    SELECT * FROM users WHERE email IS NOT NULL;
+
+CREATE INDEX idx_users_email ON users(email);
+"#;
+
     const CPP_SOURCE: &str = r#"
 #include <vector>
 
@@ -802,6 +1004,11 @@ int load() {
         assert_eq!(Language::from_path("a.go"), Some(Language::Go));
         assert_eq!(Language::from_path("a.c"), Some(Language::C));
         assert_eq!(Language::from_path("a.hpp"), Some(Language::Cpp));
+        assert_eq!(Language::from_path("A.java"), Some(Language::Java));
+        assert_eq!(Language::from_path("a.kt"), Some(Language::Kotlin));
+        assert_eq!(Language::from_path("a.cs"), Some(Language::CSharp));
+        assert_eq!(Language::from_path("a.swift"), Some(Language::Swift));
+        assert_eq!(Language::from_path("a.sql"), Some(Language::Sql));
         assert_eq!(Language::from_path("a.txt"), None);
     }
 
@@ -924,6 +1131,86 @@ int load() {
         assert!(has_symbol(&context, "main", "function"));
         assert!(has_call(&context, "main", "printf"));
         assert!(has_call(&context, "main", "add"));
+    }
+
+    #[test]
+    fn extracts_java_types_methods_and_calls() {
+        let mut extractor = ContextExtractor::new().unwrap();
+        let context = extractor.extract("src/Store.java", JAVA_SOURCE).unwrap();
+        assert_eq!(context.language, "java");
+        assert!(!context.has_syntax_errors);
+        assert!(
+            context
+                .imports
+                .iter()
+                .any(|line| line.contains("java.util"))
+        );
+        assert!(has_symbol(&context, "Store", "class"));
+        assert!(has_symbol(&context, "save", "method"));
+        assert!(has_symbol(&context, "write", "method"));
+        assert!(has_call(&context, "save", "write"));
+    }
+
+    #[test]
+    fn extracts_kotlin_classes_functions_and_calls() {
+        let mut extractor = ContextExtractor::new().unwrap();
+        let context = extractor.extract("src/Store.kt", KOTLIN_SOURCE).unwrap();
+        assert_eq!(context.language, "kotlin");
+        assert!(!context.has_syntax_errors);
+        assert!(
+            context
+                .imports
+                .iter()
+                .any(|line| line.contains("kotlin.io"))
+        );
+        assert!(has_symbol(&context, "Store", "class"));
+        assert!(has_symbol(&context, "save", "function"));
+        assert!(has_symbol(&context, "load", "function"));
+        assert!(has_call(&context, "save", "write"));
+    }
+
+    #[test]
+    fn extracts_csharp_namespaces_types_methods_and_calls() {
+        let mut extractor = ContextExtractor::new().unwrap();
+        let context = extractor.extract("src/Store.cs", CSHARP_SOURCE).unwrap();
+        assert_eq!(context.language, "csharp");
+        assert!(!context.has_syntax_errors);
+        assert!(context.imports.iter().any(|line| line.contains("System")));
+        assert!(has_symbol(&context, "Demo", "namespace"));
+        assert!(has_symbol(&context, "Store", "class"));
+        assert!(has_symbol(&context, "Save", "method"));
+        assert!(has_symbol(&context, "Write", "method"));
+        assert!(has_call(&context, "Save", "Write"));
+    }
+
+    #[test]
+    fn extracts_swift_structs_classes_and_calls() {
+        let mut extractor = ContextExtractor::new().unwrap();
+        let context = extractor.extract("src/Store.swift", SWIFT_SOURCE).unwrap();
+        assert_eq!(context.language, "swift");
+        assert!(!context.has_syntax_errors);
+        assert!(
+            context
+                .imports
+                .iter()
+                .any(|line| line.contains("Foundation"))
+        );
+        assert!(has_symbol(&context, "Store", "struct"));
+        assert!(has_symbol(&context, "Loader", "class"));
+        assert!(has_symbol(&context, "save", "function"));
+        assert!(has_symbol(&context, "load", "function"));
+        assert!(has_call(&context, "save", "write"));
+    }
+
+    #[test]
+    fn extracts_sql_schema_objects() {
+        let mut extractor = ContextExtractor::new().unwrap();
+        let context = extractor.extract("db/schema.sql", SQL_SOURCE).unwrap();
+        assert_eq!(context.language, "sql");
+        assert!(!context.has_syntax_errors);
+        assert!(has_symbol(&context, "users", "table"));
+        assert!(has_symbol(&context, "active_users", "view"));
+        assert!(has_symbol(&context, "idx_users_email", "index"));
     }
 
     #[test]
