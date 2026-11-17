@@ -2929,6 +2929,7 @@ dependencies = [
  "futures",
  "ignore",
  "portable-pty",
+ "reqwest 0.13.5",
  "rusqlite",
  "ryoko-models",
  "serde",
