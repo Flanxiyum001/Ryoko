@@ -22,6 +22,7 @@ mod types;
 
 pub use manifest::{
     PluginError, PluginHost, PluginKind, PluginLimits, PluginManifest, PluginPolicy, WasiPlugin,
+    sha256_hex,
 };
 pub use run::PluginAgent;
 pub use types::{
