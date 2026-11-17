@@ -1,9 +1,10 @@
 # Agent runtime
 
-Status: `ryoko-core` implements the `AgentRuntime` contract, a `ModelAgent`, a
-dependency-aware orchestrator, isolated worktrees and IACP v1. The single-agent
-coding workflow exists in the CLI. Multi-agent execution, durable state and review
-findings do not.
+Status: `ryoko-core` implements the `AgentRuntime` contract, a `ModelAgent`
+with a bounded host-approved MCP tool loop, a dependency-aware orchestrator,
+isolated worktrees and IACP v1. The CLI supports single-agent and multi-agent
+`--team` execution with an Integrator. Durable orchestration state and
+structured review findings do not exist yet.
 
 ## Roles
 
@@ -17,6 +18,7 @@ findings do not.
 | Full-stack Engineer | Cross-layer implementation |
 | Security Engineer | Threat modelling and security review |
 | QA Engineer | Tests, validation, regressions |
+| Integrator | Merge validated sibling branches and publish one review diff |
 | DevOps Engineer | CI/CD and release preparation |
 
 A role is identity and default behaviour. It grants no permissions. Capabilities,

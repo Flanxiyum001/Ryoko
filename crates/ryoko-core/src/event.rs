@@ -27,6 +27,12 @@ pub enum OrchestratorEvent {
         agent: String,
         attempt: u32,
     },
+    /// Coarse live phase for the Mission Control status badge. This is
+    /// advisory UI state; task success still depends on validation.
+    TaskPhase {
+        task_id: Uuid,
+        phase: AgentPhase,
+    },
     TaskProgress {
         task_id: Uuid,
         message: String,
@@ -70,6 +76,7 @@ pub enum OrchestratorEvent {
         error: String,
         attempts: u32,
         retrying: bool,
+        stage: TaskFailureStage,
     },
     TaskSkipped {
         task_id: Uuid,
@@ -83,6 +90,29 @@ pub enum OrchestratorEvent {
         skipped: usize,
         duration_ms: u64,
     },
+}
+
+/// Coarse phase reported while an agent is running. These labels are
+/// informational and never imply that validation passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPhase {
+    Thinking,
+    Coding,
+    Testing,
+    Waiting,
+}
+
+/// Where a failed attempt stopped, so the operator gets a specific explanation
+/// instead of only a raw error string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskFailureStage {
+    Workspace,
+    Agent,
+    Staging,
+    Validation,
+    Publish,
 }
 
 /// Cloneable handle to a bounded broadcast channel. Events are best-effort:
@@ -114,5 +144,25 @@ impl EventSink {
 
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase_and_failure_stage_are_machine_readable() {
+        let phase = serde_json::to_value(OrchestratorEvent::TaskPhase {
+            task_id: Uuid::nil(),
+            phase: AgentPhase::Coding,
+        })
+        .unwrap();
+        assert_eq!(phase["type"], "task_phase");
+        assert_eq!(phase["phase"], "coding");
+        assert_eq!(
+            serde_json::to_string(&TaskFailureStage::Validation).unwrap(),
+            "\"validation\""
+        );
     }
 }

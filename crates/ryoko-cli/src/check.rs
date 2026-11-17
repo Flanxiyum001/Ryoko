@@ -131,7 +131,7 @@ impl ChangeValidator for CommandValidator {
     }
 }
 
-fn summarize_output(output: &Output) -> Vec<String> {
+pub(crate) fn summarize_output(output: &Output) -> Vec<String> {
     let mut lines = Vec::new();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

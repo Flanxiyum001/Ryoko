@@ -185,7 +185,7 @@ recovery; reproducible AI evaluation; signed, tested cross-platform releases.
 | Code review | CLI diff review in isolated worktrees | Structured findings with file/line refs |
 | Architecture designer | none | Model, diagram generation, decision sync |
 | AI debugging | LSP diagnostics channel | Runner output capture and feedback loop |
-| Extensions | `ryoko-scripting` placeholder | Stable API, permissions, WASM host |
+| Extensions | `ryoko-scripting` WASI host with policy allowlists and typed payloads | Signing, SDKs and a marketplace |
 | Project memory | In-process `SharedMemory` blackboard | Durable, searchable, provenance-tracked store |
 | Multi-agent | Review-only team preview | Real parallel execution with durable state |
 | Persistence | none | SQLite schema, migrations, event journal |

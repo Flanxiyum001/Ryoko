@@ -14,6 +14,7 @@ pub enum AgentRole {
     SeniorDeveloper,
     UiUxDesigner,
     QaEngineer,
+    Integrator,
     Custom(String),
 }
 
@@ -24,6 +25,7 @@ impl AgentRole {
             Self::SeniorDeveloper => "senior-developer",
             Self::UiUxDesigner => "ui-ux-designer",
             Self::QaEngineer => "qa-engineer",
+            Self::Integrator => "integrator",
             Self::Custom(name) => name,
         }
     }
@@ -44,6 +46,7 @@ impl FromStr for AgentRole {
             "senior-developer" | "senior_developer" | "developer" => Self::SeniorDeveloper,
             "ui-ux-designer" | "ui_ux_designer" | "designer" => Self::UiUxDesigner,
             "qa-engineer" | "qa_engineer" | "qa" => Self::QaEngineer,
+            "integrator" | "merge-integrator" => Self::Integrator,
             "" => return Err(()),
             custom => Self::Custom(custom.to_owned()),
         };
@@ -292,6 +295,7 @@ mod tests {
             AgentRole::SeniorDeveloper,
             AgentRole::UiUxDesigner,
             AgentRole::QaEngineer,
+            AgentRole::Integrator,
             AgentRole::Custom("security-reviewer".to_owned()),
         ] {
             let parsed: AgentRole = role.label().parse().unwrap();
