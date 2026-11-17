@@ -302,6 +302,7 @@ async fn exhausted_validation_reaches_lsp_client_as_an_error() {
     .with_config(OrchestratorConfig {
         max_concurrency: 1,
         max_attempts: 2,
+        max_repair_cycles: 1,
     });
 
     let identity = AgentIdentity::new(AgentRole::SeniorDeveloper, "rejected-agent", "test agent");
@@ -358,6 +359,7 @@ async fn agent_failure_reaches_lsp_client_as_an_error() {
     .with_config(OrchestratorConfig {
         max_concurrency: 1,
         max_attempts: 2,
+        max_repair_cycles: 1,
     });
 
     let identity = AgentIdentity::new(AgentRole::SeniorDeveloper, "failing-agent", "test agent");
