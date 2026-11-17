@@ -16,5 +16,5 @@ pub use git::{
     WorktreeRecord, WorktreeSession, WorktreeState,
 };
 
-pub use hunks::{HunkPatch, ReviewHunk};
+pub use hunks::{HunkGroup, HunkPatch, ReviewHunk};
 pub use integration::IntegrationAgent;

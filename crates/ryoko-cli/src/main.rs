@@ -4,7 +4,7 @@ mod context_window;
 mod experience;
 mod mcp;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use ryoko_core::{
     EventSink, FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig,
     OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA,
     SharedMemory, StagedChanges, Task, TaskContext, WorkspaceIndex, goal_terms,
-    team::{application_plan, engineering_execution_plan, standard_team},
+    team::{application_plan, dynamic_plan, standard_team},
     validation::ValidationReport,
 };
 use ryoko_models::{
@@ -314,6 +314,10 @@ struct RunArgs {
     /// Number of concurrent agents in team mode, between 1 and 4.
     #[arg(long, default_value_t = 2)]
     max_concurrency: usize,
+    /// Times a failed QA or Security review may send its findings back to the
+    /// producing agent before escalating to human review. 0 disables the loop.
+    #[arg(long, default_value_t = 1)]
+    repair_cycles: u32,
     /// Explicitly chosen local MCP server executable for agent tool calls.
     #[arg(long, value_name = "PATH")]
     mcp_server: Option<PathBuf>,
@@ -1540,40 +1544,44 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     if args.team && !(1..=4).contains(&args.max_concurrency) {
         return Err(cli_error("--max-concurrency must be between 1 and 4"));
     }
-    let agents: Vec<Arc<dyn AgentRuntime>> = if args.team {
-        standard_team()
-            .into_iter()
-            .filter(|member| {
-                matches!(
-                    &member.role,
-                    AgentRole::QaEngineer | AgentRole::Integrator
-                ) || matches!(&member.role, AgentRole::Custom(name)
-                    if matches!(name.as_str(), "software-architect" | "backend-engineer" | "security-engineer"))
-            })
-            .map(|member| {
-                let identity = AgentIdentity::new(
-                    member.role.clone(),
-                    member.role.label(),
-                    member.instructions,
-                );
-                if member.role == AgentRole::Integrator {
-                    Arc::new(IntegrationAgent::new(identity).with_model(model.clone()))
-                        as Arc<dyn AgentRuntime>
-                } else {
-                    Arc::new(ModelAgent::new(identity).with_model(model.clone()))
-                        as Arc<dyn AgentRuntime>
-                }
-            })
-            .collect()
-    } else {
-        vec![Arc::new(
+    let goal = args.goal.clone();
+    // Dynamic routing: the project-manager decomposition decides which
+    // specialists this goal actually needs, so a UI/UX or DevOps agent is only
+    // registered (and only allocated a worktree) when the plan activates it.
+    let dynamic = args.team.then(|| dynamic_plan(&goal));
+    let activated = dynamic
+        .as_ref()
+        .map(|plan| plan.activated_roles().into_iter().collect::<HashSet<_>>());
+    let agents: Vec<Arc<dyn AgentRuntime>> = match activated {
+        Some(activated) => {
+            let members = standard_team();
+            activated
+                .into_iter()
+                .map(|role| {
+                    let member = members.iter().find(|member| member.role == role);
+                    let identity = AgentIdentity::new(
+                        role.clone(),
+                        role.label(),
+                        member.map_or("specialist agent", |member| member.instructions),
+                    );
+                    if role == AgentRole::Integrator {
+                        Arc::new(IntegrationAgent::new(identity).with_model(model.clone()))
+                            as Arc<dyn AgentRuntime>
+                    } else {
+                        Arc::new(ModelAgent::new(identity).with_model(model.clone()))
+                            as Arc<dyn AgentRuntime>
+                    }
+                })
+                .collect()
+        }
+        None => vec![Arc::new(
             ModelAgent::new(AgentIdentity::new(
                 AgentRole::SeniorDeveloper,
                 args.agent,
                 "structured code-generation agent",
             ))
             .with_model(model),
-        )]
+        )],
     };
     let event_log = args
         .event_log
@@ -1589,11 +1597,9 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         active_branch: current_branch(&root).await,
         shared_memory: HashMap::new(),
     };
-    let goal = args.goal.clone();
-    let mut tasks = if args.team {
-        engineering_execution_plan(&goal)
-    } else {
-        vec![Task::new(goal.clone(), AgentRole::SeniorDeveloper)]
+    let mut tasks = match &dynamic {
+        Some(plan) => plan.execution_tasks(),
+        None => vec![Task::new(goal.clone(), AgentRole::SeniorDeveloper)],
     };
     let project_outline = project_brief(&root).await;
     let symbol_context = match indexed_context(&root, &goal) {
@@ -1678,6 +1684,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         .with_config(OrchestratorConfig {
             max_concurrency: if args.team { args.max_concurrency } else { 1 },
             max_attempts: args.attempts.max(1),
+            max_repair_cycles: args.repair_cycles,
         })
         .with_events(events)
         .with_mcp(mcp);
@@ -1733,6 +1740,26 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     }
     for skipped in &report.skipped {
         eprintln!("Task {} skipped: {}", skipped.task_id, skipped.reason);
+    }
+    for repair in &report.repairs {
+        eprintln!(
+            "Repair cycle {}: {} findings routed to {} ({}) - {}",
+            repair.cycle,
+            repair.review_task,
+            repair.role,
+            repair.producer_task,
+            if repair.resolved {
+                "review passed"
+            } else {
+                "review still failing"
+            }
+        );
+    }
+    for escalated in &report.needs_human_review {
+        eprintln!(
+            "Human review required for {} after {} repair cycle(s): {}",
+            escalated.task_id, escalated.repair_cycles, escalated.error
+        );
     }
     if !report.all_succeeded() {
         return Err(cli_error(

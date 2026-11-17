@@ -87,3 +87,20 @@ changed files, added/removed lines, explanation, validation evidence and review
 findings. Accept, reject, request changes, open in editor, apply selected hunks.
 Accepting never silently merges into the main checkout without policy
 authorization.
+
+Selective hunk staging (`ryoko_worktree::hunks`) supports two cases beyond a
+single text diff:
+
+- **Partial new files.** A newly created file may be staged from a subset of its
+  hunks. The selected added lines are renumbered into one contiguous
+  `@@ -0,0 +1,N @@` creation patch, and the original `index` line is dropped
+  because the synthesized blob is not the reviewed object. A new-file hunk that
+  carries context or removed lines cannot be split that way and is rejected with
+  "stage it as a whole".
+- **Cross-file atomic groups.** `HunkGroup` names hunks that stage together or
+  not at all. `select_groups` rejects empty groups, unknown hunk IDs, repeated
+  group IDs and any hunk that belongs to two groups, so an ambiguous selection
+  can never reach `git apply`.
+
+Binary, rename, copy, deletion, mode-only and submodule changes are still
+excluded from text-hunk review; they are never guessed.

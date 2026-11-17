@@ -48,8 +48,10 @@ pub use mcp::{
 pub use memory::SharedMemory;
 pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
 pub use orchestrator::{
-    OrchestrationReport, Orchestrator, OrchestratorConfig, SkippedTask, TaskFailure, TaskSuccess,
+    HumanReview, OrchestrationReport, Orchestrator, OrchestratorConfig, RepairCycle, SkippedTask,
+    TaskFailure, TaskSuccess,
 };
 pub use project_memory::{MemoryEntry, MemoryKind, ProjectMemory};
+pub use team::{DynamicPlan, GoalSignals, VERIFICATION_METADATA, dynamic_plan};
 pub use validation::{AllowAllValidator, ChangeValidator, StagedChanges, ValidationReport};
 pub use workspace::{InMemoryWorkspaceProvider, PullRequest, WorkspaceLease, WorkspaceProvider};
