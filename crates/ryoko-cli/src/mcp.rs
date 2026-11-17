@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ryoko_core::mcp::{McpApprovalGate, McpClient, McpError, McpTransport};
+use ryoko_core::mcp::{
+    McpApprovalGate, McpClient, McpError, McpToolPolicy, McpToolService, McpToolbox, McpTransport,
+};
+use ryoko_models::UsageLedger;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -32,35 +35,8 @@ impl StdioMcpTransport {
         args: &[String],
         pass_env: &[String],
     ) -> Result<Self, McpError> {
-        if args.len() > 64 || pass_env.len() > 32 {
-            return Err(McpError::Transport(
-                "server argument/environment limit exceeded".into(),
-            ));
-        }
-        let mut command = Command::new(executable);
-        command.args(args);
-        // PATH enables explicitly chosen interpreter/Node/Python wrappers.
-        // No inherited API keys, tokens or model credentials by default.
-        command.env_clear();
-        for name in ["PATH", "HOME", "TMPDIR", "TEMP", "USERPROFILE"] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
-        for name in pass_env {
-            if !valid_env_name(name) {
-                return Err(McpError::Transport("invalid --allow-env name".into()));
-            }
-            let value = std::env::var_os(name).ok_or_else(|| {
-                McpError::Transport(format!("environment variable {name} not set"))
-            })?;
-            command.env(name, value);
-        }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
+        let mut command = Command::from(command_for(executable, args, pass_env)?);
+        command.kill_on_drop(true);
         let mut child = command
             .spawn()
             .map_err(|error| McpError::Transport(error.to_string()))?;
@@ -80,6 +56,42 @@ impl StdioMcpTransport {
             }),
         })
     }
+}
+
+fn command_for(
+    executable: &Path,
+    args: &[String],
+    pass_env: &[String],
+) -> Result<std::process::Command, McpError> {
+    if args.len() > 64 || pass_env.len() > 32 {
+        return Err(McpError::Transport(
+            "server argument/environment limit exceeded".into(),
+        ));
+    }
+    let mut command = std::process::Command::new(executable);
+    command.args(args);
+    // PATH enables explicitly chosen interpreter wrappers. HOME and
+    // USERPROFILE are deliberately not forwarded: they expose ~/.ssh, ~/.aws
+    // and other per-user credentials to the MCP server.
+    command.env_clear();
+    for name in ["PATH", "TMPDIR", "TEMP"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    for name in pass_env {
+        if !valid_env_name(name) {
+            return Err(McpError::Transport("invalid --allow-env name".into()));
+        }
+        let value = std::env::var_os(name)
+            .ok_or_else(|| McpError::Transport(format!("environment variable {name} not set")))?;
+        command.env(name, value);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    Ok(command)
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -192,6 +204,35 @@ impl McpApprovalGate for TerminalApproval {
     }
 }
 
+/// Builds the host-approved tool surface attached to a `run --team` session.
+/// The allowlist is mandatory, every call still goes through the terminal gate,
+/// and the run's shared ledger is checked before each call.
+pub async fn connect_toolbox(
+    server: &Path,
+    args: &[String],
+    pass_env: &[String],
+    allow_tools: &[String],
+    max_calls: u64,
+    ledger: UsageLedger,
+) -> Result<Arc<dyn McpToolService>, McpError> {
+    if allow_tools.is_empty() {
+        return Err(McpError::ToolNotAllowed(
+            "pass at least one --mcp-allow-tool".into(),
+        ));
+    }
+    let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
+    let client = McpClient::new(transport, Arc::new(TerminalApproval))
+        .with_allowed_tools(allow_tools.iter().cloned());
+    let toolbox = McpToolbox::connect(
+        client,
+        McpToolPolicy::new(allow_tools.iter().cloned(), max_calls),
+        Some(ledger),
+        None,
+    )
+    .await?;
+    Ok(Arc::new(toolbox))
+}
+
 pub async fn tools(server: &Path, args: &[String], pass_env: &[String]) -> Result<(), McpError> {
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
     let client = McpClient::new(transport, Arc::new(TerminalApproval));
@@ -240,6 +281,125 @@ pub async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryoko_core::mcp::{McpClient, McpToolbox};
+    use ryoko_models::{Budget, UsageLedger};
+    use serde_json::json;
+    use std::path::Path;
+    use std::sync::{Arc, OnceLock};
+    use tempfile::{TempDir, tempdir};
+
+    /// A tiny MCP server compiled with the toolchain that is already running
+    /// these tests. This avoids depending on python3, node or any other
+    /// interpreter being installed on the test machine.
+    const FAKE_SERVER: &str = r##"
+use std::io::{self, BufRead, Write};
+
+fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":");
+    let start = line.find(&needle)? + needle.len();
+    let rest = line[start..].trim_start();
+    if let Some(rest) = rest.strip_prefix('"') {
+        let end = rest.find('"')?;
+        Some(&rest[..end])
+    } else {
+        let end = rest.find(|ch| ch == ',' || ch == '}').unwrap_or(rest.len());
+        Some(rest[..end].trim())
+    }
+}
+
+fn main() {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let method = field(&line, "method").unwrap_or("");
+        if method == "notifications/initialized" {
+            continue;
+        }
+        let id = field(&line, "id").unwrap_or("0");
+        let response = match method {
+            "initialize" => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{INIT}}}"
+            ),
+            "tools/list" => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{TOOLS}}}"
+            ),
+            "tools/call" => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{CALL}}}"
+            ),
+            _ => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32601,\"message\":\"method not found\"}}}}"
+            ),
+        };
+        let _ = writeln!(stdout, "{response}");
+        let _ = stdout.flush();
+    }
+}
+
+const INIT: &str = r#"{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}"#;
+const TOOLS: &str = r#"{"tools":[{"name":"allowed_tool","description":"allowed","inputSchema":{"type":"object"}},{"name":"other_tool","description":"other","inputSchema":{"type":"object"}}]}"#;
+const CALL: &str = r#"{"content":[{"type":"text","text":"ok"}]}"#;
+"##;
+
+    struct TestApproval(bool);
+    #[async_trait::async_trait]
+    impl McpApprovalGate for TestApproval {
+        async fn approve(&self, _tool: &str, _arguments: &serde_json::Value) -> bool {
+            self.0
+        }
+    }
+
+    fn fake_server_binary() -> &'static Path {
+        static SERVER: OnceLock<(TempDir, std::path::PathBuf)> = OnceLock::new();
+        let (_, binary) = SERVER.get_or_init(|| {
+            let dir = tempdir().expect("fake MCP server temp dir");
+            let source = dir.path().join("fake_mcp_server.rs");
+            std::fs::write(&source, FAKE_SERVER).expect("write fake MCP server source");
+            let binary = dir.path().join(if cfg!(windows) {
+                "fake_mcp_server.exe"
+            } else {
+                "fake_mcp_server"
+            });
+            let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+            let output = std::process::Command::new(rustc)
+                .arg("--edition=2021")
+                .arg("-O")
+                .arg(&source)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .expect("rustc must be available to build the fake MCP server");
+            assert!(
+                output.status.success(),
+                "could not build fake MCP server: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (dir, binary)
+        });
+        binary
+    }
+
+    #[test]
+    fn stdio_command_does_not_forward_home_or_userprofile() {
+        let command = command_for(Path::new("mcp-server"), &[], &[]).unwrap();
+        let names: Vec<String> = command
+            .get_envs()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name.eq_ignore_ascii_case("HOME")),
+            "HOME must not be forwarded: {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("USERPROFILE")),
+            "USERPROFILE must not be forwarded: {names:?}"
+        );
+    }
 
     #[test]
     fn rejects_invalid_environment_names() {
@@ -247,5 +407,77 @@ mod tests {
         assert!(!valid_env_name("PATH=bad"));
         assert!(!valid_env_name("lowercase"));
         assert!(!valid_env_name(""));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_allowlist_and_call_cap() {
+        let transport = StdioMcpTransport::spawn(fake_server_binary(), &[], &[])
+            .await
+            .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(true)))
+            .with_allowed_tools(["allowed_tool".to_string()]);
+        let ledger = UsageLedger::new(None);
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(["allowed_tool".to_string()], 1),
+            Some(ledger),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(toolbox.definitions().len(), 1);
+        assert!(
+            toolbox
+                .call("allowed_tool", json!({"id": 1}), None)
+                .await
+                .is_ok()
+        );
+        assert_eq!(toolbox.remaining_calls(), 0);
+        assert!(matches!(
+            toolbox.call("allowed_tool", json!({"id": 2}), None).await,
+            Err(McpError::BudgetExceeded(_))
+        ));
+        assert!(matches!(
+            toolbox.call("other_tool", json!({}), None).await,
+            Err(McpError::ToolNotAllowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_approval_denial() {
+        let transport = StdioMcpTransport::spawn(fake_server_binary(), &[], &[])
+            .await
+            .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(false)));
+        client.initialize().await.unwrap();
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(matches!(
+            client.call_tool("allowed_tool", json!({"id": 1})).await,
+            Err(McpError::PermissionDenied)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_budget_exceeded() {
+        let transport = StdioMcpTransport::spawn(fake_server_binary(), &[], &[])
+            .await
+            .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(true)))
+            .with_allowed_tools(["allowed_tool".to_string()]);
+        let ledger = UsageLedger::new(Some(Budget::new(0.0)));
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(["allowed_tool".to_string()], 3),
+            Some(ledger),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            toolbox.call("allowed_tool", json!({"id": 1}), None).await,
+            Err(McpError::BudgetExceeded(_))
+        ));
+        assert_eq!(toolbox.remaining_calls(), 3);
     }
 }

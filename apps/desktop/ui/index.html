@@ -32,13 +32,62 @@
         <div class="tabbar">
           <span id="activePath" class="active-path">No file open</span>
           <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
+          <span class="status-spacer"></span>
+          <button id="toggleTerminal" class="button ghost compact" type="button">Terminal</button>
+          <button id="toggleDebug" class="button ghost compact" type="button">Debug</button>
         </div>
         <div id="editor" class="editor hidden"></div>
+        <div class="diff-review hidden" id="diffReview">
+          <div class="diff-review-bar">
+            <span id="diffReviewPath">Review diff</span>
+            <span class="hint">Inline hunk actions update the working tree or start a revision run.</span>
+            <button id="diffReviewClose" class="button ghost compact" type="button">Close diff</button>
+          </div>
+          <div id="diffEditor" class="diff-editor"></div>
+        </div>
         <div id="emptyEditor" class="empty-editor">
           <div class="empty-mark" aria-hidden="true">⌘</div>
           <h1>Ryoko Desktop</h1>
           <p>Open a folder, edit files with Monaco, and see findings published by <code>ryoko-lsp</code>.</p>
         </div>
+        <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
+          <div class="bottom-tabs">
+            <button id="terminalTab" class="bottom-tab active" type="button">TERMINAL</button>
+            <button id="debugTab" class="bottom-tab" type="button">DEBUG</button>
+            <span id="bottomStatus" class="hint"></span>
+            <span class="status-spacer"></span>
+            <button id="bottomClose" class="button ghost compact" type="button">Hide</button>
+          </div>
+          <div id="terminalPanel" class="bottom-content terminal-panel">
+            <div class="terminal-toolbar">
+              <button id="terminalStart" class="button primary compact" type="button">Start shell</button>
+              <button id="terminalStop" class="button ghost compact" type="button" disabled>Stop</button>
+              <span class="hint">Local PTY in the open workspace. The shell starts only when you ask.</span>
+            </div>
+            <div id="terminalHost" class="terminal-host"></div>
+          </div>
+          <div id="debugPanel" class="bottom-content debug-panel hidden">
+            <div class="debug-toolbar">
+              <label for="debugAdapter">Adapter</label>
+              <input id="debugAdapter" type="text" spellcheck="false" placeholder="dlv">
+              <label for="debugArgs">Args</label>
+              <input id="debugArgs" type="text" spellcheck="false" placeholder="dap">
+              <label for="debugProgram">Program</label>
+              <input id="debugProgram" type="text" spellcheck="false" placeholder="path/to/program">
+              <button id="debugStart" class="button primary compact" type="button">Start</button>
+              <button id="debugStop" class="button ghost compact" type="button" disabled>Stop</button>
+            </div>
+            <div class="debug-toolbar">
+              <button id="debugContinue" class="button ghost compact" type="button" disabled>Continue</button>
+              <button id="debugNext" class="button ghost compact" type="button" disabled>Step over</button>
+              <button id="debugStepIn" class="button ghost compact" type="button" disabled>Step in</button>
+              <button id="debugStepOut" class="button ghost compact" type="button" disabled>Step out</button>
+              <button id="debugBreakpoint" class="button ghost compact" type="button" disabled>Toggle breakpoint</button>
+              <span id="debugStatus" class="hint">Start a DAP adapter over stdio. No debugger is emulated.</span>
+            </div>
+            <pre id="debugLog" class="debug-log" aria-live="polite"></pre>
+          </div>
+        </section>
       </main>
 
       <aside class="problems" aria-label="Mission Control and diagnostics">
@@ -53,6 +102,29 @@
         </section>
         <section class="mission" aria-label="Mission Control">
           <div class="panel-head"><span>MISSION CONTROL</span><span id="missionSummary" class="counter">no events</span></div>
+          <form id="runForm" class="run-controls" aria-label="Start an agent run">
+            <label for="runGoal">Goal</label>
+            <textarea id="runGoal" rows="2" maxlength="8000" placeholder="Describe the change the team should make…"></textarea>
+            <div class="run-sliders">
+              <label for="runBudget">Budget <output id="runBudgetValue">$5.00</output></label>
+              <input id="runBudget" type="range" min="0.25" max="25" step="0.25" value="5">
+              <label for="runConcurrency">Concurrency <output id="runConcurrencyValue">2</output></label>
+              <input id="runConcurrency" type="range" min="1" max="4" step="1" value="2">
+            </div>
+            <label for="runSandbox">Sandbox image</label>
+            <div class="run-sandbox-row">
+              <input id="runSandbox" type="text" spellcheck="false" placeholder="OCI image used for validation">
+              <button id="sandboxInit" class="button ghost compact" type="button">Generate image</button>
+            </div>
+            <div class="run-actions">
+              <label class="run-check"><input id="runTeam" type="checkbox" checked> Team DAG</label>
+              <button id="runStart" class="button primary compact" type="submit">Run</button>
+              <button id="runPause" class="button ghost compact" type="button" disabled>Pause</button>
+              <button id="runCancel" class="button ghost compact" type="button" disabled>Cancel</button>
+            </div>
+            <span id="runState" class="hint" role="status" aria-live="polite">No run started.</span>
+            <pre id="runLog" class="run-log hidden" aria-label="Agent run output"></pre>
+          </form>
           <div class="mission-toolbar">
             <label class="sr-only" for="missionLog">Mission Control event log</label>
             <select id="missionLog" class="mission-select"></select>
@@ -66,15 +138,24 @@
             <p class="hint">Select a task to inspect its brief, validation and output.</p>
           </div>
         </section>
-        <section class="github-queue" aria-label="GitHub review queue">
-          <div class="panel-head"><span>GITHUB QUEUE</span><span id="githubQueueSummary" class="counter">not connected</span></div>
+        <details class="github-queue">
+          <summary>GITHUB PR / ISSUE QUEUE <span id="githubQueueCount" class="counter">not connected</span></summary>
+          <div class="github-pair">
+            <p class="hint">Sign in to the local GitHub App workbench, select “Pair native desktop”, then paste its single-use code here. OAuth secrets stay server-side.</p>
+            <label class="sr-only" for="githubPairCode">Single-use GitHub desktop code</label>
+            <input id="githubPairCode" type="password" autocomplete="off" spellcheck="false" placeholder="Single-use pairing code">
+            <button id="githubPair" class="button ghost compact" type="button">Pair read-only</button>
+          </div>
           <div class="github-queue-toolbar">
-            <button id="githubQueueRefresh" type="button" class="button ghost compact">Load open PRs &amp; issues</button>
+            <label class="sr-only" for="githubRepo">Authorized GitHub repository</label>
+            <select id="githubRepo" aria-label="Authorized GitHub repository"></select>
+            <button id="githubRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="githubUnpair" class="button ghost compact" type="button">Disconnect</button>
           </div>
-          <div id="githubQueueList" class="github-queue-list" aria-live="polite">
-            <p class="hint">Open a GitHub workspace, then load the queue using your local <code>gh</code> login.</p>
+          <div id="githubQueueList" class="github-queue-list">
+            <p class="hint">No repository queue loaded.</p>
           </div>
-        </section>
+        </details>
         <details class="hunk-review">
           <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>
           <div class="hunk-toolbar">
@@ -84,6 +165,7 @@
           <div id="hunkList" class="hunk-list" aria-label="Selectable Git hunks">
             <p class="hint">Open a Git repository to inspect unstaged text hunks.</p>
           </div>
+          <pre id="hunkValidation" class="hunk-validation hidden" aria-live="polite"></pre>
         </details>
         <div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
         <div id="problemList" class="problem-list">

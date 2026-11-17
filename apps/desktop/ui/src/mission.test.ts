@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   focusMissionTasks,
+  formatLedgerCost,
+  formatTokens,
   layoutMission,
+  liveStatus,
   parseMissionLog,
   reduceMissionEvents,
   roleLabel,
@@ -42,15 +45,65 @@ describe('mission event log', () => {
     expect(snapshot.finished?.succeeded).toBe(2);
   });
 
-  it('tracks per-task token usage', () => {
+  it('tracks per-task token usage and run totals', () => {
     const usage = '{"type":"task_usage","task_id":"b","requests":2,"input_tokens":420,"output_tokens":125,"ledger_cost_usd":0.03}';
-    const task = reduceMissionEvents(parseMissionLog([log, usage].join(String.fromCharCode(10)))).tasks[1];
-    expect(task.usage).toEqual({
+    const snapshot = reduceMissionEvents(parseMissionLog([log, usage].join(String.fromCharCode(10))));
+    expect(snapshot.tasks[1].usage).toEqual({
       requests: 2,
       inputTokens: 420,
       outputTokens: 125,
       ledgerCostUsd: 0.03,
     });
+    expect(snapshot.totals).toEqual({
+      requests: 2,
+      inputTokens: 420,
+      outputTokens: 125,
+      ledgerCostUsd: 0.03,
+    });
+    expect(formatTokens(1_240)).toBe('1.2k');
+    expect(formatLedgerCost(0.03)).toBe('$0.0300');
+  });
+
+  it('tracks live phases and a timestamped activity timeline', () => {
+    const records = [
+      '{"type":"task_scheduled","task_id":"x","role":"backend","description":"Build","dependencies":[],"at_ms":1000}',
+      '{"type":"task_started","task_id":"x","agent":"backend","attempt":1,"at_ms":1100}',
+      '{"type":"task_phase","task_id":"x","phase":"thinking","at_ms":1150}',
+      '{"type":"task_phase","task_id":"x","phase":"coding","at_ms":2200}',
+      '{"type":"task_progress","task_id":"x","message":"wrote src/lib.rs","at_ms":2300}',
+      '{"type":"validation_started","task_id":"x","file_count":1,"at_ms":3000}',
+      '{"type":"validation_finished","task_id":"x","passed":false,"summary":"cargo test failed","logs":["E1"],"duration_ms":12,"at_ms":4000}',
+      '{"type":"task_failed","task_id":"x","stage":"validation","error":"cargo test failed","attempts":1,"retrying":false,"at_ms":4050}',
+    ].join('\n');
+    const task = reduceMissionEvents(parseMissionLog(records)).tasks[0];
+    expect(task.phase).toBe('testing');
+    expect(task.failureStage).toBe('validation');
+    expect(liveStatus(task)).toBe('Failed');
+    expect(task.activity?.map((entry) => entry.label)).toEqual([
+      'thinking',
+      'coding',
+      'Progress',
+      'Testing',
+      'Validation failed',
+      'Failed',
+    ]);
+    expect(task.activity?.[1].atMs).toBe(2200);
+  });
+
+  it('reports waiting, thinking, coding and testing live states', () => {
+    const base: MissionTask = {
+      id: 't',
+      role: 'backend',
+      description: 'Build',
+      dependencies: [],
+      status: 'scheduled',
+    };
+    expect(liveStatus(base)).toBe('Waiting');
+    expect(liveStatus({ ...base, status: 'running' })).toBe('Thinking');
+    expect(liveStatus({ ...base, status: 'running', phase: 'coding' })).toBe('Coding');
+    expect(liveStatus({ ...base, status: 'running', phase: 'testing' })).toBe('Testing');
+    expect(liveStatus({ ...base, status: 'validating' })).toBe('Testing');
+    expect(liveStatus({ ...base, status: 'succeeded' })).toBe('Succeeded');
   });
 
   it('retains validation and failure logs across retries without overwriting history', () => {
