@@ -51,6 +51,11 @@ pub fn standard_team() -> Vec<TeamMember> {
             title: "DevOps/SRE engineer",
             instructions: "Design reproducible builds, staged deployments, secrets handling, health checks, telemetry and rollback. Require explicit approval for live deployment.",
         },
+        TeamMember {
+            role: AgentRole::Integrator,
+            title: "Merge integrator",
+            instructions: "Combine validated sibling branches in a new worktree, resolve semantic conflicts conservatively with a model, preserve every accepted test and security fix, and publish one reviewable integration diff. Never merge to the target branch or discard a sibling branch.",
+        },
     ]
 }
 
@@ -134,7 +139,13 @@ pub fn engineering_execution_plan(goal: &str) -> Vec<Task> {
         AgentRole::Custom("security-engineer".into()),
     )
     .depends_on(&backend);
-    vec![architect, backend, qa, security]
+    let integrator = Task::new(
+        format!("INTEGRATE: Merge the validated QA and Security branches for: {goal} in a fresh worktree. Resolve semantic conflicts without dropping either change, then run the full validation suite and publish one unified reviewable diff."),
+        AgentRole::Integrator,
+    )
+    .depends_on(&qa)
+    .depends_on(&security);
+    vec![architect, backend, qa, security, integrator]
 }
 
 #[cfg(test)]
@@ -146,9 +157,9 @@ mod tests {
     #[test]
     fn standard_team_has_distinct_roles_and_valid_task_plan() {
         let team = standard_team();
-        assert_eq!(team.len(), 8);
+        assert_eq!(team.len(), 9);
         let roles: HashSet<_> = team.into_iter().map(|member| member.role).collect();
-        assert_eq!(roles.len(), 8);
+        assert_eq!(roles.len(), 9);
         let tasks = application_plan("create a ticketing app");
         assert_eq!(tasks.len(), 8);
         assert!(tasks.iter().all(|t| roles.contains(&t.assigned_to)));
@@ -159,11 +170,13 @@ mod tests {
     fn execution_plan_is_an_ordered_dag_with_parallel_reviewers() {
         let tasks = engineering_execution_plan("add an endpoint");
         Orchestrator::validate_plan(&tasks).unwrap();
-        assert_eq!(tasks.len(), 4);
+        assert_eq!(tasks.len(), 5);
         assert!(tasks[0].dependencies.is_empty());
         assert_eq!(tasks[1].dependencies, vec![tasks[0].id]);
         assert_eq!(tasks[2].dependencies, vec![tasks[1].id]);
         assert_eq!(tasks[3].dependencies, vec![tasks[1].id]);
+        assert_eq!(tasks[4].assigned_to, AgentRole::Integrator);
+        assert_eq!(tasks[4].dependencies, vec![tasks[2].id, tasks[3].id]);
     }
 
     #[test]

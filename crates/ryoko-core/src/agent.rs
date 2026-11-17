@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::error::CoreResult;
 use crate::event::{EventSink, OrchestratorEvent};
+use crate::mcp::McpToolService;
 use crate::memory::SharedMemory;
 use crate::model::{AgentIdentity, ProjectContext, Task, TaskResult};
 use crate::validation::ChangeValidator;
@@ -20,12 +21,20 @@ pub struct TaskContext {
     pub validator: Arc<dyn ChangeValidator>,
     /// Present when the task runs inside an isolated workspace.
     pub workspace: Option<Arc<dyn WorkspaceLease>>,
+    /// Host-approved external tools. Absent unless the operator attached an MCP
+    /// session to this run; agents never construct or approve it themselves.
+    pub mcp: Option<Arc<dyn McpToolService>>,
     pub events: EventSink,
 }
 
 impl TaskContext {
     pub fn with_workspace(mut self, workspace: Option<Arc<dyn WorkspaceLease>>) -> Self {
         self.workspace = workspace;
+        self
+    }
+
+    pub fn with_mcp(mut self, mcp: Option<Arc<dyn McpToolService>>) -> Self {
+        self.mcp = mcp;
         self
     }
 

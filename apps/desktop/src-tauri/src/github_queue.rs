@@ -1,214 +1,193 @@
-//! Read-only GitHub queue for the currently opened workspace.
-//!
-//! Uses the user's existing GitHub CLI authentication. No app token, PAT,
-//! dynamic shell command or repository-selected executable reaches the UI.
-use std::io::Read;
-use std::path::Path;
-use std::process::{Command, Stdio};
+//! Read-only Tauri-native GitHub queue over the existing localhost App broker.
+//! The OAuth token remains inside Node; a short-lived bridge token remains
+//! inside this process and is never passed to Monaco or persisted on disk.
+use std::sync::Mutex;
+use std::time::Duration;
 
-use serde::Serialize;
-use serde_json::Value;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::workspace::{WorkspaceState, current_root};
+const BROKER: &str = "http://127.0.0.1:4173";
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
-const MAX_GITHUB_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_REMOTE_BYTES: u64 = 4096;
+#[derive(Default)]
+pub struct GitHubQueueState {
+    token: Mutex<Option<String>>,
+}
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QueueItem {
+pub struct GitHubRepository {
+    installation_id: u64,
+    repo_id: u64,
+    name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GitHubQueueItem {
     number: u64,
     title: String,
-    url: String,
-    kind: &'static str,
+    html_url: String,
+    #[serde(default)]
     draft: bool,
+    #[serde(default)]
+    state: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize)]
 pub struct GitHubQueue {
     repository: String,
-    pulls: Vec<QueueItem>,
-    issues: Vec<QueueItem>,
+    pulls: Vec<GitHubQueueItem>,
+    issues: Vec<GitHubQueueItem>,
 }
 
-/// Only github.com URLs with plain owner/repository names are accepted.
-/// Git remote URL rewrites are not allowed to select another API host.
-fn parse_github_repo(remote: &str) -> Result<(String, String), String> {
-    let remote = remote.trim();
-    let path = remote
-        .strip_prefix("https://github.com/")
-        .or_else(|| remote.strip_prefix("git@github.com:"))
-        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
-        .ok_or_else(|| "The workspace origin must point to github.com".to_owned())?;
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let (owner, name) = path
-        .split_once('/')
-        .ok_or_else(|| "GitHub origin must be owner/repository".to_owned())?;
-    let valid = |part: &str| {
-        !part.is_empty()
-            && part != "."
-            && part != ".."
-            && part.len() <= 100
-            && part
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-    };
-    if !valid(owner) || !valid(name) {
-        return Err("Invalid GitHub owner or repository name".to_owned());
+#[derive(Deserialize)]
+struct Paired {
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct Repositories {
+    repositories: Vec<GitHubRepository>,
+}
+
+fn client() -> Result<Client, String> {
+    Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|_| "could not initialize local GitHub broker connection".to_owned())
+}
+
+async fn bounded_json<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, String> {
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub broker returned HTTP {}. Sign in or pair again.",
+            response.status().as_u16()
+        ));
     }
-    Ok((owner.to_owned(), name.to_owned()))
-}
-
-/// Processes execute only fixed, read-only argument vectors. Limit stdout
-/// before decoding, do not inherit stdin, and never expose CLI stderr.
-fn limited_output(mut command: Command, limit: u64) -> Result<String, String> {
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "GitHub CLI (gh) or Git is unavailable".to_owned())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Missing process output".to_owned())?;
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err("GitHub queue response too large".into());
+    }
     let mut bytes = Vec::new();
-    let read = stdout.take(limit + 1).read_to_end(&mut bytes);
-    if read.is_err() || bytes.len() as u64 > limit {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("GitHub queue response exceeded its output limit".to_owned());
-    }
-    let exit = child
-        .wait()
-        .map_err(|_| "GitHub queue subprocess failed".to_owned())?;
-    if !exit.success() {
-        return Err(
-            "GitHub CLI request failed. Run 'gh auth login' and verify repository access."
-                .to_owned(),
-        );
-    }
-    String::from_utf8(bytes).map_err(|_| "GitHub queue response was not UTF-8".to_owned())
-}
-
-fn safe_title(raw: &Value) -> String {
-    raw.as_str()
-        .unwrap_or("(untitled)")
-        .chars()
-        .take(240)
-        .collect()
-}
-
-fn parse_items(
-    body: &str,
-    owner: &str,
-    repo: &str,
-    kind: &'static str,
-) -> Result<Vec<QueueItem>, String> {
-    let parsed: Value = serde_json::from_str(body)
-        .map_err(|_| "GitHub returned an invalid queue response".to_owned())?;
-    let entries = parsed
-        .as_array()
-        .ok_or_else(|| "GitHub queue is not an array".to_owned())?;
-    if entries.len() > 30 {
-        return Err("GitHub queue contains too many items".to_owned());
-    }
-    let mut items = Vec::new();
-    for entry in entries {
-        // The issues API also includes pull requests; only real issues appear here.
-        if kind == "issues" && entry.get("pull_request").is_some() {
-            continue;
-        }
-        let number = entry
-            .get("number")
-            .and_then(Value::as_u64)
-            .filter(|n| *n > 0)
-            .ok_or_else(|| "Invalid GitHub queue entry number".to_owned())?;
-        items.push(QueueItem {
-            number,
-            title: safe_title(&entry["title"]),
-            url: format!("https://github.com/{owner}/{repo}/{kind}/{number}"),
-            kind,
-            draft: kind == "pull" && entry["draft"].as_bool() == Some(true),
-        });
-    }
-    Ok(items)
-}
-
-fn read_queue(root: &Path) -> Result<GitHubQueue, String> {
-    let mut origin = Command::new("git");
-    origin
-        .args(["remote", "get-url", "origin"])
-        .current_dir(root);
-    let remote = limited_output(origin, MAX_REMOTE_BYTES)?;
-    let (owner, repo) = parse_github_repo(&remote)?;
-    let target = format!("repos/{owner}/{repo}");
-    let read = |resource: &str| -> Result<String, String> {
-        let mut cmd = Command::new("gh");
-        cmd.args([
-            "api",
-            "--method",
-            "GET",
-            &format!("{target}/{resource}?state=open&per_page=30"),
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_HOST", "github.com")
-        .env("GH_HTTP_TIMEOUT", "10");
-        limited_output(cmd, MAX_GITHUB_BYTES)
-    };
-    let pulls = parse_items(&read("pulls")?, &owner, &repo, "pull")?;
-    let issues = parse_items(&read("issues")?, &owner, &repo, "issues")?;
-    Ok(GitHubQueue {
-        repository: format!("{owner}/{repo}"),
-        pulls,
-        issues,
-    })
-}
-
-/// Explicit refresh only. The assistant/agent does not invoke gh or receive
-/// credentials; this command uses the user's existing local gh login.
-#[tauri::command]
-pub async fn github_review_queue(state: State<'_, WorkspaceState>) -> Result<GitHubQueue, String> {
-    let root = current_root(&state)?;
-    tauri::async_runtime::spawn_blocking(move || read_queue(&root))
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| "GitHub queue worker failed".to_owned())?
+        .map_err(|_| "GitHub broker read failed")?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err("GitHub queue response exceeded limit".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "invalid response from local GitHub broker".into())
+}
+
+fn token(state: &State<'_, GitHubQueueState>) -> Result<String, String> {
+    state
+        .token
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .ok_or_else(|| "Pair GitHub from the connected browser workbench first".into())
+}
+
+#[tauri::command]
+pub async fn pair_github_queue(
+    code: String,
+    state: State<'_, GitHubQueueState>,
+) -> Result<(), String> {
+    if code.len() != 43
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("invalid single-use desktop pairing code".into());
+    }
+    let response = client()?
+        .post(format!("{BROKER}/api/desktop/exchange"))
+        .json(&serde_json::json!({"code":code}))
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App at 127.0.0.1:4173".to_owned())?;
+    let paired: Paired = bounded_json(response).await?;
+    if paired.token.len() != 43
+        || !paired
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("GitHub broker supplied an invalid pairing token".into());
+    }
+    *state
+        .token
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(paired.token);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn disconnect_github_queue(state: State<'_, GitHubQueueState>) {
+    *state
+        .token
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
+}
+
+#[tauri::command]
+pub async fn list_github_repositories(
+    state: State<'_, GitHubQueueState>,
+) -> Result<Vec<GitHubRepository>, String> {
+    let response = client()?
+        .get(format!("{BROKER}/api/desktop/repositories"))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    let data: Repositories = bounded_json(response).await?;
+    if data.repositories.len() > 100 {
+        return Err("GitHub repository count exceeded limit".into());
+    }
+    Ok(data.repositories)
+}
+
+#[tauri::command]
+pub async fn get_github_queue(
+    installation_id: u64,
+    repo_id: u64,
+    state: State<'_, GitHubQueueState>,
+) -> Result<GitHubQueue, String> {
+    if installation_id == 0 || repo_id == 0 {
+        return Err("choose an authorized GitHub repository".into());
+    }
+    let response = client()?
+        .get(format!(
+            "{BROKER}/api/desktop/queue?installationId={installation_id}&repoId={repo_id}"
+        ))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    let data: GitHubQueue = bounded_json(response).await?;
+    if data.pulls.len() > 30 || data.issues.len() > 30 {
+        return Err("GitHub queue exceeded its item limit".into());
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_github_repo, parse_items};
+    use super::*;
 
     #[test]
-    fn only_restricted_github_origin_is_accepted() {
-        assert_eq!(
-            parse_github_repo("git@github.com:acme/project.git").unwrap(),
-            ("acme".into(), "project".into()),
-        );
-        assert_eq!(
-            parse_github_repo("https://github.com/acme/project").unwrap(),
-            ("acme".into(), "project".into()),
-        );
-        for invalid in [
-            "https://evil.example/acme/project",
-            "https://github.com/acme/project/extra",
-            "https://github.com/acme/../secrets",
-            "https://github.com/acme/project?token=bad",
-            "git@github.com:acme/project;evil",
-        ] {
-            assert!(parse_github_repo(invalid).is_err(), "{invalid}");
-        }
-    }
-
-    #[test]
-    fn issue_queue_excludes_pull_requests_and_constructs_safe_links() {
-        let json = r#"[{"number":3,"title":"Fix a bug"},
-            {"number":4,"title":"Actually a PR","pull_request":{}}]"#;
-        let items = parse_items(json, "acme", "project", "issues").unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].url, "https://github.com/acme/project/issues/3");
-        assert!(parse_items(r#"[{"number":0}]"#, "acme", "project", "pull").is_err());
+    fn bridge_server_is_fixed_to_localhost() {
+        assert_eq!(BROKER, "http://127.0.0.1:4173");
     }
 }
