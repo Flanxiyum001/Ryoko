@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ryoko_core::mcp::{McpApprovalGate, McpClient, McpError, McpTransport};
+use ryoko_core::mcp::{
+    McpApprovalGate, McpClient, McpError, McpToolPolicy, McpToolService, McpToolbox, McpTransport,
+};
+use ryoko_models::UsageLedger;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -192,6 +195,35 @@ impl McpApprovalGate for TerminalApproval {
     }
 }
 
+/// Builds the host-approved tool surface attached to a `run --team` session.
+/// The allowlist is mandatory, every call still goes through the terminal gate,
+/// and the run's shared ledger is checked before each call.
+pub async fn connect_toolbox(
+    server: &Path,
+    args: &[String],
+    pass_env: &[String],
+    allow_tools: &[String],
+    max_calls: u64,
+    ledger: UsageLedger,
+) -> Result<Arc<dyn McpToolService>, McpError> {
+    if allow_tools.is_empty() {
+        return Err(McpError::ToolNotAllowed(
+            "pass at least one --mcp-allow-tool".into(),
+        ));
+    }
+    let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
+    let client = McpClient::new(transport, Arc::new(TerminalApproval))
+        .with_allowed_tools(allow_tools.iter().cloned());
+    let toolbox = McpToolbox::connect(
+        client,
+        McpToolPolicy::new(allow_tools.iter().cloned(), max_calls),
+        Some(ledger),
+        None,
+    )
+    .await?;
+    Ok(Arc::new(toolbox))
+}
+
 pub async fn tools(server: &Path, args: &[String], pass_env: &[String]) -> Result<(), McpError> {
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
     let client = McpClient::new(transport, Arc::new(TerminalApproval));
@@ -240,6 +272,54 @@ pub async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryoko_core::mcp::{McpClient, McpToolbox};
+    use ryoko_models::{Budget, UsageLedger};
+    use serde_json::json;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    const FAKE_SERVER: &str = r#"import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method")
+    rid = req.get("id")
+    if method == "notifications/initialized":
+        continue
+    if method == "initialize":
+        result = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "fake", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [
+            {"name": "allowed_tool", "description": "allowed", "inputSchema": {"type": "object"}},
+            {"name": "other_tool", "description": "other", "inputSchema": {"type": "object"}}
+        ]}
+    elif method == "tools/call":
+        name = req["params"]["name"]
+        result = {"content": [{"type": "text", "text": "ok " + name}]}
+    else:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "method not found"}}) + "\n")
+        sys.stdout.flush()
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")
+    sys.stdout.flush()
+"#;
+
+    struct TestApproval(bool);
+    #[async_trait::async_trait]
+    impl McpApprovalGate for TestApproval {
+        async fn approve(&self, _tool: &str, _arguments: &serde_json::Value) -> bool {
+            self.0
+        }
+    }
+
+    async fn spawn_fake() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("fake_mcp.py");
+        std::fs::write(&script, FAKE_SERVER).unwrap();
+        (dir, script)
+    }
 
     #[test]
     fn rejects_invalid_environment_names() {
@@ -247,5 +327,92 @@ mod tests {
         assert!(!valid_env_name("PATH=bad"));
         assert!(!valid_env_name("lowercase"));
         assert!(!valid_env_name(""));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_allowlist_and_call_cap() {
+        let (_dir, script) = spawn_fake().await;
+        let transport = StdioMcpTransport::spawn(
+            std::path::Path::new("python3"),
+            &[script.to_string_lossy().to_string()],
+            &[],
+        )
+        .await
+        .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(true)))
+            .with_allowed_tools(["allowed_tool".to_string()]);
+        let ledger = UsageLedger::new(None);
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(["allowed_tool".to_string()], 1),
+            Some(ledger),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(toolbox.definitions().len(), 1);
+        assert!(
+            toolbox
+                .call("allowed_tool", json!({"id": 1}), None)
+                .await
+                .is_ok()
+        );
+        assert_eq!(toolbox.remaining_calls(), 0);
+        assert!(matches!(
+            toolbox.call("allowed_tool", json!({"id": 2}), None).await,
+            Err(McpError::BudgetExceeded(_))
+        ));
+        assert!(matches!(
+            toolbox.call("other_tool", json!({}), None).await,
+            Err(McpError::ToolNotAllowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_approval_denial() {
+        let (_dir, script) = spawn_fake().await;
+        let transport = StdioMcpTransport::spawn(
+            std::path::Path::new("python3"),
+            &[script.to_string_lossy().to_string()],
+            &[],
+        )
+        .await
+        .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(false)));
+        client.initialize().await.unwrap();
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(matches!(
+            client.call_tool("allowed_tool", json!({"id": 1})).await,
+            Err(McpError::PermissionDenied)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_budget_exceeded() {
+        let (_dir, script) = spawn_fake().await;
+        let transport = StdioMcpTransport::spawn(
+            std::path::Path::new("python3"),
+            &[script.to_string_lossy().to_string()],
+            &[],
+        )
+        .await
+        .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(true)))
+            .with_allowed_tools(["allowed_tool".to_string()]);
+        let ledger = UsageLedger::new(Some(Budget::new(0.0)));
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(["allowed_tool".to_string()], 3),
+            Some(ledger),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            toolbox.call("allowed_tool", json!({"id": 1}), None).await,
+            Err(McpError::BudgetExceeded(_))
+        ));
+        assert_eq!(toolbox.remaining_calls(), 3);
     }
 }

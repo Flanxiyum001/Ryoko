@@ -8,13 +8,13 @@ only when its first real consumer exists.
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `ryoko-cli` | Argument parsing, terminal workflows, MCP stdio process transport and operator prompts, provider/team configuration, run and review commands | Domain rules, provider payloads |
-| `ryoko-core` | Domain types (`Task`, `TaskResult`, `AgentRole`), agent runtime contract, `ModelAgent`, orchestrator, IACP, MCP protocol and approval gate, in-process memory blackboard, tree-sitter context extraction | HTTP, process spawning, editor UI |
+| `ryoko-core` | Domain types (`Task`, `TaskResult`, `AgentRole`), agent runtime contract, `ModelAgent` tool loop, orchestrator, IACP, MCP protocol, approval gate and bounded MCP toolbox, in-process memory blackboard, tree-sitter context extraction | HTTP, process spawning, editor UI |
 | `ryoko-models` | Provider adapters, provider catalogue, model routing, streaming events, usage and budget ledger | Task planning, file access |
 | `ryoko-native` | LSP server over stdio, diagnostics publishing, code lenses, quick fixes, execute commands | Workspace lifetime, model calls |
 | `ryoko-vfs` | Virtual document store, incremental text edits, UTF-16 positions, snapshots | LSP transport, persistence |
 | `ryoko-sandbox` | WASM guardrail, OCI project pre-flight runner, process limits and spec evidence | VM isolation, image provenance, release attestation |
 | `ryoko-worktree` | Git worktrees, task branches, change proposals, publication and cleanup | Review UI, permission policy |
-| `ryoko-scripting` | Reserved scripting/plugin layer | Anything until its API is specified |
+| `ryoko-scripting` | WASI plugin manifest, versioned JSON ABI, host policy, capability limits and agent adapter | Plugin marketplace, signing, host callbacks, embedded language runtimes |
 
 ## Planned crates
 
@@ -33,7 +33,6 @@ only when its first real consumer exists.
 | `ryoko-git` | Status, diff, staging, branch and conflict operations | `ryoko-worktree` |
 | `ryoko-terminal` | Interactive terminal sessions under policy | permissions |
 | `ryoko-debugger` | DAP client and session state | `ryoko-execution` |
-| `ryoko-plugins` | Plugin manifest, host functions, quotas | sandbox, permissions |
 | `ryoko-storage` | SQLite schema, migrations, repositories | nothing domain-specific |
 | `ryoko-events` | Event definitions, versioning, journal encoding | serialization only |
 | `ryoko-telemetry` | Structured logs, spans, metrics, redaction | `ryoko-events` |

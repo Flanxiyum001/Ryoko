@@ -1,5 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { FitAddon } from '@xterm/addon-fit';
+import { Terminal } from '@xterm/xterm';
+import '@xterm/xterm/css/xterm.css';
 import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
@@ -76,11 +80,73 @@ interface GitHunk {
   path: string;
   header: string;
   preview: string;
+  old_start: number;
+  new_start: number;
+  new_lines: number;
 }
 
 interface GitHunkSnapshot {
   patch: string;
   hunks: GitHunk[];
+}
+
+interface ReviewFileContent {
+  path: string;
+  original: string;
+  modified: string;
+}
+
+interface RunStatus {
+  running: boolean;
+  paused: boolean;
+  exitCode: number | null;
+  eventLog: string | null;
+  startedMs: number | null;
+  logTail: string;
+}
+
+interface ReviewValidation {
+  passed: boolean;
+  summary: string;
+  logs: string[];
+  duration_ms: number;
+}
+
+interface FimChunk {
+  requestId: string;
+  text: string;
+}
+
+interface FimError {
+  requestId: string;
+  message: string;
+}
+
+interface TerminalOutput {
+  sessionId: number;
+  data: string;
+}
+
+interface TerminalStatus {
+  running: boolean;
+  sessionId: number | null;
+}
+
+interface DapMessage {
+  sessionId: number;
+  message: string;
+}
+
+interface DapStatus {
+  running: boolean;
+  sessionId: number | null;
+}
+
+interface SandboxInitResult {
+  image: string;
+  dockerfile: string;
+  built: boolean;
+  ecosystem: string;
 }
 
 (globalThis as unknown as Record<string, unknown>).MonacoEnvironment = {
@@ -118,6 +184,25 @@ const hunkRefresh = element<HTMLButtonElement>('hunkRefresh');
 const hunkStage = element<HTMLButtonElement>('hunkStage');
 const hunkList = element('hunkList');
 const hunkCount = element('hunkCount');
+const hunkValidation = element('hunkValidation');
+const diffReview = element('diffReview');
+const diffReviewPath = element('diffReviewPath');
+const diffReviewClose = element<HTMLButtonElement>('diffReviewClose');
+const diffEditorHost = element('diffEditor');
+const runForm = element<HTMLFormElement>('runForm');
+const runGoal = element<HTMLTextAreaElement>('runGoal');
+const runBudget = element<HTMLInputElement>('runBudget');
+const runBudgetValue = element<HTMLOutputElement>('runBudgetValue');
+const runConcurrency = element<HTMLInputElement>('runConcurrency');
+const runConcurrencyValue = element<HTMLOutputElement>('runConcurrencyValue');
+const runSandbox = element<HTMLInputElement>('runSandbox');
+const sandboxInit = element<HTMLButtonElement>('sandboxInit');
+const runTeam = element<HTMLInputElement>('runTeam');
+const runStart = element<HTMLButtonElement>('runStart');
+const runPause = element<HTMLButtonElement>('runPause');
+const runCancel = element<HTMLButtonElement>('runCancel');
+const runState = element('runState');
+const runLog = element('runLog');
 const githubQueueRefresh = element<HTMLButtonElement>('githubQueueRefresh');
 const githubQueueList = element('githubQueueList');
 const githubQueueSummary = element('githubQueueSummary');
@@ -125,6 +210,30 @@ const lspStatus = element('lspStatus');
 const editorStatus = element('editorStatus');
 const cursorPos = element('cursorPos');
 const languageMode = element('languageMode');
+const bottomPanel = element('bottomPanel');
+const terminalTab = element<HTMLButtonElement>('terminalTab');
+const debugTab = element<HTMLButtonElement>('debugTab');
+const bottomClose = element<HTMLButtonElement>('bottomClose');
+const bottomStatus = element('bottomStatus');
+const terminalPanel = element('terminalPanel');
+const terminalHost = element('terminalHost');
+const terminalStart = element<HTMLButtonElement>('terminalStart');
+const terminalStop = element<HTMLButtonElement>('terminalStop');
+const toggleTerminal = element<HTMLButtonElement>('toggleTerminal');
+const toggleDebug = element<HTMLButtonElement>('toggleDebug');
+const debugPanel = element('debugPanel');
+const debugAdapter = element<HTMLInputElement>('debugAdapter');
+const debugArgs = element<HTMLInputElement>('debugArgs');
+const debugProgram = element<HTMLInputElement>('debugProgram');
+const debugStart = element<HTMLButtonElement>('debugStart');
+const debugStop = element<HTMLButtonElement>('debugStop');
+const debugContinue = element<HTMLButtonElement>('debugContinue');
+const debugNext = element<HTMLButtonElement>('debugNext');
+const debugStepIn = element<HTMLButtonElement>('debugStepIn');
+const debugStepOut = element<HTMLButtonElement>('debugStepOut');
+const debugBreakpoint = element<HTMLButtonElement>('debugBreakpoint');
+const debugStatus = element('debugStatus');
+const debugLog = element('debugLog');
 
 const state: {
   root: string;
@@ -141,6 +250,20 @@ let agentSessions: AgentSession[] = [];
 let agentSessionPolling = false;
 let gitHunks: GitHunkSnapshot | null = null;
 let hunkPolling = false;
+let missionPreferredLog: string | null = null;
+let runSnapshot: RunStatus | null = null;
+let runPolling = false;
+let diffWidgets: monaco.editor.IContentWidget[] = [];
+let diffOriginalModel: monaco.editor.ITextModel | null = null;
+let diffModifiedModel: monaco.editor.ITextModel | null = null;
+let xterm: Terminal | null = null;
+let fitAddon: FitAddon | null = null;
+let terminalSessionId: number | null = null;
+let dapSessionId: number | null = null;
+let dapSeq = 0;
+let dapThreadId = 1;
+let dapActive = false;
+const debugBreakpoints = new Map<string, Set<number>>();
 
 const openFiles = new Map<string, OpenFile>();
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
@@ -158,6 +281,127 @@ const editor = monaco.editor.create(editorHost, {
   smoothScrolling: true,
 });
 
+// Ghost text is a content widget rather than Monaco's inline-completions API:
+// the provider API resolves once, while local FIM tokens arrive incrementally.
+let fimGeneration = 0;
+let fimText = '';
+let fimPosition: monaco.Position | null = null;
+let fimTimer: number | undefined;
+let acceptingFim = false;
+const fimNode = document.createElement('div');
+fimNode.className = 'fim-ghost hidden';
+fimNode.setAttribute('aria-hidden', 'true');
+const fimWidget: monaco.editor.IContentWidget = {
+  getId: () => 'ryoko.fim.ghost',
+  getDomNode: () => fimNode,
+  getPosition: () =>
+    fimPosition
+      ? {
+          position: fimPosition,
+          preference: [monaco.editor.ContentWidgetPositionPreference.EXACT],
+        }
+      : null,
+};
+editor.addContentWidget(fimWidget);
+
+function hideFim(cancelServer = true): void {
+  const hadRequest = fimText !== '' || fimPosition !== null;
+  fimText = '';
+  fimPosition = null;
+  fimNode.textContent = '';
+  fimNode.classList.add('hidden');
+  editor.layoutContentWidget(fimWidget);
+  if (cancelServer && hadRequest) {
+    fimGeneration += 1;
+    void invoke('fim_cancel').catch(() => undefined);
+  }
+}
+
+function scheduleFim(): void {
+  if (fimTimer !== undefined) window.clearTimeout(fimTimer);
+  if (acceptingFim) return;
+  fimTimer = window.setTimeout(() => {
+    fimTimer = undefined;
+    void requestFim();
+  }, 220);
+}
+
+async function requestFim(): Promise<void> {
+  const file = state.current;
+  const model = editor.getModel();
+  const position = editor.getPosition();
+  const selection = editor.getSelection();
+  if (!file || !model || !position || !selection || !selection.isEmpty()) {
+    hideFim();
+    return;
+  }
+  hideFim();
+  const offset = model.getOffsetAt(position);
+  const full = model.getValue();
+  const prefix = full.slice(Math.max(0, offset - 6_000), offset);
+  const suffix = full.slice(offset, offset + 3_000);
+  if (!prefix.trim()) return;
+  const requestId = String(fimGeneration + 1);
+  fimGeneration += 1;
+  fimPosition = position;
+  try {
+    await invoke('fim_complete', { prefix, suffix, requestId });
+  } catch (error) {
+    if (requestId === String(fimGeneration)) hideFim(false);
+    setStatus(`Completion unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function applyFimChunk(payload: FimChunk): void {
+  if (payload.requestId !== String(fimGeneration) || !fimPosition) return;
+  const selection = editor.getSelection();
+  if (!selection || !selection.isEmpty()) {
+    hideFim();
+    return;
+  }
+  fimText += payload.text;
+  fimNode.textContent = fimText.split('\n').slice(0, 3).join('\n');
+  fimNode.classList.remove('hidden');
+  editor.layoutContentWidget(fimWidget);
+}
+
+function acceptFim(): void {
+  const position = editor.getPosition();
+  const model = editor.getModel();
+  if (!position || !model || !fimText) return;
+  const text = fimText;
+  const offset = model.getOffsetAt(position);
+  acceptingFim = true;
+  editor.executeEdits('ryoko-fim', [
+    {
+      range: new monaco.Range(
+        position.lineNumber,
+        position.column,
+        position.lineNumber,
+        position.column,
+      ),
+      text,
+      forceMoveMarkers: true,
+    },
+  ]);
+  editor.setPosition(model.getPositionAt(offset + text.length));
+  acceptingFim = false;
+  hideFim();
+}
+
+const diffEditor = monaco.editor.createDiffEditor(diffEditorHost, {
+  theme: 'vs-dark',
+  automaticLayout: true,
+  readOnly: true,
+  originalEditable: false,
+  renderSideBySide: false,
+  fontSize: 13,
+  lineHeight: 20,
+  minimap: { enabled: false },
+  scrollBeyondLastLine: false,
+  padding: { top: 10 },
+});
+
 const lsp = new LspClient({
   onDiagnostics: (params) => applyDiagnostics(params),
   onState: (connection, detail) => setLspState(connection, detail),
@@ -165,6 +409,224 @@ const lsp = new LspClient({
 
 function setStatus(message: string): void {
   editorStatus.textContent = message;
+}
+
+function showBottom(panel: 'terminal' | 'debug'): void {
+  bottomPanel.classList.remove('hidden');
+  const terminal = panel === 'terminal';
+  terminalTab.classList.toggle('active', terminal);
+  debugTab.classList.toggle('active', !terminal);
+  terminalPanel.classList.toggle('hidden', !terminal);
+  debugPanel.classList.toggle('hidden', terminal);
+  if (terminal) {
+    window.requestAnimationFrame(() => fitTerminal());
+  }
+}
+
+function ensureTerminal(): Terminal {
+  if (xterm) return xterm;
+  const terminal = new Terminal({
+    convertEol: true,
+    cursorBlink: true,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: 12,
+    scrollback: 5_000,
+    theme: {
+      background: '#0b0d12',
+      foreground: '#e6e9f0',
+      cursor: '#7c9cff',
+      selectionBackground: '#21305a',
+    },
+  });
+  const fit = new FitAddon();
+  terminal.loadAddon(fit);
+  terminal.open(terminalHost);
+  terminal.onData((data) => {
+    void invoke('terminal_write', { data }).catch((error) => {
+      bottomStatus.textContent = String(error);
+    });
+  });
+  xterm = terminal;
+  fitAddon = fit;
+  new ResizeObserver(() => fitTerminal()).observe(terminalHost);
+  return terminal;
+}
+
+function fitTerminal(): void {
+  if (!xterm || !fitAddon || terminalPanel.classList.contains('hidden')) return;
+  if (terminalHost.clientWidth === 0 || terminalHost.clientHeight === 0) return;
+  fitAddon.fit();
+  void invoke('terminal_resize', { rows: xterm.rows, cols: xterm.cols }).catch(() => undefined);
+}
+
+async function startTerminal(): Promise<void> {
+  try {
+    showBottom('terminal');
+    const terminal = ensureTerminal();
+    terminal.reset();
+    terminalSessionId = null;
+    const status = await invoke<TerminalStatus>('terminal_start', { shell: null });
+    terminalSessionId = status.sessionId;
+    terminalStart.disabled = true;
+    terminalStop.disabled = false;
+    bottomStatus.textContent = 'Local shell running';
+    fitTerminal();
+    terminal.focus();
+  } catch (error) {
+    bottomStatus.textContent = `Terminal unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function stopTerminal(): Promise<void> {
+  await invoke('terminal_stop').catch(() => undefined);
+  terminalSessionId = null;
+  terminalStart.disabled = false;
+  terminalStop.disabled = true;
+  bottomStatus.textContent = 'Terminal stopped';
+}
+
+function appendDebug(line: string): void {
+  const next = `${debugLog.textContent ?? ''}${line}\n`;
+  const lines = next.split('\n');
+  debugLog.textContent = lines.slice(Math.max(0, lines.length - 300)).join('\n');
+  debugLog.scrollTop = debugLog.scrollHeight;
+}
+
+function updateDapButtons(running: boolean): void {
+  dapActive = running;
+  debugStart.disabled = running;
+  debugStop.disabled = !running;
+  debugContinue.disabled = !running;
+  debugNext.disabled = !running;
+  debugStepIn.disabled = !running;
+  debugStepOut.disabled = !running;
+  debugBreakpoint.disabled = !running;
+}
+
+async function sendDap(command: string, args?: Record<string, unknown>): Promise<void> {
+  dapSeq += 1;
+  const message = JSON.stringify({
+    seq: dapSeq,
+    type: 'request',
+    command,
+    ...(args ? { arguments: args } : {}),
+  });
+  appendDebug(`→ ${message}`);
+  await invoke('dap_send', { message });
+}
+
+async function startDebug(): Promise<void> {
+  const adapter = debugAdapter.value.trim();
+  if (!adapter) {
+    debugStatus.textContent = 'Enter a DAP adapter executable first.';
+    return;
+  }
+  try {
+    showBottom('debug');
+    const args = debugArgs.value.trim().split(/\s+/).filter(Boolean);
+    const status = await invoke<DapStatus>('dap_start', { adapter, args });
+    dapSessionId = status.sessionId;
+    dapSeq = 0;
+    updateDapButtons(true);
+    debugStatus.textContent = 'Adapter started; initializing…';
+    await sendDap('initialize', {
+      adapterID: 'ryoko',
+      clientID: 'ryoko-desktop',
+      linesStartAt1: true,
+      columnsStartAt1: true,
+      pathFormat: 'path',
+      supportsRunInTerminalRequest: false,
+    });
+  } catch (error) {
+    updateDapButtons(false);
+    debugStatus.textContent = `Debug adapter unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function launchDap(): Promise<void> {
+  const program = debugProgram.value.trim();
+  if (!program) {
+    debugStatus.textContent = 'Adapter initialized. Set a program path and restart to launch it.';
+    return;
+  }
+  const absolute = program.startsWith('/') || /^[A-Za-z]:[\\/]/.test(program);
+  try {
+    await sendDap('launch', {
+      program: absolute ? program : joinWorkspacePath(state.root, program),
+      cwd: state.root,
+      args: [],
+      stopOnEntry: false,
+    });
+    await sendDap('configurationDone');
+    debugStatus.textContent = 'Launch requested';
+  } catch (error) {
+    debugStatus.textContent = `Launch failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function handleDapMessage(payload: DapMessage): void {
+  if (dapSessionId !== null && payload.sessionId !== dapSessionId) return;
+  appendDebug(`← ${payload.message}`);
+  let value: Record<string, unknown>;
+  try {
+    value = JSON.parse(payload.message) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  if (value.type === 'event') {
+    const event = String(value.event ?? '');
+    if (event === 'initialized') {
+      debugStatus.textContent = 'Adapter initialized';
+      void launchDap();
+    } else if (event === 'stopped') {
+      const body = value.body as Record<string, unknown> | undefined;
+      if (typeof body?.threadId === 'number') dapThreadId = body.threadId;
+      debugStatus.textContent = `Stopped: ${String(body?.reason ?? 'paused')}`;
+    } else if (event === 'continued') {
+      debugStatus.textContent = 'Running';
+    } else if (event === 'terminated' || event === 'exited') {
+      debugStatus.textContent = 'Session ended';
+      updateDapButtons(false);
+    }
+  } else if (value.type === 'response' && value.success === false) {
+    debugStatus.textContent = `DAP ${String(value.command)} failed: ${String(value.message ?? '')}`;
+  }
+}
+
+async function stopDebug(): Promise<void> {
+  await invoke('dap_stop').catch(() => undefined);
+  dapSessionId = null;
+  updateDapButtons(false);
+  debugStatus.textContent = 'Debug adapter stopped';
+}
+
+async function dapStep(command: string): Promise<void> {
+  if (!dapActive) return;
+  try {
+    await sendDap(command, { threadId: dapThreadId });
+  } catch (error) {
+    debugStatus.textContent = String(error);
+  }
+}
+
+async function toggleBreakpoint(): Promise<void> {
+  const file = state.current;
+  const position = editor.getPosition();
+  if (!file || !position || !dapActive) return;
+  const absolute = joinWorkspacePath(state.root, file.path);
+  const lines = debugBreakpoints.get(absolute) ?? new Set<number>();
+  if (lines.has(position.lineNumber)) lines.delete(position.lineNumber);
+  else lines.add(position.lineNumber);
+  debugBreakpoints.set(absolute, lines);
+  try {
+    await sendDap('setBreakpoints', {
+      source: { path: absolute, name: file.path },
+      breakpoints: [...lines].sort((a, b) => a - b).map((line) => ({ line })),
+    });
+    debugStatus.textContent = `Breakpoints in ${file.path}: ${lines.size}`;
+  } catch (error) {
+    debugStatus.textContent = String(error);
+  }
 }
 
 function setLspState(connection: LspState, detail?: string): void {
@@ -226,6 +688,18 @@ async function openFolder(): Promise<void> {
     && !window.confirm('Switch workspaces and discard unsaved edits?')) {
     return;
   }
+  if (runSnapshot?.running
+    && !window.confirm('An agent run is active. Cancel it before switching workspaces?')) {
+    return;
+  }
+  if (runSnapshot?.running) {
+    try {
+      await invoke('cancel_run');
+    } catch (error) {
+      setStatus('Could not cancel the active run: ' + (error instanceof Error ? error.message : String(error)));
+      return;
+    }
+  }
   try {
     const info = await invoke<WorkspaceInfo>('open_workspace', { path: selected });
     // Open the new workspace successfully before discarding any old editor
@@ -237,10 +711,19 @@ async function openFolder(): Promise<void> {
     openFiles.clear();
     diagnostics.clear();
     state.current = null;
+    closeDiffReview();
     missionLogs = [];
     missionSnapshot = null;
     missionSelection = null;
+    missionPreferredLog = null;
     missionFocusEnabled = false;
+    runSnapshot = null;
+    runState.textContent = 'No run started.';
+    runLog.textContent = '';
+    runLog.classList.add('hidden');
+    runStart.disabled = false;
+    runPause.disabled = true;
+    runCancel.disabled = true;
     missionFocus.disabled = true;
     missionFocus.textContent = 'Focus';
     missionLogSelect.replaceChildren();
@@ -253,6 +736,9 @@ async function openFolder(): Promise<void> {
     gitHunks = null;
     hunkList.replaceChildren();
     hunkCount.textContent = '0';
+    hunkValidation.textContent = '';
+    hunkValidation.classList.add('hidden');
+    hunkValidation.classList.remove('passed', 'failed');
     hunkStage.disabled = true;
     githubQueueSummary.textContent = 'not loaded';
     githubQueueList.replaceChildren();
@@ -271,6 +757,7 @@ async function openFolder(): Promise<void> {
     void refreshAgentSessions();
     void refreshMissionLogs();
     void refreshHunks();
+    void refreshRunStatus();
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
@@ -390,18 +877,10 @@ async function refreshHunks(): Promise<void> {
       const jump = document.createElement('button');
       jump.type = 'button';
       jump.className = 'button ghost compact';
-      jump.textContent = 'Open';
-      jump.title = 'Navigate to this hunk in Monaco';
+      jump.textContent = 'Review diff';
+      jump.title = 'Open this hunk in the Monaco diff editor with inline actions';
       jump.addEventListener('click', () => {
-        void (async () => {
-          await openFile(hunk.path);
-          const match = hunk.header.match(/\+(\d+)/);
-          if (match) {
-            const line = Number(match[1]);
-            editor.revealLineInCenter(line);
-            editor.setPosition({ lineNumber: line, column: 1 });
-          }
-        })();
+        void openHunkDiff(hunk);
       });
       const preview = document.createElement('pre');
       preview.className = 'hunk-preview';
@@ -437,6 +916,273 @@ async function stageSelectedHunks(): Promise<void> {
   } catch (error) {
     setStatus('Staging denied or failed: ' + (error instanceof Error ? error.message : String(error)));
     updateHunkStageButton();
+  }
+}
+
+function clearDiffEditor(): void {
+  const modified = diffEditor.getModifiedEditor();
+  for (const widget of diffWidgets) modified.removeContentWidget(widget);
+  diffWidgets = [];
+  diffEditor.setModel(null);
+  diffOriginalModel?.dispose();
+  diffModifiedModel?.dispose();
+  diffOriginalModel = null;
+  diffModifiedModel = null;
+}
+
+function closeDiffReview(): void {
+  clearDiffEditor();
+  diffReview.classList.add('hidden');
+  if (state.current) {
+    revealEditor();
+  } else {
+    editorHost.classList.add('hidden');
+    emptyEditor.classList.remove('hidden');
+  }
+}
+
+function hunkWidget(hunk: GitHunk): monaco.editor.IContentWidget {
+  const dom = document.createElement('div');
+  dom.className = 'hunk-inline-actions';
+  const accept = document.createElement('button');
+  accept.type = 'button';
+  accept.className = 'button primary compact';
+  accept.textContent = 'Accept hunk';
+  accept.title = 'Stage only this hunk after native confirmation';
+  accept.addEventListener('click', () => void actOnHunk('accept', hunk));
+  const reject = document.createElement('button');
+  reject.type = 'button';
+  reject.className = 'button ghost compact';
+  reject.textContent = 'Reject hunk';
+  reject.title = 'Revert only this hunk from the working files after native confirmation';
+  reject.addEventListener('click', () => void actOnHunk('reject', hunk));
+  const revise = document.createElement('button');
+  revise.type = 'button';
+  revise.className = 'button ghost compact';
+  revise.textContent = 'Ask agent to revise';
+  revise.title = 'Start a new validated worktree run with this hunk as context';
+  revise.addEventListener('click', () => void actOnHunk('revise', hunk));
+  dom.append(accept, reject, revise);
+  return {
+    getId: () => `ryoko-hunk-${hunk.id}-${hunk.path}`,
+    getDomNode: () => dom,
+    getPosition: () => ({
+      position: { lineNumber: Math.max(1, hunk.new_start), column: 1 },
+      preference: [
+        monaco.editor.ContentWidgetPositionPreference.ABOVE,
+        monaco.editor.ContentWidgetPositionPreference.BELOW,
+      ],
+    }),
+  };
+}
+
+async function openHunkDiff(hunk: GitHunk): Promise<void> {
+  if (!state.root) return;
+  if ([...openFiles.values()].some((file) => file.dirty)) {
+    setStatus('Save or discard unsaved Monaco edits before reviewing hunks.');
+    return;
+  }
+  try {
+    const review = await invoke<ReviewFileContent>('read_review_file', { path: hunk.path });
+    clearDiffEditor();
+    const languageId = languageForPath(hunk.path);
+    const suffix = encodeURIComponent(hunk.path).replaceAll('%', '_');
+    diffOriginalModel = monaco.editor.createModel(
+      review.original,
+      languageId,
+      monaco.Uri.parse(`ryoko-review://original/${suffix}`),
+    );
+    diffModifiedModel = monaco.editor.createModel(
+      review.modified,
+      languageId,
+      monaco.Uri.parse(`ryoko-review://modified/${suffix}`),
+    );
+    diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
+    diffReviewPath.textContent = `${hunk.path} · hunk #${hunk.id}`;
+    diffReview.classList.remove('hidden');
+    editorHost.classList.add('hidden');
+    emptyEditor.classList.add('hidden');
+    diffEditor.layout();
+    const modified = diffEditor.getModifiedEditor();
+    for (const candidate of (gitHunks?.hunks ?? []).filter((item) => item.path === hunk.path)) {
+      const widget = hunkWidget(candidate);
+      diffWidgets.push(widget);
+      modified.addContentWidget(widget);
+    }
+    modified.revealLineInCenter(Math.max(1, hunk.new_start));
+    setStatus(`Reviewing ${hunk.path} in the diff editor`);
+  } catch (error) {
+    setStatus('Diff review failed: ' + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
+async function validateAfterHunk(): Promise<void> {
+  const image = runSandbox.value.trim();
+  hunkValidation.classList.remove('hidden', 'passed', 'failed');
+  if (!image) {
+    hunkValidation.textContent = 'Hunk applied. Set a sandbox image to run background pre-flight validation.';
+    return;
+  }
+  hunkValidation.textContent = 'Validating the current checkout in the sandbox…';
+  try {
+    const report = await invoke<ReviewValidation>('validate_review', {
+      sandboxImage: image,
+      timeoutSecs: 300,
+    });
+    hunkValidation.classList.add(report.passed ? 'passed' : 'failed');
+    hunkValidation.textContent = [
+      `${report.passed ? 'Validation passed' : 'Validation failed'} · ${report.duration_ms}ms`,
+      report.summary,
+      ...report.logs,
+    ].join('\n');
+  } catch (error) {
+    hunkValidation.classList.add('failed');
+    hunkValidation.textContent = 'Validation could not run: '
+      + (error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk): Promise<void> {
+  if (!gitHunks) return;
+  if (action === 'revise') {
+    const feedback = window.prompt(`Ask the agent to revise ${hunk.path}:`, '');
+    if (!feedback?.trim()) return;
+    if (!window.confirm(
+      'A revision starts a new isolated worktree run from the current branch. ' +
+      'The local unstaged hunk below is included as context, not applied automatically. Continue?',
+    )) return;
+    const goal = [
+      `Revise the change in ${hunk.path}.`,
+      '',
+      'Selected local hunk:',
+      hunk.preview,
+      '',
+      'Operator feedback:',
+      feedback.trim(),
+    ].join('\n');
+    runGoal.value = goal;
+    await startRun(goal);
+    return;
+  }
+  try {
+    if (action === 'accept') {
+      await invoke('stage_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      setStatus(`Accepted hunk #${hunk.id} into the Git index. No commit or merge was made.`);
+    } else {
+      await invoke('reject_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      setStatus(`Rejected hunk #${hunk.id}; only those working-file edits were reverted.`);
+    }
+    await refreshHunks();
+    const remaining = gitHunks?.hunks.find((item) => item.id === hunk.id);
+    if (remaining) await openHunkDiff(remaining);
+    else closeDiffReview();
+    await validateAfterHunk();
+  } catch (error) {
+    setStatus(`Hunk ${action} failed: ` + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
+function updateRunLabels(): void {
+  runBudgetValue.value = `$${Number(runBudget.value).toFixed(2)}`;
+  runConcurrencyValue.value = runConcurrency.value;
+}
+
+function showRunStatus(status: RunStatus): void {
+  runSnapshot = status;
+  runStart.disabled = status.running;
+  runPause.disabled = !status.running;
+  runPause.textContent = status.paused ? 'Resume' : 'Pause';
+  runCancel.disabled = !status.running;
+  if (status.running) {
+    runState.textContent = status.paused ? 'Run paused.' : 'Run active. Mission Control follows its event log.';
+  } else if (status.exitCode !== null) {
+    runState.textContent = `Last run exited with code ${status.exitCode}.`;
+  } else if (status.eventLog) {
+    runState.textContent = 'Last run finished.';
+  } else {
+    runState.textContent = 'No run started.';
+  }
+  runLog.textContent = status.logTail;
+  runLog.classList.toggle('hidden', !status.logTail);
+}
+
+async function refreshRunStatus(): Promise<void> {
+  if (!state.root || runPolling) return;
+  runPolling = true;
+  try {
+    const status = await invoke<RunStatus>('run_status');
+    showRunStatus(status);
+  } catch (error) {
+    runState.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    runPolling = false;
+  }
+}
+
+async function initializeSandbox(): Promise<void> {
+  sandboxInit.disabled = true;
+  runState.textContent = 'Inspecting project and building an offline sandbox image…';
+  try {
+    const result = await invoke<SandboxInitResult>('sandbox_init');
+    runSandbox.value = result.image;
+    runState.textContent = result.built
+      ? `Built ${result.image} from ${result.dockerfile}`
+      : `Wrote ${result.dockerfile}; image was not built`;
+  } catch (error) {
+    runState.textContent = `Sandbox initialization failed: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    sandboxInit.disabled = false;
+  }
+}
+
+async function startRun(goalOverride?: string): Promise<void> {
+  const goal = (goalOverride ?? runGoal.value).trim();
+  if (!goal) {
+    runState.textContent = 'Enter a goal before starting a run.';
+    runGoal.focus();
+    return;
+  }
+  updateRunLabels();
+  runStart.disabled = true;
+  runState.textContent = 'Starting ryoko run…';
+  try {
+    const status = await invoke<RunStatus>('start_run', {
+      goal,
+      sandboxImage: runSandbox.value.trim(),
+      budgetUsd: Number(runBudget.value),
+      maxConcurrency: Number(runConcurrency.value),
+      team: runTeam.checked,
+      agent: null,
+      attempts: null,
+      configPath: null,
+      checkCommand: null,
+    });
+    showRunStatus(status);
+    missionPreferredLog = status.eventLog;
+    await refreshMissionLogs();
+  } catch (error) {
+    runStart.disabled = false;
+    runState.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function toggleRunPause(): Promise<void> {
+  if (!runSnapshot?.running) return;
+  try {
+    const status = await invoke<RunStatus>(runSnapshot.paused ? 'resume_run' : 'pause_run');
+    showRunStatus(status);
+  } catch (error) {
+    runState.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function cancelRun(): Promise<void> {
+  if (!runSnapshot?.running) return;
+  if (!window.confirm('Cancel the active agent run? Validation child processes will be terminated.')) return;
+  try {
+    showRunStatus(await invoke<RunStatus>('cancel_run'));
+  } catch (error) {
+    runState.textContent = error instanceof Error ? error.message : String(error);
   }
 }
 
@@ -530,9 +1276,12 @@ function renderMissionOptions(): void {
     option.textContent = log.name;
     missionLogSelect.append(option);
   }
-  missionLogSelect.value = missionLogs.some((log) => log.name === previous)
-    ? previous
-    : missionLogs[0].name;
+  const preferred = missionPreferredLog && missionLogs.some((log) => log.name === missionPreferredLog)
+    ? missionPreferredLog
+    : null;
+  missionLogSelect.value = preferred
+    ?? (missionLogs.some((log) => log.name === previous) ? previous : missionLogs[0].name);
+  if (preferred) missionPreferredLog = null;
 }
 
 async function refreshMissionLogs(): Promise<void> {
@@ -689,7 +1438,15 @@ function renderMissionDetail(): void {
   missionDetail.append(heading);
 
   addDetailRow(missionDetail, 'Live status', liveStatus(task));
-  addDetailRow(missionDetail, 'Task brief', task.description);
+  const dependencies = task.dependencies.length > 0
+    ? `\nDepends on: ${task.dependencies.join(', ')}`
+    : '\nDepends on: no upstream task';
+  addDetailRow(
+    missionDetail,
+    'Prompt context (operator-visible)',
+    `${task.description}${dependencies}\nRaw model prompts are not persisted.`,
+    true,
+  );
   addDetailRow(missionDetail, 'Agent', task.agent ?? '');
   addDetailRow(missionDetail, 'Attempts', task.attempts ? String(task.attempts) : '');
   addDetailRow(missionDetail, 'Progress', task.progress ?? '');
@@ -776,6 +1533,7 @@ function renderMissionDetail(): void {
 
 async function openFile(path: string): Promise<void> {
   if (!state.root) return;
+  if (!diffReview.classList.contains('hidden')) closeDiffReview();
   try {
     setStatus(`Opening ${path}…`);
     const content = await invoke<string>('read_file', { path });
@@ -798,6 +1556,7 @@ async function openFile(path: string): Promise<void> {
       file.model.setValue(content);
     }
     state.current = file;
+    hideFim();
     editor.setModel(file.model);
     revealEditor();
     languageMode.textContent = languageId;
@@ -929,6 +1688,7 @@ async function revealProblem(problem: FlatProblem): Promise<void> {
 editor.onDidChangeModelContent(() => {
   const file = state.current;
   if (!file) return;
+  scheduleFim();
   file.version += 1;
   markDirty(file);
   const timer = changeTimers.get(file.uri);
@@ -943,6 +1703,23 @@ editor.onDidChangeModelContent(() => {
 });
 
 editor.onDidChangeCursorPosition(updateCursor);
+editor.onDidChangeCursorPosition(() => {
+  hideFim();
+  scheduleFim();
+});
+editor.onDidBlurEditorWidget(() => hideFim());
+editor.onKeyDown((event) => {
+  if (!fimText) return;
+  if (event.keyCode === monaco.KeyCode.Tab && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    acceptFim();
+  } else if (event.keyCode === monaco.KeyCode.Escape) {
+    event.preventDefault();
+    event.stopPropagation();
+    hideFim();
+  }
+});
 
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
   void saveCurrent();
@@ -968,6 +1745,22 @@ hunkRefresh.addEventListener('click', () => {
 hunkStage.addEventListener('click', () => {
   void stageSelectedHunks();
 });
+diffReviewClose.addEventListener('click', closeDiffReview);
+runBudget.addEventListener('input', updateRunLabels);
+sandboxInit.addEventListener('click', () => {
+  void initializeSandbox();
+});
+runConcurrency.addEventListener('input', updateRunLabels);
+runForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void startRun();
+});
+runPause.addEventListener('click', () => {
+  void toggleRunPause();
+});
+runCancel.addEventListener('click', () => {
+  void cancelRun();
+});
 missionFocus.addEventListener('click', () => {
   if (!missionSelection) return;
   missionFocusEnabled = !missionFocusEnabled;
@@ -983,13 +1776,68 @@ missionLogSelect.addEventListener('change', () => {
   missionSelection = null;
   void refreshMissionLogs();
 });
+toggleTerminal.addEventListener('click', () => showBottom('terminal'));
+toggleDebug.addEventListener('click', () => showBottom('debug'));
+terminalTab.addEventListener('click', () => showBottom('terminal'));
+debugTab.addEventListener('click', () => showBottom('debug'));
+bottomClose.addEventListener('click', () => bottomPanel.classList.add('hidden'));
+terminalStart.addEventListener('click', () => {
+  void startTerminal();
+});
+terminalStop.addEventListener('click', () => {
+  void stopTerminal();
+});
+debugStart.addEventListener('click', () => {
+  void startDebug();
+});
+debugStop.addEventListener('click', () => {
+  void stopDebug();
+});
+debugContinue.addEventListener('click', () => {
+  void dapStep('continue');
+});
+debugNext.addEventListener('click', () => {
+  void dapStep('next');
+});
+debugStepIn.addEventListener('click', () => {
+  void dapStep('stepIn');
+});
+debugStepOut.addEventListener('click', () => {
+  void dapStep('stepOut');
+});
+debugBreakpoint.addEventListener('click', () => {
+  void toggleBreakpoint();
+});
+
+void listen<TerminalOutput>('ryoko-terminal-output', (event) => {
+  if (terminalSessionId !== null && event.payload.sessionId !== terminalSessionId) return;
+  ensureTerminal().write(event.payload.data);
+});
+void listen<FimChunk>('ryoko-fim-chunk', (event) => applyFimChunk(event.payload));
+void listen<FimError>('ryoko-fim-error', (event) => {
+  if (event.payload.requestId !== String(fimGeneration)) return;
+  hideFim(false);
+  setStatus(`Completion unavailable: ${event.payload.message}`);
+});
+void listen<DapMessage>('ryoko-dap-message', (event) => handleDapMessage(event.payload));
+void listen<string>('ryoko-dap-log', (event) => {
+  if (event.payload) appendDebug(`[adapter] ${event.payload}`);
+});
 
 window.setInterval(() => {
-  if (state.root && document.visibilityState === 'visible') void refreshMissionLogs();
+  if (state.root && document.visibilityState === 'visible') {
+    void refreshMissionLogs();
+    void refreshRunStatus();
+  }
 }, 1200);
+
+updateRunLabels();
+refreshRunStatus();
 
 window.addEventListener('beforeunload', () => {
   void lsp.stop();
+  void invoke('terminal_stop').catch(() => undefined);
+  void invoke('dap_stop').catch(() => undefined);
 });
 
 setLspState('offline');
