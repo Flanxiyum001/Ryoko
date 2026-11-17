@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 const MAX_STREAM_BYTES: u64 = 128 * 1024;
+const MAX_BUILD_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const WORKDIR: &str = "/workspace";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub enum BuildSandboxError {
     Process(#[from] std::io::Error),
     #[error("sandboxed check timed out after {0} seconds")]
     Timeout(u64),
-    #[error("sandboxed check exceeded its 128 KiB output limit")]
+    #[error("sandboxed command exceeded its output limit")]
     OutputLimit,
 }
 
@@ -136,6 +137,50 @@ impl BuildSandbox {
         result
     }
 
+    /// Builds a generated sandbox image with an explicit Dockerfile and tag.
+    /// The context is always the canonical project root; no shell is involved.
+    pub async fn build_image(
+        &self,
+        root: &Path,
+        dockerfile: &Path,
+        tag: &str,
+        timeout: Duration,
+    ) -> Result<Output, BuildSandboxError> {
+        if self.backend == BuildBackend::UnsafeHost {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        let root = root.canonicalize()?;
+        if !root.is_dir() {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        let dockerfile = dockerfile.canonicalize()?;
+        if !dockerfile.is_file()
+            || !dockerfile.starts_with(&root)
+            || dockerfile
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        if tag.trim().is_empty()
+            || tag.starts_with('-')
+            || tag.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+        {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        let runtime = self.resolve_runtime().await?;
+        let mut process = Command::new(runtime);
+        process.args([
+            "build",
+            "--file",
+            &dockerfile.to_string_lossy(),
+            "--tag",
+            tag,
+            &root.to_string_lossy(),
+        ]);
+        run_bounded_with_limit(process, timeout, MAX_BUILD_OUTPUT_BYTES).await
+    }
+
     async fn run_host(
         &self,
         command: &str,
@@ -208,16 +253,21 @@ fn user_identity() -> Result<String, BuildSandboxError> {
     Ok("65534:65534".to_owned())
 }
 
-async fn read_bounded<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec<u8>> {
+async fn read_bounded<R: AsyncRead + Unpin>(reader: R, limit: u64) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    reader
-        .take(MAX_STREAM_BYTES + 1)
-        .read_to_end(&mut buf)
-        .await?;
+    reader.take(limit + 1).read_to_end(&mut buf).await?;
     Ok(buf)
 }
 
-async fn run_bounded(mut command: Command, timeout: Duration) -> Result<Output, BuildSandboxError> {
+async fn run_bounded(command: Command, timeout: Duration) -> Result<Output, BuildSandboxError> {
+    run_bounded_with_limit(command, timeout, MAX_STREAM_BYTES).await
+}
+
+async fn run_bounded_with_limit(
+    mut command: Command,
+    timeout: Duration,
+    limit: u64,
+) -> Result<Output, BuildSandboxError> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -233,12 +283,16 @@ async fn run_bounded(mut command: Command, timeout: Duration) -> Result<Output, 
         .take()
         .ok_or(BuildSandboxError::InvalidConfiguration)?;
     let result = tokio::time::timeout(timeout, async {
-        tokio::try_join!(child.wait(), read_bounded(stdout), read_bounded(stderr))
+        tokio::try_join!(
+            child.wait(),
+            read_bounded(stdout, limit),
+            read_bounded(stderr, limit)
+        )
     })
     .await
     .map_err(|_| BuildSandboxError::Timeout(timeout.as_secs()))??;
     let (status, stdout, stderr) = result;
-    if stdout.len() as u64 > MAX_STREAM_BYTES || stderr.len() as u64 > MAX_STREAM_BYTES {
+    if stdout.len() as u64 > limit || stderr.len() as u64 > limit {
         return Err(BuildSandboxError::OutputLimit);
     }
     Ok(Output {
