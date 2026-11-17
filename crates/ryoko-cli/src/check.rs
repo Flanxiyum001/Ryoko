@@ -9,6 +9,8 @@ use ryoko_core::CoreResult;
 use ryoko_core::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
 
+use crate::perf::{PerfConfig, PerfOutcome};
+
 /// Runs a project's own build/test command in the task's isolated worktree.
 /// Spec evidence is checked first, so a source-only proposal is rejected before
 /// any command is executed.
@@ -18,6 +20,8 @@ pub struct CommandValidator {
     policy: SpecPolicy,
     timeout: Duration,
     sandbox: BuildSandbox,
+    /// Optional benchmark regression gate. Absent unless the operator set one.
+    perf: Option<PerfConfig>,
 }
 
 impl CommandValidator {
@@ -27,7 +31,15 @@ impl CommandValidator {
             policy,
             timeout: timeout.max(Duration::from_secs(1)),
             sandbox: BuildSandbox::new(BuildBackend::Auto, None),
+            perf: None,
         }
+    }
+
+    /// Runs an additional benchmark gate in the same sandbox after the test
+    /// command and the security audit pass.
+    pub fn with_perf(mut self, perf: Option<PerfConfig>) -> Self {
+        self.perf = perf;
+        self
     }
 
     /// Isolation selection is an operator decision, never agent-controlled.
@@ -107,15 +119,26 @@ impl ChangeValidator for CommandValidator {
                     started.elapsed(),
                 ));
             }
-            Ok(ValidationReport::passed(
-                format!(
-                    "pre-flight passed: {}; security audit: {}",
-                    self.command,
-                    audit.summary()
-                ),
-                logs,
-                started.elapsed(),
-            ))
+            let mut summary = format!(
+                "pre-flight passed: {}; security audit: {}",
+                self.command,
+                audit.summary()
+            );
+            if let Some(perf) = &self.perf {
+                let outcome = crate::perf::run_gate(&self.sandbox, root, perf, self.timeout)
+                    .await
+                    .unwrap_or_else(PerfOutcome::Unusable);
+                logs.extend(outcome.describe(&perf.metric));
+                if !outcome.passed() {
+                    return Ok(ValidationReport::failed(
+                        format!("performance gate failed for `{}`", perf.metric),
+                        logs,
+                        started.elapsed(),
+                    ));
+                }
+                summary.push_str("; performance gate passed");
+            }
+            Ok(ValidationReport::passed(summary, logs, started.elapsed()))
         } else {
             let status = output
                 .status
