@@ -15,6 +15,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod event;
 pub mod iacp;
+pub mod index;
 pub mod mcp;
 pub mod memory;
 pub mod model;
@@ -26,7 +27,7 @@ pub mod workspace;
 pub use agent::{AgentRuntime, TaskContext};
 pub use agents::{
     CODEGEN_SYSTEM_PROMPT, CONTEXT_METADATA, ModelAgent, RETRY_FEEDBACK_METADATA,
-    StructuredProposal, parse_structured_proposal,
+    StructuredProposal, parse_structured_proposal, task_branch_key, task_summary_key,
 };
 pub use context::{
     CallEdge, ContextError, ContextExtractor, ContextSnippet, FileContext, Language, Symbol,
@@ -38,7 +39,11 @@ pub use iacp::{
     AuditEntry, IacpEnvelope, IacpError, IacpPayload, IacpPolicy, IacpRouter, IacpService,
     RoutedMessage,
 };
-pub use mcp::{McpApprovalGate, McpClient, McpError, McpTool, McpTransport};
+pub use index::{CallerHit, IndexError, SymbolHit, WorkspaceIndex, goal_terms};
+pub use mcp::{
+    McpApprovalGate, McpClient, McpError, McpTool, McpToolPolicy, McpToolService, McpToolbox,
+    McpTransport,
+};
 pub use memory::SharedMemory;
 pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
 pub use orchestrator::{

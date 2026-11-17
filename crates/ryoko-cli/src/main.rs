@@ -12,19 +12,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use ignore::WalkBuilder;
 use ryoko_core::{
-    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, EventSink,
-    ModelAgent, Orchestrator, OrchestratorConfig, OrchestratorEvent, ProjectContext,
-    ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory, StagedChanges, Task, TaskContext,
+    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, ContextExtractor,
+    EventSink, FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig,
+    OrchestratorEvent, ProjectContext, ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory,
+    StagedChanges, Task, TaskContext, WorkspaceIndex, goal_terms,
     team::{application_plan, engineering_execution_plan, standard_team},
+    validation::ValidationReport,
 };
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
     ProviderProfile, UsageLedger, discover_local_models,
 };
-use ryoko_sandbox::{BuildBackend, BuildSandbox, SpecPolicy};
+use ryoko_sandbox::{BuildBackend, BuildSandbox, SandboxPlan, SpecPolicy};
 use ryoko_worktree::{
-    GitWorktreeManager, HunkPatch, WorktreeDiff, WorktreeRecord, WorktreeSession, WorktreeState,
+    GitWorktreeManager, HunkPatch, IntegrationAgent, WorktreeDiff, WorktreeRecord, WorktreeSession,
+    WorktreeState,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command;
@@ -32,6 +36,7 @@ use uuid::Uuid;
 
 use crate::check::{CommandValidator, detect_check_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
+use ryoko_scripting::{PluginAgent, PluginHost, PluginLimits, PluginPolicy};
 
 /// Outline budget shared by the run and review agent contexts.
 const STRUCTURAL_CONTEXT_BYTES: usize = 5_000;
@@ -65,10 +70,18 @@ enum Commands {
     TeamPreview(TeamPreviewArgs),
     /// Ask an agent for a goal in a new isolated worktree.
     Run(RunArgs),
+    /// Validate the current checkout in the configured build sandbox.
+    Check(CheckArgs),
+    /// Build or query the cross-file symbol and caller index.
+    Index(IndexArgs),
+    /// Inspect a project and build its offline validation image.
+    Sandbox(SandboxArgs),
     /// Review published worktrees and accept, reject, or send feedback.
     Review(ReviewArgs),
     /// Operator-controlled MCP stdio discovery and tool invocation.
     Mcp(McpArgs),
+    /// Load and run a policy-approved WASI plugin (agent, linter or context).
+    Plugin(PluginArgs),
     /// Generate a safe provider configuration without writing credentials.
     Init(InitArgs),
     /// Check provider environment, models, and agent assignments offline.
@@ -102,6 +115,52 @@ enum McpCommands {
         tool: String,
         #[arg(long, default_value = "{}")]
         arguments: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct PluginArgs {
+    /// Path to the plugin manifest JSON.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Path to the plugin .wasm module.
+    #[arg(long)]
+    wasm: PathBuf,
+    /// Path to the host-owned plugin policy JSON.
+    #[arg(long)]
+    policy: PathBuf,
+    #[command(subcommand)]
+    command: PluginCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommands {
+    /// Run a linter plugin and print diagnostics as JSON.
+    Lint {
+        #[arg(long)]
+        path: String,
+        /// Source file to lint. Reads stdin when omitted.
+        #[arg(long)]
+        source_file: Option<PathBuf>,
+    },
+    /// Run a context plugin and print its outline/symbols as JSON.
+    Context {
+        #[arg(long)]
+        path: String,
+        /// Source file to analyze. Reads stdin when omitted.
+        #[arg(long)]
+        source_file: Option<PathBuf>,
+    },
+    /// Run an agent plugin and print proposed changes as JSON.
+    Agent {
+        #[arg(long)]
+        task: String,
+        /// Optional role label passed to the plugin.
+        #[arg(long, default_value = "plugin-agent")]
+        role: String,
+        /// Project root reported to the plugin.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
     },
 }
 
@@ -233,6 +292,83 @@ struct RunArgs {
     /// Number of concurrent agents in team mode, between 1 and 4.
     #[arg(long, default_value_t = 2)]
     max_concurrency: usize,
+    /// Explicitly chosen local MCP server executable for agent tool calls.
+    #[arg(long, value_name = "PATH")]
+    mcp_server: Option<PathBuf>,
+    /// MCP server launch argument. Repeat once per argument.
+    #[arg(long = "mcp-server-arg")]
+    mcp_server_args: Vec<String>,
+    /// Forward a named environment variable to the MCP server.
+    #[arg(long = "mcp-allow-env")]
+    mcp_allow_env: Vec<String>,
+    /// MCP tool the agent may request. Repeat for each allowed tool.
+    #[arg(long = "mcp-allow-tool")]
+    mcp_allow_tools: Vec<String>,
+    /// Hard cap on MCP tool calls for the whole run.
+    #[arg(long = "mcp-max-calls", default_value_t = 50)]
+    mcp_max_calls: u64,
+}
+
+#[derive(Debug, Args)]
+struct SandboxArgs {
+    #[command(subcommand)]
+    command: SandboxCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum SandboxCommands {
+    /// Generate and build an offline OCI image for this checkout.
+    Init(SandboxInitArgs),
+}
+
+#[derive(Debug, Args)]
+struct SandboxInitArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Image tag to build. Defaults to ryoko-sandbox:latest.
+    #[arg(long)]
+    tag: Option<String>,
+    /// Dockerfile path relative to the repository.
+    #[arg(long)]
+    dockerfile: Option<PathBuf>,
+    /// OCI backend; auto tries Docker then Podman.
+    #[arg(long, value_enum, default_value = "auto")]
+    backend: SandboxBackendArg,
+    /// Only write the Dockerfile; do not build it.
+    #[arg(long)]
+    no_build: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CheckArgs {
+    /// Project checkout whose current changes should be validated.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Build/test command run inside the sandbox. Auto-detected when omitted.
+    #[arg(long)]
+    check_command: Option<String>,
+    #[arg(long, default_value_t = 300)]
+    timeout_secs: u64,
+    #[command(flatten)]
+    isolation: IsolationArgs,
+    /// Print one machine-readable JSON report on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct IndexArgs {
+    /// Project checkout to index.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Query one symbol after refreshing the index.
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Print the result as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -459,8 +595,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Ask(args) => ask(args).await,
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(args).await,
+        Commands::Check(args) => check_worktree(args).await,
+        Commands::Index(args) => index_workspace(args).await,
+        Commands::Sandbox(args) => sandbox(args).await,
         Commands::Review(args) => review(args).await,
         Commands::Mcp(args) => mcp_command(args).await,
+        Commands::Plugin(args) => plugin_command(args).await,
         Commands::Init(args) => init(args).await,
         Commands::Doctor(args) => doctor(args).await,
         Commands::Sessions(args) => sessions(args).await,
@@ -522,6 +662,94 @@ async fn mcp_command(args: McpArgs) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+async fn plugin_command(args: PluginArgs) -> Result<(), Box<dyn Error>> {
+    let policy_text = std::fs::read_to_string(&args.policy)?;
+    let policy = PluginPolicy::from_json(&policy_text)
+        .map_err(|error| cli_error(format!("invalid plugin policy: {error}")))?;
+    let host = PluginHost::new(PluginLimits::default())
+        .map_err(|error| cli_error(format!("could not create plugin host: {error}")))?;
+    let plugin = host
+        .load(&args.manifest, &args.wasm, &policy)
+        .await
+        .map_err(|error| cli_error(format!("could not load plugin: {error}")))?;
+    eprintln!(
+        "Loaded plugin {} ({})",
+        plugin.manifest().id,
+        plugin.manifest().kind.label()
+    );
+    match args.command {
+        PluginCommands::Lint { path, source_file } => {
+            let source = read_plugin_source(source_file.as_deref())?;
+            let diagnostics = plugin
+                .lint(&path, &source)
+                .await
+                .map_err(|error| cli_error(format!("plugin lint failed: {error}")))?;
+            println!("{}", serde_json::to_string_pretty(&diagnostics)?);
+        }
+        PluginCommands::Context { path, source_file } => {
+            let source = read_plugin_source(source_file.as_deref())?;
+            let context = plugin
+                .context(&path, &source)
+                .await
+                .map_err(|error| cli_error(format!("plugin context failed: {error}")))?;
+            println!("{}", serde_json::to_string_pretty(&context)?);
+        }
+        PluginCommands::Agent { task, role, repo } => {
+            let root = canonical_root(&repo)?;
+            let plugin = std::sync::Arc::new(plugin);
+            let agent = PluginAgent::new(
+                plugin,
+                ryoko_core::AgentRole::Custom(role.clone()),
+                role.clone(),
+                "WASI plugin agent",
+            )
+            .map_err(|error| cli_error(format!("could not create plugin agent: {error}")))?;
+            let ctx = ryoko_core::TaskContext {
+                project: ryoko_core::ProjectContext {
+                    project_root: root.display().to_string(),
+                    active_branch: current_branch(&root).await,
+                    shared_memory: std::collections::HashMap::new(),
+                },
+                memory: ryoko_core::SharedMemory::new(),
+                models: std::sync::Arc::new(ryoko_models::ModelRouter::new("mock")),
+                validator: std::sync::Arc::new(ryoko_core::AllowAllValidator),
+                workspace: None,
+                mcp: None,
+                events: ryoko_core::EventSink::default(),
+            };
+            let task = ryoko_core::Task::new(task, ryoko_core::AgentRole::Custom(role));
+            let result = agent.execute_task(ctx, task).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+    }
+    Ok(())
+}
+
+fn read_plugin_source(source_file: Option<&Path>) -> Result<String, Box<dyn Error>> {
+    match source_file {
+        Some(path) => {
+            let metadata = std::fs::metadata(path)?;
+            if metadata.len() > 512 * 1024 {
+                return Err(cli_error("source file exceeds the 512 KiB limit"));
+            }
+            let text = std::fs::read_to_string(path)?;
+            if text.len() > 512 * 1024 {
+                return Err(cli_error("source file exceeds the 512 KiB limit"));
+            }
+            Ok(text)
+        }
+        None => {
+            use std::io::Read;
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            if input.len() > 512 * 1024 {
+                return Err(cli_error("stdin exceeds the 512 KiB limit"));
+            }
+            Ok(input)
+        }
+    }
 }
 
 async fn init(args: InitArgs) -> Result<(), Box<dyn Error>> {
@@ -788,6 +1016,325 @@ async fn team_preview(args: TeamPreviewArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn safe_changed_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('-')
+        && !path.contains('\0')
+        && !path.contains(':')
+        && !path.contains('\\')
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+async fn changed_paths(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut paths: Vec<String> = Vec::new();
+    for args in [
+        vec!["diff", "--name-only", "-z", "HEAD", "--"],
+        vec!["ls-files", "--others", "--exclude-standard", "-z", "--"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(cli_error("cannot enumerate changed files with Git"));
+        }
+        for path in String::from_utf8_lossy(&output.stdout).split('\0') {
+            if path.is_empty() || paths.iter().any(|seen| seen.as_str() == path) {
+                continue;
+            }
+            if !safe_changed_path(path) {
+                return Err(cli_error(format!("unsafe changed path: {path}")));
+            }
+            paths.push(path.to_owned());
+        }
+    }
+    paths.truncate(500);
+    Ok(paths)
+}
+
+async fn sandbox(args: SandboxArgs) -> Result<(), Box<dyn Error>> {
+    match args.command {
+        SandboxCommands::Init(args) => sandbox_init(args).await,
+    }
+}
+
+async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let plan = SandboxPlan::inspect(&root, args.tag, args.dockerfile)?;
+    plan.write()?;
+    let backend = match args.backend {
+        SandboxBackendArg::Auto => BuildBackend::Auto,
+        SandboxBackendArg::Docker => BuildBackend::Docker,
+        SandboxBackendArg::Podman => BuildBackend::Podman,
+    };
+    if !args.no_build {
+        plan.build(backend).await?;
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ecosystem": plan.ecosystem,
+                "image": plan.image,
+                "dockerfile": plan.dockerfile,
+                "built": !args.no_build,
+            })
+        );
+    } else {
+        println!(
+            "Wrote {} for a {} project.",
+            plan.dockerfile.display(),
+            plan.ecosystem.label()
+        );
+        if args.no_build {
+            println!("Skipped the image build; pass it to --sandbox-image after building it.");
+        } else {
+            println!(
+                "Built {} and cached its dependencies for offline validation.",
+                plan.image
+            );
+        }
+        println!("Use: --sandbox-image {}", plan.image);
+    }
+    Ok(())
+}
+
+async fn check_worktree(args: CheckArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let command = resolve_check_command(&root, args.check_command.as_deref())?;
+    let sandbox = resolve_sandbox(&args.isolation)?;
+    let paths = changed_paths(&root).await?;
+    if paths.is_empty() {
+        return Err(cli_error("no changed files to validate"));
+    }
+    let mut files = Vec::new();
+    for path in paths {
+        let absolute = root.join(&path);
+        let Ok(metadata) = tokio::fs::symlink_metadata(&absolute).await else {
+            continue;
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > 2 * 1024 * 1024
+        {
+            continue;
+        }
+        let Ok(real) = tokio::fs::canonicalize(&absolute).await else {
+            continue;
+        };
+        if !real.starts_with(&root) {
+            continue;
+        }
+        let Ok(content) = tokio::fs::read_to_string(&real).await else {
+            continue;
+        };
+        files.push(ProposedChange::new(path, content));
+    }
+    if files.is_empty() {
+        return Err(cli_error("no readable changed files to validate"));
+    }
+    let changes = StagedChanges::new(Uuid::new_v4(), files).with_root(&root);
+    let started = Instant::now();
+    let report = match SpecPolicy::default().inspect(&changes) {
+        Err(error) => ValidationReport::failed(
+            "spec check failed",
+            vec![error.to_string()],
+            started.elapsed(),
+        ),
+        Ok(evidence) => match sandbox
+            .run(
+                &command,
+                &root,
+                Duration::from_secs(args.timeout_secs.max(1)),
+            )
+            .await
+        {
+            Ok(output) => {
+                let mut logs = crate::check::summarize_output(&output);
+                logs.insert(
+                    0,
+                    format!(
+                        "spec test files: {}; command: {}",
+                        evidence.test_files.join(", "),
+                        command
+                    ),
+                );
+                if output.status.success() {
+                    ValidationReport::passed(
+                        format!("pre-flight passed: {command}"),
+                        logs,
+                        started.elapsed(),
+                    )
+                } else {
+                    let status = output
+                        .status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "signal".to_owned());
+                    ValidationReport::failed(
+                        format!("pre-flight failed: {command} (exit {status})"),
+                        logs,
+                        started.elapsed(),
+                    )
+                }
+            }
+            Err(error) => ValidationReport::failed(
+                "pre-flight check could not run",
+                vec![error.to_string()],
+                started.elapsed(),
+            ),
+        },
+    };
+    if args.json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else if report.passed {
+        println!("{}", report.summary);
+        for line in &report.logs {
+            println!("  {line}");
+        }
+    } else {
+        eprintln!("{}", report.summary);
+        for line in &report.logs {
+            eprintln!("  {line}");
+        }
+    }
+    Ok(())
+}
+
+fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
+    let mut extractor = ContextExtractor::new()?;
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
+        .follow_links(false)
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | ".ryoko" | "target" | "node_modules" | "dist")
+                )
+        });
+    let mut files = Vec::new();
+    for entry in builder.build().filter_map(Result::ok) {
+        if files.len() >= 2_000 {
+            break;
+        }
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        let path = relative.to_string_lossy().replace('\\', "/");
+        if Language::from_path(&path).is_none() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.len() > 512 * 1024 {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if let Ok(context) = extractor.extract(path, &source) {
+            files.push(context);
+        }
+    }
+    Ok(files)
+}
+
+fn symbol_index_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let state = root.join(".ryoko/state");
+    for directory in [root.join(".ryoko"), state.clone()] {
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(cli_error("symbol index directory must not be a symlink"));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(cli_error("symbol index parent is not a directory"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&directory)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let state = state.canonicalize()?;
+    if !state.starts_with(root) {
+        return Err(cli_error("symbol index directory escapes the repository"));
+    }
+    let path = state.join("symbols.sqlite3");
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(cli_error("symbol index must not be a symlink"));
+    }
+    Ok(path)
+}
+
+fn build_symbol_index(root: &Path) -> Result<(WorkspaceIndex, usize), Box<dyn Error>> {
+    let files = workspace_symbols(root)?;
+    let index_path = symbol_index_path(root)?;
+    let mut index = WorkspaceIndex::open(&index_path)?;
+    let count = index.rebuild(files.iter())?;
+    Ok((index, count))
+}
+
+fn indexed_context(root: &Path, goal: &str) -> Result<String, Box<dyn Error>> {
+    let terms = goal_terms(goal);
+    if terms.is_empty() {
+        return Ok(String::new());
+    }
+    let (index, _) = build_symbol_index(root)?;
+    Ok(index.context_for_terms(&terms, 6_000)?)
+}
+
+async fn index_workspace(args: IndexArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let (index, count) = build_symbol_index(&root)?;
+    if let Some(symbol) = args.symbol.as_deref() {
+        let hits = index.symbol(symbol, 20)?;
+        if args.json {
+            println!("{}", serde_json::to_string(&hits)?);
+        } else if hits.is_empty() {
+            println!("No indexed symbol named `{symbol}`.");
+        } else {
+            for hit in hits {
+                println!(
+                    "{} {} at {}:{}",
+                    hit.kind, hit.signature, hit.path, hit.start_line
+                );
+                for caller in hit.callers {
+                    println!(
+                        "  caller: {} at {}:{}",
+                        caller.caller, caller.path, caller.line
+                    );
+                }
+            }
+        }
+    } else if args.json {
+        println!("{}", serde_json::json!({"files": count}));
+    } else {
+        println!("Indexed {count} source file(s) into .ryoko/state/symbols.sqlite3");
+    }
+    Ok(())
+}
+
 async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     if args.goal.trim().is_empty() {
         return Err(cli_error("goal cannot be empty"));
@@ -812,19 +1359,25 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         standard_team()
             .into_iter()
             .filter(|member| {
-                matches!(&member.role, AgentRole::QaEngineer)
-                    || matches!(&member.role, AgentRole::Custom(name)
-                        if matches!(name.as_str(), "software-architect" | "backend-engineer" | "security-engineer"))
+                matches!(
+                    &member.role,
+                    AgentRole::QaEngineer | AgentRole::Integrator
+                ) || matches!(&member.role, AgentRole::Custom(name)
+                    if matches!(name.as_str(), "software-architect" | "backend-engineer" | "security-engineer"))
             })
             .map(|member| {
-                Arc::new(
-                    ModelAgent::new(AgentIdentity::new(
-                        member.role.clone(),
-                        member.role.label(),
-                        member.instructions,
-                    ))
-                    .with_model(model.clone()),
-                ) as Arc<dyn AgentRuntime>
+                let identity = AgentIdentity::new(
+                    member.role.clone(),
+                    member.role.label(),
+                    member.instructions,
+                );
+                if member.role == AgentRole::Integrator {
+                    Arc::new(IntegrationAgent::new(identity).with_model(model.clone()))
+                        as Arc<dyn AgentRuntime>
+                } else {
+                    Arc::new(ModelAgent::new(identity).with_model(model.clone()))
+                        as Arc<dyn AgentRuntime>
+                }
             })
             .collect()
     } else {
@@ -851,15 +1404,28 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         active_branch: current_branch(&root).await,
         shared_memory: HashMap::new(),
     };
+    let goal = args.goal.clone();
     let mut tasks = if args.team {
-        engineering_execution_plan(&args.goal)
+        engineering_execution_plan(&goal)
     } else {
-        vec![Task::new(args.goal, AgentRole::SeniorDeveloper)]
+        vec![Task::new(goal.clone(), AgentRole::SeniorDeveloper)]
     };
     let project_outline = project_brief(&root).await;
+    let symbol_context = match indexed_context(&root, &goal) {
+        Ok(context) => context,
+        Err(error) => {
+            eprintln!("warning: workspace symbol index unavailable: {error}");
+            String::new()
+        }
+    };
+    let project_context = if symbol_context.is_empty() {
+        project_outline
+    } else {
+        format!("{project_outline}\n\n{symbol_context}")
+    };
     for task in &mut tasks {
         task.metadata
-            .insert(CONTEXT_METADATA.to_owned(), project_outline.clone());
+            .insert(CONTEXT_METADATA.to_owned(), project_context.clone());
     }
     println!(
         "Creating isolated worktrees for {} agent task(s)...",
@@ -885,12 +1451,37 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     });
+    let mcp = match &args.mcp_server {
+        Some(server) => Some(
+            mcp::connect_toolbox(
+                server,
+                &args.mcp_server_args,
+                &args.mcp_allow_env,
+                &args.mcp_allow_tools,
+                args.mcp_max_calls,
+                router.ledger().clone(),
+            )
+            .await?,
+        ),
+        None => {
+            if !args.mcp_allow_tools.is_empty()
+                || !args.mcp_server_args.is_empty()
+                || !args.mcp_allow_env.is_empty()
+            {
+                return Err(cli_error(
+                    "--mcp-allow-tool/--mcp-server-arg/--mcp-allow-env require --mcp-server",
+                ));
+            }
+            None
+        }
+    };
     let orchestrator = Orchestrator::new(Arc::new(manager), validator, router)
         .with_config(OrchestratorConfig {
             max_concurrency: if args.team { args.max_concurrency } else { 1 },
             max_attempts: args.attempts.max(1),
         })
-        .with_events(events);
+        .with_events(events)
+        .with_mcp(mcp);
     let report = orchestrator.run(tasks, agents, project).await?;
     drop(orchestrator);
     let _ = validation_logs.await;
@@ -1292,6 +1883,7 @@ async fn revise(
             models: router.clone(),
             validator: validator.clone(),
             workspace: Some(lease.clone()),
+            mcp: None,
             events: EventSink::default(),
         };
         let result = agent
@@ -1696,6 +2288,23 @@ mod tests {
     }
 
     #[test]
+    fn check_paths_stay_relative_and_inside_the_checkout() {
+        assert!(safe_changed_path("src/main.rs"));
+        assert!(safe_changed_path("docs/guide.md"));
+        for path in [
+            "",
+            "../escape.rs",
+            "/etc/passwd",
+            "src/../../escape.rs",
+            "C:relative.txt",
+            "--output",
+            "src/\0main.rs",
+        ] {
+            assert!(!safe_changed_path(path), "accepted {path:?}");
+        }
+    }
+
+    #[test]
     fn parses_only_distinct_in_range_hunks() {
         assert_eq!(parse_hunk_ids("1, 3", 4).unwrap(), vec![1, 3]);
         assert!(parse_hunk_ids("0", 4).is_err());
@@ -1748,5 +2357,28 @@ mod tests {
         assert!(safe.starts_with(&root));
         assert!(resolve_event_log(&root, Path::new("../outside.jsonl")).is_err());
         assert!(resolve_event_log(&root, Path::new("/tmp/outside.jsonl")).is_err());
+    }
+
+    #[test]
+    fn symbol_index_path_stays_under_the_repository() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = symbol_index_path(&root).unwrap();
+        assert!(path.starts_with(root.join(".ryoko/state")));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("symbols.sqlite3")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symbol_index_path_rejects_symlinked_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(".ryoko")).unwrap();
+        assert!(symbol_index_path(&root).is_err());
     }
 }

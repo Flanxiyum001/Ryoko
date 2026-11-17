@@ -9,6 +9,7 @@
 
 pub mod git;
 pub mod hunks;
+pub mod integration;
 
 pub use git::{
     GitWorktreeManager, MergeReceipt, WorktreeDiff, WorktreeError, WorktreePullRequest,
@@ -16,3 +17,4 @@ pub use git::{
 };
 
 pub use hunks::{HunkPatch, ReviewHunk};
+pub use integration::IntegrationAgent;
