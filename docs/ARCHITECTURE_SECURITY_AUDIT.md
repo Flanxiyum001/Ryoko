@@ -12,7 +12,7 @@ Source review of all eight Rust workspace crates, the CI workflow, the model ada
 - `ryoko-sandbox`: Wasmtime harness with WASI imports backed by an empty context, no host preopens, and fuel/epoch/memory limits. This **does not** prove the generated application itself is safe or working.
 - `ryoko-cli`: provider checks, one-turn model requests, deterministic team plans and read-only multi-agent previews.
 - `ryoko-native`: `tower-lsp` server over stdio with a diagnostic publisher, code lenses, quick fixes and editor commands. It does not yet connect to a running multi-agent session by default.
-- `ryoko-vfs`: thread-safe incremental document store used by the language server; `ryoko-scripting` remains a placeholder. No operational desktop UI or general tool-execution layer exists.
+- `ryoko-vfs`: thread-safe incremental document store used by the language server. `ryoko-scripting` now hosts policy-approved WASI command modules for agent, linter and context extensions; there is no plugin marketplace, signing or host-callback API. No operational desktop UI or general shell tool-execution layer exists.
 
 ### Intended control flow
 
@@ -33,7 +33,7 @@ Each worker uses `provider/model` from the model router; role contracts must not
 | RY-SEC-07 | Medium | Cost / quota | Usage ledger sees usage after completion; parallel requests can overrun a shared budget and local providers may omit usage. | Open: reservation-based admission, max output and per-role quotas, cancellation and cost controls. |
 | RY-SEC-08 | Medium | AI output correctness | Providers that do not return well-formed or complete tool-call fragments can create partially decoded results. | Open: strict per-provider streaming conformance and tool schema validation before dispatch. |
 | RY-SEC-09 | Medium | Secrets management | There is no OS keychain/secure desktop settings UI. Environment variables are better than committing keys but remain visible to the owning process and its children. | Open: OS credential store + redaction + access compartmentalization. |
-| RY-SEC-10 | Medium | Product readiness | Desktop shell, editor, virtual filesystem, scripting and native host are not implemented in this snapshot. | Open: staged implementation with explicit user journeys and real integration tests. |
+| RY-SEC-10 | Medium | Product readiness | Desktop shell, editor, virtual filesystem and native host are not implemented in this snapshot. The WASI scripting host is implemented but lacks signing, a plugin SDK and marketplace controls. | Open: staged implementation with explicit user journeys and real integration tests. |
 
 ## Design decisions for the IDE
 

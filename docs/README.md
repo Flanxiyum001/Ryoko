@@ -9,6 +9,8 @@
 | [architecture/EDITOR_ARCHITECTURE.md](architecture/EDITOR_ARCHITECTURE.md) | Monaco, documents, LSP, diagnostics |
 | [architecture/AGENT_RUNTIME.md](architecture/AGENT_RUNTIME.md) | Agent lifecycle, execution, review |
 | [architecture/CONTEXT_ENGINE.md](architecture/CONTEXT_ENGINE.md) | Indexing, retrieval, project memory |
+| [architecture/MCP_CLIENT.md](architecture/MCP_CLIENT.md) | MCP transport, approval, allowlists and agent tool loop |
+| [architecture/PLUGINS.md](architecture/PLUGINS.md) | WASI extension ABI, policy and isolation |
 | [protocols/IACP_V2.md](protocols/IACP_V2.md) | Inter-agent protocol evolution |
 | [security/THREAT_MODEL.md](security/THREAT_MODEL.md) | Assets, trust boundaries, threats |
 | [security/EXECUTION_SANDBOX.md](security/EXECUTION_SANDBOX.md) | Restricted project execution |

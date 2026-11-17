@@ -20,7 +20,8 @@ runtime. Where a mitigation is not implemented it is labelled planned.
 | Frontend → backend | commands, UI state | command handlers, policy |
 | Project content → prompts | README, comments, issues, build logs, web pages | policy engine |
 | Backend → OS | runner requests | restricted runner |
-| Third-party plugin → host | WASM module | host functions, quotas |
+| Third-party plugin → host | WASI module, stdout JSON | manifest/policy allowlist, typed validation, quotas |
+| External MCP server → agent | tool descriptions and results | allowlist, per-call human approval, size and call caps, run ledger |
 | GitHub webhook → broker | request body | HMAC-verified events |
 
 ## Threats and mitigations
@@ -64,8 +65,10 @@ secret-shaped content.
 ### Supply chain
 
 A dependency or plugin executes code at build or load time. Mitigations: locked
-dependencies, review of new dependencies, no silent plugin install, plugin host
-with explicit imports and quotas.
+dependencies, review of new dependencies, no silent plugin install, and a plugin
+host that exposes only WASI preview 1 with no preopens, environment or network,
+plus manifest/policy allowlists and fuel, time, memory and output quotas. Module
+compilation itself is not interruptible, so only reviewed wasm files are loaded.
 
 ### Provider and network abuse
 

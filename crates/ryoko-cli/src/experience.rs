@@ -233,7 +233,7 @@ mod tests {
             r#"{"default_model":"local/primary","role_models":{"ui-ux-designer":"cloud/designer"}}"#,
         ).unwrap();
         let choices = settings.check_catalog(&catalog(), None).unwrap();
-        assert_eq!(choices.len(), 8);
+        assert_eq!(choices.len(), 9);
         assert_eq!(
             choices
                 .iter()

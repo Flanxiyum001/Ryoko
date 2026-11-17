@@ -17,10 +17,11 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::{AgentRuntime, TaskContext};
-use crate::agents::RETRY_FEEDBACK_METADATA;
+use crate::agents::{RETRY_FEEDBACK_METADATA, task_branch_key, task_summary_key};
 use crate::diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 use crate::error::{CoreError, CoreResult};
-use crate::event::{EventSink, OrchestratorEvent};
+use crate::event::{AgentPhase, EventSink, OrchestratorEvent, TaskFailureStage};
+use crate::mcp::McpToolService;
 use crate::memory::SharedMemory;
 use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
@@ -113,6 +114,8 @@ pub struct Orchestrator {
     events: EventSink,
     /// Optional editor channel; absent when no editor host is attached.
     diagnostic_sink: Option<Arc<dyn TaskDiagnosticSink>>,
+    /// Optional host-approved external tool surface shared by every model agent.
+    mcp: Option<Arc<dyn McpToolService>>,
 }
 
 impl Orchestrator {
@@ -128,6 +131,7 @@ impl Orchestrator {
             config: OrchestratorConfig::default(),
             events: EventSink::default(),
             diagnostic_sink: None,
+            mcp: None,
         }
     }
 
@@ -138,6 +142,13 @@ impl Orchestrator {
 
     pub fn with_events(mut self, events: EventSink) -> Self {
         self.events = events;
+        self
+    }
+
+    /// Attaches a host-approved MCP toolbox to every model agent. Approval,
+    /// allowlisting and budget checks remain inside the toolbox.
+    pub fn with_mcp(mut self, mcp: Option<Arc<dyn McpToolService>>) -> Self {
+        self.mcp = mcp;
         self
     }
 
@@ -204,6 +215,7 @@ impl Orchestrator {
                 models: self.models.clone(),
                 validator: self.validator.clone(),
                 workspace: None,
+                mcp: self.mcp.clone(),
                 events: self.events.clone(),
             };
             let agent = registry[&task.assigned_to].clone();
@@ -466,6 +478,10 @@ async fn execute_task(
             agent: agent.identity().name.clone(),
             attempt,
         });
+        events.emit(OrchestratorEvent::TaskPhase {
+            task_id: task.id,
+            phase: AgentPhase::Thinking,
+        });
 
         let lease = match workspace_provider.allocate(task, &agent.identity()).await {
             Ok(lease) => lease,
@@ -482,6 +498,7 @@ async fn execute_task(
                     error: last_error.clone(),
                     attempts: attempt,
                     retrying: attempt < max_attempts,
+                    stage: TaskFailureStage::Workspace,
                 });
                 continue;
             }
@@ -534,6 +551,7 @@ async fn execute_task(
                 error: last_error.clone(),
                 attempts: attempt,
                 retrying: attempt < max_attempts,
+                stage: TaskFailureStage::Agent,
             });
             continue;
         }
@@ -548,9 +566,21 @@ async fn execute_task(
             last_error = reason.clone();
             feedback = Some(reason);
             failure = Some((FailureStage::Agent, last_error.clone()));
+            events.emit(OrchestratorEvent::TaskFailed {
+                task_id: task.id,
+                role: task.assigned_to.clone(),
+                error: last_error.clone(),
+                attempts: attempt,
+                retrying: attempt < max_attempts,
+                stage: TaskFailureStage::Agent,
+            });
             continue;
         }
 
+        events.emit(OrchestratorEvent::TaskPhase {
+            task_id: task.id,
+            phase: AgentPhase::Coding,
+        });
         if let Err(err) = lease.apply(&result.changes).await {
             let reason = err.to_string();
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
@@ -558,9 +588,21 @@ async fn execute_task(
             last_error = reason.clone();
             feedback = Some(reason);
             failure = Some((FailureStage::Staging, last_error.clone()));
+            events.emit(OrchestratorEvent::TaskFailed {
+                task_id: task.id,
+                role: task.assigned_to.clone(),
+                error: last_error.clone(),
+                attempts: attempt,
+                retrying: attempt < max_attempts,
+                stage: TaskFailureStage::Staging,
+            });
             continue;
         }
 
+        events.emit(OrchestratorEvent::TaskPhase {
+            task_id: task.id,
+            phase: AgentPhase::Testing,
+        });
         events.emit(OrchestratorEvent::ValidationStarted {
             task_id: task.id,
             file_count: result.changes.len(),
@@ -596,15 +638,26 @@ async fn execute_task(
             last_error = reason;
             feedback = Some(next);
             failure = Some((FailureStage::Validation, report.summary.clone()));
+            events.emit(OrchestratorEvent::TaskFailed {
+                task_id: task.id,
+                role: task.assigned_to.clone(),
+                error: last_error.clone(),
+                attempts: attempt,
+                retrying: attempt < max_attempts,
+                stage: TaskFailureStage::Validation,
+            });
             continue;
         }
 
         match lease.publish(task, &result.output).await {
             Ok(pr) => {
                 context.memory.insert(
-                    format!("ryoko.task.{}.summary", task.id),
+                    task_summary_key(task.id),
                     result.output.chars().take(2_000).collect::<String>(),
                 );
+                context
+                    .memory
+                    .insert(task_branch_key(task.id), pr.branch.clone());
                 events.emit(OrchestratorEvent::PullRequestOpened {
                     task_id: task.id,
                     pr_id: pr.id.clone(),
@@ -648,6 +701,14 @@ async fn execute_task(
                 last_error = reason.clone();
                 feedback = Some(reason);
                 failure = Some((FailureStage::Publish, err.to_string()));
+                events.emit(OrchestratorEvent::TaskFailed {
+                    task_id: task.id,
+                    role: task.assigned_to.clone(),
+                    error: last_error.clone(),
+                    attempts: attempt,
+                    retrying: attempt < max_attempts,
+                    stage: TaskFailureStage::Publish,
+                });
             }
         }
     }
@@ -1419,6 +1480,52 @@ mod tests {
         async fn discard(&self) -> CoreResult<()> {
             self.inner.discard().await
         }
+    }
+
+    #[tokio::test]
+    async fn exhausted_validation_emits_live_phases_and_a_specific_failure() {
+        let events = EventSink::default();
+        let mut receiver = events.subscribe();
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(DenyValidator), router())
+            .with_events(events)
+            .with_config(OrchestratorConfig {
+                max_concurrency: 1,
+                max_attempts: 1,
+            });
+
+        let report = orchestrator
+            .run(
+                vec![Task::new("generate a module", AgentRole::SeniorDeveloper)],
+                vec![Arc::new(SleepAgent {
+                    identity: dev(),
+                    delay: Duration::ZERO,
+                })],
+                demo_project(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.failed.len(), 1);
+
+        let mut phases = Vec::new();
+        let mut failures = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                OrchestratorEvent::TaskPhase { phase, .. } => phases.push(phase),
+                OrchestratorEvent::TaskFailed {
+                    stage, retrying, ..
+                } => failures.push((stage, retrying)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            phases,
+            vec![
+                AgentPhase::Thinking,
+                AgentPhase::Coding,
+                AgentPhase::Testing
+            ]
+        );
+        assert_eq!(failures, vec![(TaskFailureStage::Validation, false)]);
     }
 
     fn demo_project() -> ProjectContext {

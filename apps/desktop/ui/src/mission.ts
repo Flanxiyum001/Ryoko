@@ -8,6 +8,9 @@ export interface MissionEvent {
   dependencies?: string[];
   agent?: string;
   attempt?: number;
+  phase?: string;
+  stage?: string;
+  at_ms?: number;
   message?: string;
   requests?: number;
   input_tokens?: number;
@@ -41,10 +44,21 @@ export type MissionStatus =
   | 'failed'
   | 'skipped';
 
+export type MissionPhase = 'thinking' | 'coding' | 'testing' | 'waiting';
+
+export interface MissionActivity {
+  atMs: number;
+  attempt?: number;
+  kind: 'phase' | 'progress' | 'validation' | 'pull-request' | 'result';
+  label: string;
+  detail?: string;
+}
+
 export interface MissionAttempt {
   number: number;
   agent?: string;
   status: MissionStatus;
+  phase?: MissionPhase;
   progress?: string;
   validation?: {
     passed: boolean;
@@ -64,8 +78,11 @@ export interface MissionTask {
   status: MissionStatus;
   agent?: string;
   attempt?: number;
+  phase?: MissionPhase;
+  failureStage?: string;
   progress?: string;
   history?: MissionAttempt[];
+  activity?: MissionActivity[];
   usage?: {
     requests: number;
     inputTokens: number;
@@ -88,7 +105,41 @@ export interface MissionSnapshot {
   runId?: string;
   taskCount: number;
   tasks: MissionTask[];
+  totals: { requests: number; inputTokens: number; outputTokens: number; ledgerCostUsd: number };
   finished?: { succeeded: number; failed: number; skipped: number; durationMs: number };
+}
+
+export type LiveStatus =
+  | 'Waiting'
+  | 'Thinking'
+  | 'Coding'
+  | 'Testing'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Skipped';
+
+export function liveStatus(task: MissionTask): LiveStatus {
+  if (task.status === 'succeeded') return 'Succeeded';
+  if (task.status === 'failed') return 'Failed';
+  if (task.status === 'skipped') return 'Skipped';
+  if (task.status === 'scheduled') return 'Waiting';
+  if (task.status === 'validating' || task.phase === 'testing') return 'Testing';
+  if (task.status === 'retrying') return 'Thinking';
+  if (task.phase === 'coding') return 'Coding';
+  if (task.phase === 'waiting') return 'Waiting';
+  return 'Thinking';
+}
+
+export function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
+export function formatLedgerCost(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '$0.0000';
+  return `$${value.toFixed(4)}`;
 }
 
 export function parseMissionLog(text: string): MissionEvent[] {
@@ -151,11 +202,30 @@ function recordAttempt(task: MissionTask, number?: number): MissionAttempt {
   return attempt;
 }
 
+function recordActivity(
+  task: MissionTask,
+  event: MissionEvent,
+  kind: MissionActivity['kind'],
+  label: string,
+  detail?: string,
+): void {
+  task.activity ??= [];
+  task.activity.push({
+    atMs: typeof event.at_ms === 'number' ? event.at_ms : 0,
+    attempt: event.attempt,
+    kind,
+    label,
+    detail: detail ? detail.slice(0, 500) : undefined,
+  });
+  if (task.activity.length > 80) task.activity.splice(0, task.activity.length - 80);
+}
+
 export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
   const tasks = new Map<string, MissionTask>();
   let runId: string | undefined;
   let taskCount = 0;
   let finished: MissionSnapshot['finished'];
+  const totals = { requests: 0, inputTokens: 0, outputTokens: 0, ledgerCostUsd: 0 };
 
   for (const event of events) {
     switch (event.type) {
@@ -180,11 +250,24 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         }
         break;
       }
+      case 'task_phase': {
+        const task = tasks.get(event.task_id ?? '');
+        if (task) {
+          const phase = event.phase;
+          if (phase === 'thinking' || phase === 'coding' || phase === 'testing' || phase === 'waiting') {
+            task.phase = phase;
+            recordAttempt(task).phase = phase;
+          }
+          recordActivity(task, event, 'phase', event.phase ?? 'phase', event.message);
+        }
+        break;
+      }
       case 'task_progress': {
         const task = tasks.get(event.task_id ?? '');
         if (task) {
           task.progress = event.message;
           recordAttempt(task).progress = event.message;
+          recordActivity(task, event, 'progress', 'Progress', event.message);
         }
         break;
       }
@@ -204,7 +287,9 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         const task = tasks.get(event.task_id ?? '');
         if (task) {
           task.status = 'validating';
+          task.phase = 'testing';
           recordAttempt(task).status = 'validating';
+          recordActivity(task, event, 'phase', 'Testing');
         }
         break;
       }
@@ -218,6 +303,13 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
             durationMs: event.duration_ms ?? 0,
           };
           recordAttempt(task).validation = task.validation;
+          recordActivity(
+            task,
+            event,
+            'validation',
+            event.passed ? 'Validation passed' : 'Validation failed',
+            event.summary,
+          );
         }
         break;
       }
@@ -230,6 +322,8 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
             files: event.files ?? [],
             summary: event.summary ?? '',
           };
+          task.phase = 'waiting';
+          recordActivity(task, event, 'pull-request', 'Pull request opened', event.summary);
         }
         break;
       }
@@ -242,6 +336,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
           const attempt = recordAttempt(task);
           attempt.status = 'succeeded';
           attempt.output = event.output;
+          recordActivity(task, event, 'result', 'Succeeded', event.output);
         }
         break;
       }
@@ -251,9 +346,11 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
           task.status = event.retrying ? 'retrying' : 'failed';
           task.error = event.error;
           task.attempts = event.attempts;
+          task.failureStage = event.stage;
           const attempt = recordAttempt(task);
           attempt.status = task.status;
           attempt.error = event.error;
+          recordActivity(task, event, 'result', event.retrying ? 'Retrying' : 'Failed', event.error);
         }
         break;
       }
@@ -262,6 +359,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         if (task) {
           task.status = 'skipped';
           task.error = event.reason;
+          recordActivity(task, event, 'result', 'Skipped', event.reason);
           // No attempt was dispatched when an upstream dependency skipped this task.
         }
         break;
@@ -279,10 +377,19 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
     }
   }
 
+  for (const task of tasks.values()) {
+    if (!task.usage) continue;
+    totals.requests += task.usage.requests;
+    totals.inputTokens += task.usage.inputTokens;
+    totals.outputTokens += task.usage.outputTokens;
+    totals.ledgerCostUsd += task.usage.ledgerCostUsd;
+  }
+
   return {
     runId,
     taskCount: taskCount || tasks.size,
     tasks: [...tasks.values()],
+    totals,
     finished,
   };
 }

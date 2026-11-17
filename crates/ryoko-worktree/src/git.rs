@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use ryoko_core::workspace::validate_relative_path;
 use ryoko_core::{
-    AgentIdentity, CoreError, CoreResult, ProposedChange, PullRequest, Task, ValidationReport,
-    WorkspaceLease, WorkspaceProvider,
+    AgentIdentity, AgentRole, CoreError, CoreResult, ProposedChange, PullRequest, Task,
+    ValidationReport, WorkspaceLease, WorkspaceProvider,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -1329,14 +1329,17 @@ impl WorkspaceProvider for GitWorktreeManager {
         task: &Task,
         agent: &AgentIdentity,
     ) -> CoreResult<Arc<dyn WorkspaceLease>> {
-        // A dependent task must fork the validated parent commit. Failing
-        // closed on multiple parents avoids silently dropping sibling edits.
-        if task.dependencies.len() > 1 {
+        // A normal dependent task must fork one validated parent commit. The
+        // Integrator is the explicit exception: its generic lease stays at the
+        // checkout tip and the agent merges the sibling branches separately.
+        if task.dependencies.len() > 1 && agent.role != AgentRole::Integrator {
             return Err(CoreError::Workspace(
-                "multiple worktree dependencies need an explicit integration branch".into(),
+                "multiple worktree dependencies need the Integrator role".into(),
             ));
         }
-        let parent_head = if let Some(parent_id) = task.dependencies.first() {
+        let integrator = agent.role == AgentRole::Integrator;
+        let parent_head = if let Some(parent_id) = task.dependencies.first().filter(|_| !integrator)
+        {
             let record = self
                 .load_session(*parent_id)
                 .map_err(CoreError::from)?
@@ -1537,6 +1540,18 @@ mod tests {
         git(dir.path(), &["commit", "-m", "initial"]).await;
         let manager = GitWorktreeManager::new(dir.path());
         (dir, manager)
+    }
+
+    #[tokio::test]
+    async fn rejects_multiple_dependencies_for_non_integrators() {
+        let (_dir, manager) = repo().await;
+        let mut task = Task::new("merge siblings", AgentRole::SeniorDeveloper);
+        task.dependencies = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let identity = AgentIdentity::new(AgentRole::SeniorDeveloper, "dev-01", "developer");
+        match manager.allocate(&task, &identity).await {
+            Ok(_) => panic!("non-integrator unexpectedly accepted two dependencies"),
+            Err(error) => assert!(error.to_string().contains("Integrator role"), "{error}"),
+        }
     }
 
     fn approved() -> ValidationReport {

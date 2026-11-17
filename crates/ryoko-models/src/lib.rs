@@ -7,6 +7,7 @@
 
 mod anthropic;
 mod config;
+mod fim;
 mod gemini;
 mod ledger;
 mod local;
@@ -17,10 +18,11 @@ mod types;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider, anthropic_wire_body};
 pub use config::{ProviderCatalog, ProviderProfile, WireProtocol};
+pub use fim::{FimClient, FimConfig};
 pub use gemini::{GeminiConfig, GeminiProvider, gemini_wire_body, parse_gemini_response};
 pub use ledger::{Budget, LedgerSnapshot, UsageLedger};
 pub use local::{LocalModel, discover_local_models};
-pub use mock::{MockProvider, ScriptedTurn};
+pub use mock::{MockProvider, ScriptedToolCall, ScriptedTurn};
 pub use openai::{OpenAiCompatConfig, OpenAiCompatProvider};
 pub use router::{Completion, ModelRouter, ProviderEntry};
 pub use types::{
