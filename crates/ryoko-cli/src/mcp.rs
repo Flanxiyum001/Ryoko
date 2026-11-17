@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ryoko_core::mcp::{
-    McpApprovalGate, McpClient, McpError, McpToolPolicy, McpToolService, McpToolbox, McpTransport,
+    McpApprovalAsker, McpApprovalScope, McpClient, McpError, McpToolPolicy, McpToolService,
+    McpToolbox, McpTransport, SessionApprovalGate,
 };
 use ryoko_models::UsageLedger;
 use serde_json::Value;
@@ -180,28 +181,86 @@ impl McpTransport for StdioMcpTransport {
     }
 }
 
-/// Every tool call requires a fresh, exact typed human response.
-pub struct TerminalApproval;
+/// Terminal approval asker for the CLI. It offers the same three scopes a native
+/// dialog does: allow this call, allow this tool for the rest of the run, or
+/// deny. Anything unrecognised, a closed stdin or a timeout denies.
+pub struct TerminalScopeAsker {
+    interactive: bool,
+}
+
+impl TerminalScopeAsker {
+    /// Prompts on stdin, waiting up to 90 seconds for an answer.
+    pub fn new() -> Self {
+        Self { interactive: true }
+    }
+
+    /// Denies every call without reading stdin.
+    pub fn non_interactive() -> Self {
+        Self { interactive: false }
+    }
+}
+
+/// A batch run must never block on a prompt that nobody can answer, so the
+/// non-interactive marker denies instead of waiting for the 90-second timeout.
+fn non_interactive() -> bool {
+    std::env::var("RYOKO_NONINTERACTIVE")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Maps an operator answer to a scope. Only an explicit allow widens it; a blank
+/// line, an unknown word or a closed stdin denies.
+fn scope_from_answer(answer: &str) -> McpApprovalScope {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "o" | "once" | "y" | "yes" => McpApprovalScope::Once,
+        "r" | "run" => McpApprovalScope::ForRun,
+        _ => McpApprovalScope::Deny,
+    }
+}
 
 #[async_trait]
-impl McpApprovalGate for TerminalApproval {
-    async fn approve(&self, tool: &str, arguments: &Value) -> bool {
+impl McpApprovalAsker for TerminalScopeAsker {
+    async fn ask(&self, tool: &str, arguments: &Value) -> McpApprovalScope {
+        if !self.interactive {
+            eprintln!(
+                "MCP tool `{tool}` denied: RYOKO_NONINTERACTIVE is set and no approval UI is attached"
+            );
+            return McpApprovalScope::Deny;
+        }
         eprintln!("MCP tool: {tool}");
         eprintln!("Arguments: {arguments}");
-        eprintln!("Allow this tool invocation once? Type YES to approve: ");
+        eprintln!(
+            "Answer [o] allow once, [r] allow `{tool}` for the rest of this run, or [d] deny (default): "
+        );
         let mut answer = String::new();
         let input = tokio::io::stdin();
         let mut reader = BufReader::new(input);
-        match tokio::time::timeout(
+        let scope = match tokio::time::timeout(
             Duration::from_secs(90),
             tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut answer),
         )
         .await
         {
-            Ok(Ok(_)) => answer.trim() == "YES",
-            _ => false,
+            Ok(Ok(_)) => scope_from_answer(&answer),
+            _ => McpApprovalScope::Deny,
+        };
+        if scope == McpApprovalScope::ForRun {
+            eprintln!("Allowed for this run: {tool}");
         }
+        scope
     }
+}
+
+/// Session gate wired to the terminal asker: run-scoped grants are remembered
+/// per tool, denials are not re-asked, and every call still passes the host
+/// allowlist, call budget and argument limits inside [`McpClient`].
+fn terminal_gate() -> Arc<SessionApprovalGate> {
+    let asker = if non_interactive() {
+        TerminalScopeAsker::non_interactive()
+    } else {
+        TerminalScopeAsker::new()
+    };
+    Arc::new(SessionApprovalGate::new(Arc::new(asker)))
 }
 
 /// Builds the host-approved tool surface attached to a `run --team` session.
@@ -221,8 +280,8 @@ pub async fn connect_toolbox(
         ));
     }
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
-    let client = McpClient::new(transport, Arc::new(TerminalApproval))
-        .with_allowed_tools(allow_tools.iter().cloned());
+    let client =
+        McpClient::new(transport, terminal_gate()).with_allowed_tools(allow_tools.iter().cloned());
     let toolbox = McpToolbox::connect(
         client,
         McpToolPolicy::new(allow_tools.iter().cloned(), max_calls),
@@ -235,7 +294,7 @@ pub async fn connect_toolbox(
 
 pub async fn tools(server: &Path, args: &[String], pass_env: &[String]) -> Result<(), McpError> {
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
-    let client = McpClient::new(transport, Arc::new(TerminalApproval));
+    let client = McpClient::new(transport, terminal_gate());
     client.initialize().await?;
     let tools = client.list_tools().await?;
     println!(
@@ -261,7 +320,7 @@ pub async fn call(
         ));
     }
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
-    let client = McpClient::new(transport, Arc::new(TerminalApproval));
+    let client = McpClient::new(transport, terminal_gate());
     client.initialize().await?;
     let available = client.list_tools().await?;
     if !available.iter().any(|entry| entry.name == tool) {
@@ -281,7 +340,7 @@ pub async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryoko_core::mcp::{McpClient, McpToolbox};
+    use ryoko_core::mcp::{McpApprovalGate, McpClient, McpToolbox};
     use ryoko_models::{Budget, UsageLedger};
     use serde_json::json;
     use std::path::Path;
@@ -479,5 +538,40 @@ const CALL: &str = r#"{"content":[{"type":"text","text":"ok"}]}"#;
             Err(McpError::BudgetExceeded(_))
         ));
         assert_eq!(toolbox.remaining_calls(), 3);
+    }
+
+    #[test]
+    fn operator_answers_map_to_explicit_scopes() {
+        assert_eq!(scope_from_answer("o"), McpApprovalScope::Once);
+        assert_eq!(scope_from_answer("once"), McpApprovalScope::Once);
+        assert_eq!(scope_from_answer("YES\n"), McpApprovalScope::Once);
+        assert_eq!(scope_from_answer(" R "), McpApprovalScope::ForRun);
+        assert_eq!(scope_from_answer("run"), McpApprovalScope::ForRun);
+        // Anything that is not an explicit allow denies, including a blank line.
+        for answer in ["", "   ", "d", "deny", "n", "no", "allow everything"] {
+            assert_eq!(
+                scope_from_answer(answer),
+                McpApprovalScope::Deny,
+                "answer {answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_interactive_run_denies_without_waiting_for_input() {
+        let asker = TerminalScopeAsker::non_interactive();
+        assert_eq!(
+            asker.ask("allowed_tool", &json!({"id": 1})).await,
+            McpApprovalScope::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn the_non_interactive_terminal_gate_denies_every_call() {
+        let gate = SessionApprovalGate::new(Arc::new(TerminalScopeAsker::non_interactive()));
+        assert!(!gate.approve("allowed_tool", &json!({})).await);
+        assert!(gate.grants().is_empty());
+        assert_eq!(gate.decisions().len(), 1);
+        assert!(!gate.decisions()[0].allowed);
     }
 }

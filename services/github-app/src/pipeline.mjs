@@ -6,7 +6,10 @@ import { cloneWithInstallationToken, pushBranchWithInstallationToken } from './c
 import { safeBranch, safeProjectName } from './security.mjs';
 
 const exec = promisify(execFile);
-const AGENT_LABEL = 'ryoko:agent';
+// `ryoko-fix` is the label operators add to an issue; `ryoko:agent` is the older
+// spelling and keeps existing installations working.
+const AGENT_LABELS = ['ryoko-fix', 'ryoko:agent'];
+const AGENT_LABEL = AGENT_LABELS[0];
 const MAX_GOAL = 12_000;
 const MAX_PR_BODY = 12_000;
 const MAX_ATTACHMENT = 9_000;
@@ -25,7 +28,7 @@ export function issueAgentRequest(event, payload) {
   if (event !== 'issues' || !payload || typeof payload !== 'object') return null;
   if (!['labeled', 'opened'].includes(payload.action)) return null;
   const labels = Array.isArray(payload.issue?.labels) ? payload.issue.labels : [];
-  if (!labels.some((label) => label?.name === AGENT_LABEL)) return null;
+  if (!labels.some((label) => AGENT_LABELS.includes(label?.name))) return null;
   const installationId = Number(payload.installation?.id);
   const repoId = Number(payload.repository?.id);
   const number = Number(payload.issue?.number);
@@ -53,9 +56,27 @@ export function issueAgentRequest(event, payload) {
   };
 }
 
+/**
+ * Pulls the pre-merge security audit out of the validation logs the CLI emits.
+ * The audit runs inside the container-backed pre-flight check, so its findings
+ * arrive as `security audit: ...` lines rather than a separate report field.
+ */
+export function securityAuditLines(report) {
+  const prefix = 'security audit:';
+  const lines = [];
+  for (const entry of Array.isArray(report?.validation) ? report.validation : []) {
+    for (const log of Array.isArray(entry?.logs) ? entry.logs : []) {
+      const line = String(log == null ? '' : log);
+      if (line.startsWith(prefix)) lines.push(line.slice(prefix.length).trim());
+    }
+  }
+  return lines; // bounded by the validation log cap, then by the body cut below
+}
+
 export function buildPullRequestBody(issue, report) {
   const ledger = JSON.stringify(report?.ledger || {}, null, 2).slice(0, MAX_ATTACHMENT);
   const validation = JSON.stringify(report?.validation || [], null, 2).slice(0, MAX_ATTACHMENT);
+  const audit = securityAuditLines(report).slice(0, 40).join('\n').slice(0, MAX_ATTACHMENT);
   const body = [
     `Closes #${issue.number}`,
     '',
@@ -67,6 +88,12 @@ export function buildPullRequestBody(issue, report) {
     '',
     '```json',
     ledger,
+    '```',
+    '',
+    '## Security audit',
+    '',
+    '```text',
+    audit || 'no security audit output was recorded for this run',
     '```',
     '',
     '## Validation report',
@@ -157,4 +184,4 @@ export async function runIssuePipeline({
   };
 }
 
-export { AGENT_LABEL };
+export { AGENT_LABEL, AGENT_LABELS };

@@ -257,6 +257,7 @@ Ryoko includes a browser-hosted, Tauri-ready code-inspection and Mission Control
 - GitHub OAuth login with owner allowlist; repository browsing, PRs, issues and CI status
 - HMAC-verified GitHub webhook timeline and optional real Rust worktree session state
 - Explicit human-approved clone, branch, commit-file, PR and PR-comment proposals
+- Issue-to-PR pipeline: applying the `ryoko-fix` label (or the older `ryoko:agent`) to an issue runs `ryoko run --team` in an isolated worktree, pushes the validated branch and opens a draft PR carrying the token ledger, the pre-merge security audit and the validation report
 - Dark/light responsive UI, read-only code inspection and review queue
 
 Requirements: Node.js 22+, Git for server-side clones. After configuring environment variables in the [GitHub App guide](docs/GITHUB_APP.md):

@@ -42,8 +42,8 @@ pub use iacp::{
 };
 pub use index::{CallerHit, IndexError, SymbolHit, WorkspaceIndex, goal_terms};
 pub use mcp::{
-    McpApprovalGate, McpClient, McpError, McpTool, McpToolPolicy, McpToolService, McpToolbox,
-    McpTransport,
+    McpApprovalAsker, McpApprovalDecision, McpApprovalGate, McpApprovalScope, McpClient, McpError,
+    McpTool, McpToolPolicy, McpToolService, McpToolbox, McpTransport, SessionApprovalGate,
 };
 pub use memory::SharedMemory;
 pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
