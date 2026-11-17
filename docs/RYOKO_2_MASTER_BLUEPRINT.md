@@ -47,7 +47,7 @@ These are views over one shared application state, not separate products.
 | Frontend | React + TypeScript | planned |
 | Editor | Monaco | planned |
 | Language intelligence | LSP (`tower-lsp`) | server exists in `ryoko-native` |
-| Parsing/indexing | tree-sitter | exists for Rust, TS/TSX, JS, Python, Go and C/C++ in `ryoko-core` context extraction |
+| Parsing/indexing | tree-sitter | exists for Rust, TS/TSX, JS, Python, Go, C/C++, Java, Kotlin, C#, Swift and SQL in `ryoko-core` context extraction |
 | Async runtime | Tokio | exists |
 | Local storage | SQLite via SQLx | planned |
 | Serialization | Serde | exists |
