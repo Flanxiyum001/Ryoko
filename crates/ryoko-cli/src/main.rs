@@ -330,6 +330,11 @@ struct RunArgs {
     /// MCP tool the agent may request. Repeat for each allowed tool.
     #[arg(long = "mcp-allow-tool")]
     mcp_allow_tools: Vec<String>,
+    /// MCP tool pre-approved when no approval prompt is possible. Repeat per
+    /// tool, or set RYOKO_MCP_HEADLESS_APPROVE to a comma-separated list. Each
+    /// tool must also appear in --mcp-allow-tool; every other tool stays denied.
+    #[arg(long = "mcp-headless-approve", value_name = "TOOL")]
+    mcp_headless_approve: Vec<String>,
     /// Hard cap on MCP tool calls for the whole run.
     #[arg(long = "mcp-max-calls", default_value_t = 50)]
     mcp_max_calls: u64,
@@ -1656,6 +1661,10 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     });
+    // A headless run has no prompt, so the operator names the tools that may
+    // run without one. This never widens the host allowlist; it only fills in
+    // the approval that a human would otherwise give.
+    let headless_approve = mcp::headless_approvals(&args.mcp_headless_approve);
     let mcp = match &args.mcp_server {
         Some(server) => Some(
             mcp::connect_toolbox(
@@ -1663,6 +1672,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 &args.mcp_server_args,
                 &args.mcp_allow_env,
                 &args.mcp_allow_tools,
+                &headless_approve,
                 args.mcp_max_calls,
                 router.ledger().clone(),
             )
@@ -1672,9 +1682,10 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             if !args.mcp_allow_tools.is_empty()
                 || !args.mcp_server_args.is_empty()
                 || !args.mcp_allow_env.is_empty()
+                || !headless_approve.is_empty()
             {
                 return Err(cli_error(
-                    "--mcp-allow-tool/--mcp-server-arg/--mcp-allow-env require --mcp-server",
+                    "--mcp-allow-tool/--mcp-headless-approve/--mcp-server-arg/--mcp-allow-env require --mcp-server",
                 ));
             }
             None

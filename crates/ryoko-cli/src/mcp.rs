@@ -1,5 +1,6 @@
 //! Operator-controlled MCP stdio transport for the CLI.
 //! External server processes never inherit the complete Ryoko environment.
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -186,17 +187,37 @@ impl McpTransport for StdioMcpTransport {
 /// deny. Anything unrecognised, a closed stdin or a timeout denies.
 pub struct TerminalScopeAsker {
     interactive: bool,
+    /// Tools the operator pre-approved for this headless run. Only consulted
+    /// when no prompt is possible; an interactive session always asks.
+    approved: BTreeSet<String>,
 }
 
 impl TerminalScopeAsker {
     /// Prompts on stdin, waiting up to 90 seconds for an answer.
     pub fn new() -> Self {
-        Self { interactive: true }
+        Self {
+            interactive: true,
+            approved: BTreeSet::new(),
+        }
     }
 
-    /// Denies every call without reading stdin.
-    pub fn non_interactive() -> Self {
-        Self { interactive: false }
+    /// Denies by default, except for the tools the operator pre-approved for
+    /// this run. Never prompts.
+    pub fn non_interactive_with(approved: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            interactive: false,
+            approved: approved.into_iter().collect(),
+        }
+    }
+}
+
+/// The headless policy decision. Absence is a denial: a tool runs without a
+/// human only when the operator named it explicitly.
+fn policy_scope(approved: &BTreeSet<String>, tool: &str) -> McpApprovalScope {
+    if approved.contains(tool) {
+        McpApprovalScope::ForRun
+    } else {
+        McpApprovalScope::Deny
     }
 }
 
@@ -222,10 +243,14 @@ fn scope_from_answer(answer: &str) -> McpApprovalScope {
 impl McpApprovalAsker for TerminalScopeAsker {
     async fn ask(&self, tool: &str, arguments: &Value) -> McpApprovalScope {
         if !self.interactive {
-            eprintln!(
-                "MCP tool `{tool}` denied: RYOKO_NONINTERACTIVE is set and no approval UI is attached"
-            );
-            return McpApprovalScope::Deny;
+            let scope = policy_scope(&self.approved, tool);
+            if scope == McpApprovalScope::Deny {
+                eprintln!("MCP tool `{tool}` denied: no approval UI is attached and the ");
+                eprintln!(
+                    "headless policy (--mcp-headless-approve or RYOKO_MCP_HEADLESS_APPROVE) does not list it"
+                );
+            }
+            return scope;
         }
         eprintln!("MCP tool: {tool}");
         eprintln!("Arguments: {arguments}");
@@ -254,13 +279,53 @@ impl McpApprovalAsker for TerminalScopeAsker {
 /// Session gate wired to the terminal asker: run-scoped grants are remembered
 /// per tool, denials are not re-asked, and every call still passes the host
 /// allowlist, call budget and argument limits inside [`McpClient`].
-fn terminal_gate() -> Arc<SessionApprovalGate> {
+fn terminal_gate(headless_approved: &[String]) -> Arc<SessionApprovalGate> {
     let asker = if non_interactive() {
-        TerminalScopeAsker::non_interactive()
+        TerminalScopeAsker::non_interactive_with(headless_approved.iter().cloned())
     } else {
         TerminalScopeAsker::new()
     };
     Arc::new(SessionApprovalGate::new(Arc::new(asker)))
+}
+
+/// Rejects a headless approval that is not also on the host allowlist. The
+/// allowlist is the outer boundary; a pre-approval can never widen it.
+fn validate_headless_policy(allow_tools: &[String], headless: &[String]) -> Result<(), McpError> {
+    match headless.iter().find(|tool| !allow_tools.contains(tool)) {
+        Some(tool) => Err(McpError::HeadlessApprovalNotAllowlisted(tool.clone())),
+        None => Ok(()),
+    }
+}
+
+/// Merges `--mcp-headless-approve` with `RYOKO_MCP_HEADLESS_APPROVE` (comma
+/// separated), trimming, de-duplicating and dropping unusable names. Dropping an
+/// entry can only ever deny a call, so a malformed value fails closed.
+pub fn headless_approvals(flag: &[String]) -> Vec<String> {
+    let env = std::env::var("RYOKO_MCP_HEADLESS_APPROVE").ok();
+    headless_approvals_from(flag, env.as_deref())
+}
+
+fn headless_approvals_from(flag: &[String], env: Option<&str>) -> Vec<String> {
+    let mut tools: Vec<String> = Vec::new();
+    let mut push = |value: &str| {
+        let tool = value.trim();
+        if !tool.is_empty()
+            && tool.len() <= 128
+            && !tool.chars().any(char::is_control)
+            && !tools.iter().any(|seen| seen == tool)
+        {
+            tools.push(tool.to_owned());
+        }
+    };
+    for tool in flag {
+        push(tool);
+    }
+    if let Some(value) = env {
+        for tool in value.split(',') {
+            push(tool);
+        }
+    }
+    tools
 }
 
 /// Builds the host-approved tool surface attached to a `run --team` session.
@@ -271,6 +336,7 @@ pub async fn connect_toolbox(
     args: &[String],
     pass_env: &[String],
     allow_tools: &[String],
+    headless_approve: &[String],
     max_calls: u64,
     ledger: UsageLedger,
 ) -> Result<Arc<dyn McpToolService>, McpError> {
@@ -279,9 +345,10 @@ pub async fn connect_toolbox(
             "pass at least one --mcp-allow-tool".into(),
         ));
     }
+    validate_headless_policy(allow_tools, headless_approve)?;
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
-    let client =
-        McpClient::new(transport, terminal_gate()).with_allowed_tools(allow_tools.iter().cloned());
+    let client = McpClient::new(transport, terminal_gate(headless_approve))
+        .with_allowed_tools(allow_tools.iter().cloned());
     let toolbox = McpToolbox::connect(
         client,
         McpToolPolicy::new(allow_tools.iter().cloned(), max_calls),
@@ -294,7 +361,7 @@ pub async fn connect_toolbox(
 
 pub async fn tools(server: &Path, args: &[String], pass_env: &[String]) -> Result<(), McpError> {
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
-    let client = McpClient::new(transport, terminal_gate());
+    let client = McpClient::new(transport, terminal_gate(&[]));
     client.initialize().await?;
     let tools = client.list_tools().await?;
     println!(
@@ -320,7 +387,7 @@ pub async fn call(
         ));
     }
     let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
-    let client = McpClient::new(transport, terminal_gate());
+    let client = McpClient::new(transport, terminal_gate(&[]));
     client.initialize().await?;
     let available = client.list_tools().await?;
     if !available.iter().any(|entry| entry.name == tool) {
@@ -557,9 +624,73 @@ const CALL: &str = r#"{"content":[{"type":"text","text":"ok"}]}"#;
         }
     }
 
+    #[test]
+    fn the_headless_policy_merges_the_flag_and_the_environment() {
+        let flag = vec![" list_issues ".to_string(), "get_issue".to_string()];
+        assert_eq!(
+            headless_approvals_from(&flag, Some("get_issue, create_comment,")),
+            vec!["list_issues", "get_issue", "create_comment"]
+        );
+        // A malformed or blank entry is dropped, which can only deny a call.
+        assert_eq!(
+            headless_approvals_from(&[], Some(" ,ok,\n\u{0}, ")),
+            vec!["ok"]
+        );
+        assert!(headless_approvals_from(&[], None).is_empty());
+    }
+
+    #[test]
+    fn a_headless_approval_must_still_be_on_the_host_allowlist() {
+        let allow = vec!["list_issues".to_string(), "get_issue".to_string()];
+        assert!(validate_headless_policy(&allow, &["list_issues".to_string()]).is_ok());
+        assert!(validate_headless_policy(&allow, &[]).is_ok());
+        let error = validate_headless_policy(&allow, &["delete_issue".to_string()])
+            .expect_err("a pre-approval cannot widen the allowlist");
+        assert!(matches!(
+            error,
+            McpError::HeadlessApprovalNotAllowlisted(tool) if tool == "delete_issue"
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_headless_policy_pre_approves_only_the_listed_tools() {
+        let asker = TerminalScopeAsker::non_interactive_with(["allowed_tool".to_string()]);
+        assert_eq!(
+            asker.ask("allowed_tool", &json!({})).await,
+            McpApprovalScope::ForRun
+        );
+        assert_eq!(
+            asker.ask("other_tool", &json!({})).await,
+            McpApprovalScope::Deny
+        );
+
+        let gate = SessionApprovalGate::new(Arc::new(asker));
+        assert!(gate.approve("allowed_tool", &json!({})).await);
+        // The pre-approval is a run grant, so the next call reuses it.
+        assert!(gate.approve("allowed_tool", &json!({})).await);
+        assert_eq!(gate.grants(), vec!["allowed_tool".to_string()]);
+        assert!(gate.decisions()[1].reused_grant);
+        assert!(!gate.approve("other_tool", &json!({})).await);
+    }
+
+    #[tokio::test]
+    async fn an_empty_headless_policy_denies_every_tool() {
+        let asker = TerminalScopeAsker::non_interactive_with(Vec::<String>::new());
+        for tool in ["allowed_tool", "other_tool"] {
+            assert_eq!(asker.ask(tool, &json!({})).await, McpApprovalScope::Deny);
+        }
+    }
+
+    #[test]
+    fn an_interactive_asker_never_pre_approves_anything() {
+        // Constructing `new` does not touch stdin; only `ask` does. Its policy
+        // set must be empty so the prompt is always the deciding step.
+        assert!(TerminalScopeAsker::new().approved.is_empty());
+    }
+
     #[tokio::test]
     async fn a_non_interactive_run_denies_without_waiting_for_input() {
-        let asker = TerminalScopeAsker::non_interactive();
+        let asker = TerminalScopeAsker::non_interactive_with(Vec::<String>::new());
         assert_eq!(
             asker.ask("allowed_tool", &json!({"id": 1})).await,
             McpApprovalScope::Deny
@@ -568,7 +699,11 @@ const CALL: &str = r#"{"content":[{"type":"text","text":"ok"}]}"#;
 
     #[tokio::test]
     async fn the_non_interactive_terminal_gate_denies_every_call() {
-        let gate = SessionApprovalGate::new(Arc::new(TerminalScopeAsker::non_interactive()));
+        let gate =
+            SessionApprovalGate::new(Arc::new(TerminalScopeAsker::non_interactive_with(Vec::<
+                String,
+            >::new(
+            ))));
         assert!(!gate.approve("allowed_tool", &json!({})).await);
         assert!(gate.grants().is_empty());
         assert_eq!(gate.decisions().len(), 1);

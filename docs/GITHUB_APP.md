@@ -99,9 +99,9 @@ The broker blocks workflow edits, Git metadata changes, credential files, defaul
 
 ## 5. Issue-to-PR agent pipeline
 
-A signed webhook for an issue labeled `ryoko:agent` can start the full team
-pipeline. The repository must be listed in `RYOKO_AGENT_ALLOWED_REPO_IDS`, and
-the server also needs the CLI and clone root:
+A signed webhook for an issue labeled `ryoko-fix` (or the older `ryoko:agent`)
+can start the full team pipeline. The repository must be listed in
+`RYOKO_AGENT_ALLOWED_REPO_IDS`, and the server also needs the CLI and clone root:
 
     export RYOKO_CLI_BIN="/absolute/path/to/ryoko"
     export RYOKO_PROJECTS_ROOT="/srv/ryoko/projects"
@@ -114,8 +114,24 @@ The broker then:
    with the issue title and body as the goal;
 3. reads the report's published branch, token ledger and validation events;
 4. pushes that branch with a separate contents-write token; and
-5. opens a **draft** pull request whose body embeds the ledger and validation
-   evidence.
+5. opens a **draft** pull request whose body embeds the token ledger, the
+   pre-merge security audit and the validation evidence.
+
+### MCP tools in the pipeline
+
+The pipeline child process never has an approval prompt, so MCP is opt-in and
+allowlist-bounded. Without `RYOKO_MCP_SERVER` the run gets no MCP server at all:
+
+    export RYOKO_MCP_SERVER="/srv/ryoko-mcp"
+    export RYOKO_MCP_SERVER_ARGS='["--stdio"]'
+    export RYOKO_MCP_ALLOW_TOOLS="list_issues,get_issue"
+    export RYOKO_MCP_HEADLESS_APPROVE="list_issues"
+    export RYOKO_MCP_MAX_CALLS="20"
+
+`RYOKO_MCP_HEADLESS_APPROVE` is the only approval a headless run can obtain.
+Every tool it does not name is denied, and each approved tool must also be on
+`RYOKO_MCP_ALLOW_TOOLS` or the run fails before connecting. See
+[MCP_CLIENT.md](architecture/MCP_CLIENT.md#headless-policy) for the full rules.
 
 The job is started asynchronously after the webhook is accepted, emits
 `pipeline` timeline events, and is deduplicated in memory by repository/issue.

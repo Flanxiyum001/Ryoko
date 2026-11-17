@@ -75,6 +75,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     projectRoot: config?.projectRoot || '',
     projectsRoot: config?.projectsRoot || '',
     pipelineTimeoutMs: config?.pipelineTimeoutMs || 15 * 60_000,
+    // Operator-owned MCP settings for pipeline runs. Absent means no MCP tools.
+    mcp: config?.mcp && typeof config.mcp === 'object' ? config.mcp : null,
   };
   const client = broker || new GitHubBroker(config || {});
   const pagesRoot = frontendPath || resolve('apps/desktop');

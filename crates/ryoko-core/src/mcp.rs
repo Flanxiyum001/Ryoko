@@ -33,6 +33,8 @@ pub enum McpError {
     PermissionDenied,
     #[error("MCP tool `{0}` is not on the host allowlist")]
     ToolNotAllowed(String),
+    #[error("headless-approved MCP tool `{0}` is not on the host allowlist")]
+    HeadlessApprovalNotAllowlisted(String),
     #[error("MCP tool-call budget exceeded: {0}")]
     BudgetExceeded(String),
     #[error("MCP client has not been initialized")]
