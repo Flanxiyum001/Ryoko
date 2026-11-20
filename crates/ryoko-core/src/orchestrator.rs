@@ -891,6 +891,41 @@ async fn execute_task(
             continue;
         }
 
+        // A visual review verdicts; it proposes nothing. There is nothing to
+        // stage, and the spec policy that requires tests for a change does not
+        // apply, so the verdict is recorded without a branch.
+        if result.success
+            && result.changes.is_empty()
+            && task
+                .metadata
+                .contains_key(crate::vision::VISUAL_REVIEW_METADATA)
+        {
+            let _ = lease.discard().await;
+            context.memory.insert(
+                task_summary_key(task.id),
+                result.output.chars().take(2_000).collect::<String>(),
+            );
+            events.emit(OrchestratorEvent::TaskSucceeded {
+                task_id: task.id,
+                role: task.assigned_to.clone(),
+                output: result.output.clone(),
+                attempts: attempt,
+            });
+            return (
+                TaskOutcome::Succeeded { attempts: attempt },
+                Some(TaskSuccess {
+                    task_id: task.id,
+                    role: task.assigned_to.clone(),
+                    agent: agent.identity().name.clone(),
+                    output: result.output.clone(),
+                    pr_id: String::new(),
+                    branch: String::new(),
+                    files: Vec::new(),
+                    attempts: attempt,
+                }),
+            );
+        }
+
         events.emit(OrchestratorEvent::TaskPhase {
             task_id: task.id,
             phase: AgentPhase::Coding,
@@ -2170,6 +2205,86 @@ mod tests {
         assert!(!is_actionable_review_failure(&failure));
         failure.visual_feedback = Some("contrast too low".to_owned());
         assert!(is_actionable_review_failure(&failure));
+    }
+
+    /// Review that passes without proposing any file, which is what a clean
+    /// visual critique produces.
+    struct SilentReviewer {
+        identity: AgentIdentity,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for SilentReviewer {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            Ok(TaskResult::success(task.id, "visual review passed"))
+        }
+    }
+
+    /// Mirrors the spec policy: a change set without tests is rejected. A review
+    /// must never reach it.
+    struct EmptyChangeRejected;
+
+    #[async_trait]
+    impl ChangeValidator for EmptyChangeRejected {
+        async fn validate(&self, changes: &StagedChanges) -> CoreResult<ValidationReport> {
+            if changes.files.is_empty() {
+                return Ok(ValidationReport::failed(
+                    "spec check failed",
+                    vec!["missing tests".to_owned()],
+                    Duration::ZERO,
+                ));
+            }
+            Ok(ValidationReport::passed(
+                "pre-flight passed",
+                Vec::new(),
+                Duration::ZERO,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_passing_visual_review_succeeds_without_proposing_files() {
+        let producer = Task::new("build the checkout screen", AgentRole::SeniorDeveloper);
+        let review = Task::new("review the rendered UI", AgentRole::UiUxDesigner)
+            .depends_on(&producer)
+            .with_metadata(crate::vision::VISUAL_REVIEW_METADATA, "true");
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(EmptyChangeRejected), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 1,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(SleepAgent {
+                identity: dev(),
+                delay: Duration::ZERO,
+            }),
+            Arc::new(SilentReviewer {
+                identity: AgentIdentity::new(AgentRole::UiUxDesigner, "ui-01", "designer"),
+            }),
+        ];
+
+        let report = orchestrator
+            .run(
+                vec![producer, review.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(
+            report
+                .succeeded
+                .iter()
+                .any(|success| success.task_id == review.id),
+            "a clean review is a success, not a skipped node"
+        );
     }
 
     #[tokio::test]
