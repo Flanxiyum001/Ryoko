@@ -237,6 +237,11 @@ pub struct TaskResult {
     pub changes: Vec<ProposedChange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Set when a failed result is actionable design feedback from a parsed
+    /// visual review, so the orchestrator can route it to the implementing
+    /// agent instead of escalating it as an unexplained failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_feedback: Option<String>,
 }
 
 impl TaskResult {
@@ -248,7 +253,15 @@ impl TaskResult {
             changes_proposed: Vec::new(),
             changes: Vec::new(),
             error: None,
+            visual_feedback: None,
         }
+    }
+
+    /// Marks the result as a visual review failure whose text should be routed
+    /// back to the agent that produced the UI.
+    pub fn with_visual_feedback(mut self, feedback: impl Into<String>) -> Self {
+        self.visual_feedback = Some(feedback.into());
+        self
     }
 
     pub fn with_changes(mut self, changes: Vec<ProposedChange>) -> Self {
@@ -265,6 +278,7 @@ impl TaskResult {
             changes_proposed: Vec::new(),
             changes: Vec::new(),
             error: Some(error.into()),
+            visual_feedback: None,
         }
     }
 
@@ -280,6 +294,7 @@ impl TaskResult {
             changes_proposed: Vec::new(),
             changes: Vec::new(),
             error: Some(error.into()),
+            visual_feedback: None,
         }
     }
 }

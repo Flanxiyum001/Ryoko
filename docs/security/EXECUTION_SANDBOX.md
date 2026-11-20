@@ -126,3 +126,51 @@ VM backend, image digest pinning and attestation, mixed-language image
 generation, artifact export rules, secret injection interface, cancellation that
 terminates the process tree, and a hostile test suite covering escape attempts,
 symlink tricks, fork bombs and output floods.
+
+## Container scratch space and artefact mounts
+
+Chromium inside a hardened container needs areas that are writable even though
+the root filesystem is not, and it needs enough processes:
+
+| Flag | Why |
+| --- | --- |
+| `--tmpfs /tmp:rw,noexec,nosuid,size=512m` | browsers and test runners write temp files; `noexec` keeps that space useless for dropped payloads |
+| `--shm-size=512m` with `--ipc=private` | renderers share memory through `/dev/shm`; the 64 MiB default makes them crash. `--ipc=none` removes `/dev/shm` entirely, so it is no longer used |
+| `--pids-limit=256` | a browser launch forks renderer, GPU and utility processes; 128 was too few |
+| `--mount …,target=/ryoko-artifacts` | screenshots, traces and reports, in their own bind mount |
+
+The artefact mount is the only writable path besides `/tmp`; the worktree mount
+stays read-only. Its host directory is `.ryoko/artifacts/<task id>/`, and the
+sandbox refuses an artefacts directory that sits inside the worktree being
+checked, so a screenshot can never appear in `git status` or a staged diff. The
+generated build context ignores `.ryoko/artifacts` for the same reason.
+
+## Browsers in the generated image
+
+`ryoko sandbox init` reads `package.json` (dependencies, devDependencies and
+peerDependencies) for React, Next.js, Vite, Svelte, Vue, Tailwind and Playwright.
+When any of them is declared, the browser layers are added to the generated
+Dockerfile, because a validation container has `--network=none` and cannot fetch
+a browser afterwards:
+
+- `ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright` — a fixed global path readable by
+  any unprivileged container user, rather than `$HOME/.cache`;
+- the minimal headless libraries and fonts (`libnss3`, `libatk1.0-0`,
+  `libatk-bridge2.0-0`, `libgbm1`, `libasound2`, `fonts-liberation`), so text
+  rendering and layout metrics stay stable between runs;
+- `npx playwright install --with-deps chromium` followed by
+  `chmod -R o+rx /ms-playwright`.
+
+When Playwright is a project dependency, the project's own version installs the
+browser, so the browser build matches the test runner. When it is not, the runner
+is installed under `/opt/playwright` and the project's dependency tree is left
+untouched.
+
+## UI verification inside the sandbox
+
+Frontend images also carry the bundled verification harness at
+`/opt/ryoko/verify-ui.mjs` (see [UI_VERIFICATION.md](../architecture/UI_VERIFICATION.md)).
+It is copied from `.ryoko/sandbox/verify-ui.mjs` during the image build and needs
+no network: it polls the project's own dev server on loopback, captures
+screenshots, an accessibility tree and a runtime error log into
+`/ryoko-artifacts`, then kills the server's whole process group.

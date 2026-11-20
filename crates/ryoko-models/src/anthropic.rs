@@ -212,6 +212,20 @@ fn anthropic_message(message: &Message) -> Value {
                     blocks.push(json!({"type": "text", "text": text}));
                 }
             }
+            ContentBlock::Image {
+                media_type,
+                data_base64,
+                ..
+            } => {
+                blocks.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data_base64,
+                    }
+                }));
+            }
             ContentBlock::ToolCall {
                 id,
                 name,
@@ -464,6 +478,27 @@ fn map_stop_reason(reason: &str) -> StopReason {
 mod tests {
     use super::*;
     use crate::types::{Message, ToolDefinition};
+
+    #[test]
+    fn image_blocks_become_base64_image_sources() {
+        let image = ContentBlock::image("image/png", "iVBORw0KGgo=", None).unwrap();
+        let message = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "Look at the layout".to_owned(),
+                },
+                image,
+            ],
+        );
+        let wire = anthropic_message(&message);
+        let blocks = wire["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "iVBORw0KGgo=");
+    }
 
     #[test]
     fn maps_system_messages_tools_and_tool_results() {
