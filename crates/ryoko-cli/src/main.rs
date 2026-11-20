@@ -1585,6 +1585,7 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 "ecosystem": plan.ecosystem,
                 "image": plan.image,
                 "dockerfile": plan.dockerfile,
+                "frontend": plan.frontend,
                 "built": !args.no_build,
             })
         );
@@ -1594,6 +1595,12 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
             plan.dockerfile.display(),
             plan.ecosystem.label()
         );
+        if plan.frontend.browser_stack {
+            println!(
+                "Baked headless Chromium at /ms-playwright for: {}",
+                plan.frontend.frameworks.join(", ")
+            );
+        }
         if args.no_build {
             println!("Skipped the image build; pass it to --sandbox-image after building it.");
         } else {
@@ -1880,7 +1887,8 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             Duration::from_secs(args.timeout_secs),
         )
         .with_sandbox(sandbox)
-        .with_perf(perf),
+        .with_perf(perf)
+        .with_artifacts_root(root.join(".ryoko/artifacts")),
     );
     if args.team && !(1..=4).contains(&args.max_concurrency) {
         return Err(cli_error("--max-concurrency must be between 1 and 4"));
@@ -2260,7 +2268,8 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
             SpecPolicy::default(),
             Duration::from_secs(args.timeout_secs),
         )
-        .with_sandbox(sandbox),
+        .with_sandbox(sandbox)
+        .with_artifacts_root(root.join(".ryoko/artifacts")),
     );
     let project = ProjectContext {
         project_root: root.display().to_string(),

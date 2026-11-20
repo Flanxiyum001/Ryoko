@@ -82,6 +82,10 @@ pub struct TaskFailure {
     pub role: AgentRole,
     pub error: String,
     pub attempts: u32,
+    /// Design feedback from a parsed visual review. Present only when the failure
+    /// is actionable for the agent that produced the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -148,9 +152,17 @@ impl OrchestrationReport {
 
 #[derive(Clone, Debug)]
 enum TaskOutcome {
-    Succeeded { attempts: u32 },
-    Failed { reason: String, attempts: u32 },
-    Skipped { reason: String },
+    Succeeded {
+        attempts: u32,
+    },
+    Failed {
+        reason: String,
+        attempts: u32,
+        visual_feedback: Option<String>,
+    },
+    Skipped {
+        reason: String,
+    },
 }
 
 pub struct Orchestrator {
@@ -308,6 +320,7 @@ impl Orchestrator {
                                 TaskOutcome::Failed {
                                     reason: "orchestrator semaphore closed".to_owned(),
                                     attempts: 0,
+                                    visual_feedback: None,
                                 },
                             );
                         }
@@ -335,6 +348,7 @@ impl Orchestrator {
                         TaskOutcome::Failed {
                             reason: "agent task panicked".to_owned(),
                             attempts: 1,
+                            visual_feedback: None,
                         },
                     ),
                 }
@@ -361,6 +375,7 @@ impl Orchestrator {
                         role: AgentRole::Custom("unknown".to_owned()),
                         error: format!("agent task panicked: {err}"),
                         attempts: 0,
+                        visual_feedback: None,
                     });
                     continue;
                 }
@@ -377,12 +392,17 @@ impl Orchestrator {
                         report.succeeded.push(success);
                     }
                 }
-                TaskOutcome::Failed { reason, attempts } => {
+                TaskOutcome::Failed {
+                    reason,
+                    attempts,
+                    visual_feedback,
+                } => {
                     report.failed.push(TaskFailure {
                         task_id: task.id,
                         role: task.assigned_to.clone(),
                         error: reason,
                         attempts,
+                        visual_feedback,
                     });
                 }
                 TaskOutcome::Skipped { reason } => {
@@ -508,7 +528,7 @@ impl Orchestrator {
             let failures = report
                 .failed
                 .iter()
-                .filter(|failure| is_reviewer_role(&failure.role))
+                .filter(|failure| is_actionable_review_failure(failure))
                 .cloned()
                 .collect::<Vec<_>>();
             if failures.is_empty() {
@@ -529,16 +549,20 @@ impl Orchestrator {
                         failure.role, producer.assigned_to, producer.id
                     ),
                 });
+                // A visual review states the defects in design terms; that is
+                // what the producer needs, so it takes precedence over the
+                // short error line.
+                let findings = failure.visual_feedback.as_deref().unwrap_or(&failure.error);
                 let feedback = format!(
                     "{} rejected the previous change from {} with:\n\n{}\n\nFix that specific failure and keep the rest of the change intact. Return the full corrected file set.",
-                    failure.role, producer.id, failure.error
+                    failure.role, producer.id, findings
                 );
                 let repaired = self
                     .replay(producer, &feedback, registry, project, memory)
                     .await;
                 let repaired_ok = repaired.is_some();
                 let resolved = if repaired_ok {
-                    self.replay(review_task, &failure.error, registry, project, memory)
+                    self.replay(review_task, findings, registry, project, memory)
                         .await
                 } else {
                     None
@@ -575,7 +599,7 @@ impl Orchestrator {
         let unresolved = report
             .failed
             .iter()
-            .filter(|failure| is_reviewer_role(&failure.role))
+            .filter(|failure| is_actionable_review_failure(failure))
             .cloned()
             .collect::<Vec<_>>();
         for failure in unresolved {
@@ -676,6 +700,12 @@ impl Orchestrator {
     }
 }
 
+/// Failures the repair loop can hand to a producer: QA and Security reviews, plus
+/// any failure that carries parsed visual-review feedback.
+fn is_actionable_review_failure(failure: &TaskFailure) -> bool {
+    is_reviewer_role(&failure.role) || failure.visual_feedback.is_some()
+}
+
 /// Reviews whose failure is actionable feedback for a producer rather than a
 /// bug a producer can fix. QA and Security only.
 fn is_reviewer_role(role: &AgentRole) -> bool {
@@ -747,6 +777,9 @@ async fn execute_task(
 ) -> (TaskOutcome, Option<TaskSuccess>) {
     let mut last_error = String::from("task did not run");
     let mut feedback: Option<String> = None;
+    // Carried out of the attempt loop so a failed visual review reaches the
+    // repair loop as design feedback rather than an opaque failure.
+    let mut visual: Option<String> = None;
     let mut attempted_files: Vec<String> = Vec::new();
     let mut failure: Option<(FailureStage, String)> = None;
     for attempt in 1..=max_attempts {
@@ -818,6 +851,9 @@ async fn execute_task(
                 .error
                 .clone()
                 .unwrap_or_else(|| "agent reported failure".to_owned());
+            if let Some(feedback) = result.visual_feedback.clone() {
+                visual = Some(feedback);
+            }
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
             last_error = reason.clone();
@@ -1008,6 +1044,7 @@ async fn execute_task(
         TaskOutcome::Failed {
             reason: last_error,
             attempts: max_attempts,
+            visual_feedback: visual,
         },
         None,
     )
@@ -2045,6 +2082,94 @@ mod tests {
             .expect("repair feedback reaches the producer");
         assert!(repair.contains("expected 200, got 500"), "{repair}");
         assert!(repair.contains("qa-engineer"), "{repair}");
+    }
+
+    /// Reviewer that fails with parsed visual-review feedback before passing.
+    struct VisualReviewer {
+        identity: AgentIdentity,
+        calls: AtomicU32,
+        failures: u32,
+        feedback: &'static str,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for VisualReviewer {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.failures {
+                Ok(TaskResult::failure(task.id, "visual review failed")
+                    .with_visual_feedback(self.feedback))
+            } else {
+                Ok(TaskResult::success(task.id, "visual review passed").with_changes(change()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_visual_review_routes_design_feedback_to_the_producer() {
+        let producer = Task::new("build the checkout screen", AgentRole::SeniorDeveloper);
+        let review = Task::new("review the rendered UI", AgentRole::UiUxDesigner)
+            .with_dependency(producer.id);
+        let feedback = Arc::new(StdMutex::new(Vec::new()));
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 1,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(RepairTargetAgent {
+                identity: dev(),
+                feedback: feedback.clone(),
+            }),
+            Arc::new(VisualReviewer {
+                identity: AgentIdentity::new(AgentRole::UiUxDesigner, "ui-01", "designer"),
+                calls: AtomicU32::new(0),
+                failures: 1,
+                feedback: "checkout CTA contrast is 2.1:1; raise it to 4.5:1",
+            }),
+        ];
+
+        let report = orchestrator
+            .run(
+                vec![producer, review.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(report.needs_human_review.is_empty());
+        assert_eq!(report.repairs.len(), 1);
+        assert!(report.repairs[0].resolved);
+        assert_eq!(report.repairs[0].review_task, review.id);
+        assert_eq!(report.repairs[0].role, AgentRole::SeniorDeveloper);
+        let seen = feedback.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the producer runs once and once to repair");
+        let repair = seen[1]
+            .as_deref()
+            .expect("design feedback reaches the producer");
+        assert!(repair.contains("2.1:1"), "{repair}");
+        assert!(repair.contains("ui-ux-designer"), "{repair}");
+    }
+
+    #[test]
+    fn only_reviews_and_visual_failures_are_actionable() {
+        let mut failure = TaskFailure {
+            task_id: Uuid::new_v4(),
+            role: AgentRole::UiUxDesigner,
+            error: "visual review failed".to_owned(),
+            attempts: 1,
+            visual_feedback: None,
+        };
+        assert!(!is_actionable_review_failure(&failure));
+        failure.visual_feedback = Some("contrast too low".to_owned());
+        assert!(is_actionable_review_failure(&failure));
     }
 
     #[tokio::test]

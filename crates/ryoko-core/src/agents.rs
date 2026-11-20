@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentRuntime, TaskContext};
 use crate::error::CoreResult;
-use crate::model::{AgentIdentity, ProposedChange, Task, TaskResult};
+use crate::model::{AgentIdentity, AgentRole, ProposedChange, Task, TaskResult};
 use crate::workspace::validate_relative_path;
 
 /// Metadata key used by the orchestrator to carry validation or agent errors
@@ -196,6 +196,28 @@ impl AgentRuntime for ModelAgent {
             .request(&enriched, &worktree_root, &ctx.project.active_branch, tools)
             .with_scope(task.id.to_string());
 
+        // A UI/UX task that has harness captures reviews the actual UI: the
+        // screenshots (or the ARIA tree for a text-only model) are attached and
+        // the reply is parsed as a critique rather than a file proposal.
+        let mut visual_review = false;
+        if self.identity.role == AgentRole::UiUxDesigner {
+            let model = request.model.clone();
+            match visual_review_message(&ctx.project.project_root, task.id, &model) {
+                Ok(Some(message)) => {
+                    request.messages.push(message);
+                    visual_review = true;
+                    ctx.emit_progress(task.id, "attached captured UI artifacts to the review");
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Ok(TaskResult::failure(
+                        task.id,
+                        format!("cannot read UI verification artifacts: {error}"),
+                    ));
+                }
+            }
+        }
+
         // Tool rounds are bounded independently of the model's streamed tool
         // call list. Each execution still needs the host approval gate and the
         // toolbox's own call and budget caps.
@@ -210,7 +232,11 @@ impl AgentRuntime for ModelAgent {
                 }
             };
             if completion.tool_calls.is_empty() {
-                return Ok(task_result_from_text(task.id, &completion.text));
+                return Ok(if visual_review {
+                    task_result_from_critique(task.id, &completion.text)
+                } else {
+                    task_result_from_text(task.id, &completion.text)
+                });
             }
             let Some(mcp) = ctx.mcp.clone() else {
                 return Ok(TaskResult::failure(
@@ -290,6 +316,48 @@ impl AgentRuntime for ModelAgent {
             task.id,
             "model did not produce a proposal after tool use",
         ))
+    }
+}
+
+/// Where the verification harness writes its captures for one task. The path is
+/// derived, never supplied by the model, and sits outside every worktree.
+pub fn visual_artifacts_dir(project_root: &str, task_id: uuid::Uuid) -> std::path::PathBuf {
+    std::path::Path::new(project_root)
+        .join(".ryoko/artifacts")
+        .join(task_id.to_string())
+}
+
+/// Builds the attachment for a UI/UX task. Returns `None` when the task has no
+/// captured routes, so a role that runs before any verification simply gets its
+/// normal text prompt.
+pub fn visual_review_message(
+    project_root: &str,
+    task_id: uuid::Uuid,
+    model: &str,
+) -> CoreResult<Option<Message>> {
+    let captures = crate::vision::read_captures(&visual_artifacts_dir(project_root, task_id))?;
+    if captures.is_empty() {
+        return Ok(None);
+    }
+    crate::vision::vision_message(&captures, model).map(Some)
+}
+
+/// The UI/UX agent answers with a critique, not a file proposal. A failed
+/// critique becomes a task failure carrying its own feedback text, so the repair
+/// loop can route it to whichever agent produced the UI.
+fn task_result_from_critique(task_id: uuid::Uuid, text: &str) -> TaskResult {
+    match crate::vision::VisualCritique::parse(text) {
+        Ok(critique) if critique.passed => TaskResult::success(task_id, "visual review passed"),
+        Ok(critique) => {
+            let feedback = critique
+                .feedback()
+                .unwrap_or_else(|| "visual review failed".to_owned());
+            TaskResult::failure(task_id, format!("visual review failed: {feedback}"))
+                .with_visual_feedback(feedback)
+        }
+        // A malformed critique is not actionable design feedback: it stays a
+        // plain failure so it escalates instead of bouncing to a producer.
+        Err(error) => TaskResult::failure(task_id, format!("invalid visual critique: {error}")),
     }
 }
 
@@ -525,5 +593,101 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(user.contains("error[E0425]"));
+    }
+
+    fn critique_json(passed: bool) -> String {
+        serde_json::json!({
+            "passed": passed,
+            "layout_issues": if passed {
+                Vec::<String>::new()
+            } else {
+                vec!["checkout CTA contrast is 2.1:1, below the 4.5:1 minimum".to_owned()]
+            },
+            "revision_instructions": if passed {
+                None
+            } else {
+                Some("darken the primary button and keep its label")
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_failed_critique_becomes_routable_design_feedback() {
+        let task_id = uuid::Uuid::new_v4();
+        let result = task_result_from_critique(task_id, &critique_json(false));
+
+        assert!(!result.success);
+        assert!(result.changes.is_empty(), "a review proposes no files");
+        let feedback = result
+            .visual_feedback
+            .as_deref()
+            .expect("design feedback is carried for the repair loop");
+        assert!(feedback.contains("2.1:1"), "{feedback}");
+        assert!(result.error.unwrap().contains("2.1:1"));
+    }
+
+    #[test]
+    fn a_passing_critique_succeeds() {
+        let task_id = uuid::Uuid::new_v4();
+        let fenced = format!(
+            "Here is my review:\n```json\n{}\n```\n",
+            critique_json(true)
+        );
+        let result = task_result_from_critique(task_id, &fenced);
+
+        assert!(result.success);
+        assert!(result.visual_feedback.is_none());
+    }
+
+    #[test]
+    fn a_malformed_critique_fails_without_requesting_repair() {
+        let result = task_result_from_critique(uuid::Uuid::new_v4(), "looks fine to me");
+
+        assert!(!result.success);
+        assert!(
+            result.visual_feedback.is_none(),
+            "prose cannot be routed as design feedback"
+        );
+        assert!(result.error.unwrap().contains("invalid visual critique"));
+    }
+
+    #[test]
+    fn ui_captures_are_attached_to_the_review_prompt() {
+        let project = tempfile::TempDir::new().unwrap();
+        let task_id = uuid::Uuid::new_v4();
+        let root = visual_artifacts_dir(project.path().to_str().unwrap(), task_id).join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("console-errors.json"),
+            r#"{"route":"/","consoleErrors":["Warning: missing key"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("aria-tree.json"),
+            r#"{"source":"ariaSnapshot","tree":"button \"Buy now\""}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("desktop.png"), b"\x89PNG\r\n\x1a\nfake").unwrap();
+
+        let root_path = project.path().to_str().unwrap();
+        let vision = visual_review_message(root_path, task_id, "gpt-4o")
+            .unwrap()
+            .expect("captures exist for this task");
+        assert!(vision.content.iter().any(ContentBlock::is_image));
+
+        let text_only = visual_review_message(root_path, task_id, "qwen2.5-coder")
+            .unwrap()
+            .expect("captures exist for this task");
+        assert!(
+            !text_only.content.iter().any(ContentBlock::is_image),
+            "a text-only model must not receive image bytes"
+        );
+        let text = text_only.text_content();
+        assert!(text.contains("Buy now"), "{text}");
+        assert!(text.contains("missing key"), "{text}");
+
+        let missing = visual_review_message(root_path, uuid::Uuid::new_v4(), "gpt-4o").unwrap();
+        assert!(missing.is_none());
     }
 }
