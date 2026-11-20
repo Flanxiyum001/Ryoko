@@ -5,6 +5,11 @@
 //! in production), and only then published as an internal pull request. A task
 //! that fails validation is rolled back, its lease discarded, and its dependents
 //! are skipped.
+//!
+//! A failing QA or Security node is not the end of the run. Its reported test
+//! logs or audit findings are routed back to the producer that created the
+//! branch under review, the review is repeated, and only after a configurable
+//! number of repair cycles is the task escalated to human review.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -24,6 +29,7 @@ use crate::event::{AgentPhase, EventSink, OrchestratorEvent, TaskFailureStage};
 use crate::mcp::McpToolService;
 use crate::memory::SharedMemory;
 use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
+use crate::team::{ARCHITECT_ROLE, BACKEND_ROLE, SECURITY_ROLE};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::WorkspaceProvider;
 use ryoko_models::ModelRouter;
@@ -35,6 +41,10 @@ pub struct OrchestratorConfig {
     pub max_concurrency: usize,
     /// Total attempts per task, including the first one.
     pub max_attempts: u32,
+    /// How many times a failing QA or Security node may send its failure back to
+    /// the producer that owns the branch under review before the run escalates
+    /// it to a human. Zero disables the repair loop entirely.
+    pub max_repair_cycles: u32,
 }
 
 impl Default for OrchestratorConfig {
@@ -42,6 +52,7 @@ impl Default for OrchestratorConfig {
         Self {
             max_concurrency: num_cpus_hint(),
             max_attempts: 2,
+            max_repair_cycles: 1,
         }
     }
 }
@@ -71,6 +82,10 @@ pub struct TaskFailure {
     pub role: AgentRole,
     pub error: String,
     pub attempts: u32,
+    /// Design feedback from a parsed visual review. Present only when the failure
+    /// is actionable for the agent that produced the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,18 +95,54 @@ pub struct SkippedTask {
     pub reason: String,
 }
 
+/// A failed review that the repair loop could not resolve. The run stops
+/// mutating the repository for this task and hands it to a person.
+#[derive(Debug, Clone, Serialize)]
+pub struct HumanReview {
+    pub task_id: Uuid,
+    pub role: AgentRole,
+    pub error: String,
+    /// Producer task that received the failure logs, when one was identified.
+    pub repaired_task: Option<Uuid>,
+    /// Repair cycles spent before escalating.
+    pub repair_cycles: u32,
+}
+
+/// One pass of the QA/Security repair loop, recorded so the operator can see
+/// which producer was re-run and with what feedback.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepairCycle {
+    pub review_task: Uuid,
+    pub producer_task: Uuid,
+    pub role: AgentRole,
+    pub cycle: u32,
+    pub resolved: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OrchestrationReport {
     pub run_id: Uuid,
     pub succeeded: Vec<TaskSuccess>,
     pub failed: Vec<TaskFailure>,
     pub skipped: Vec<SkippedTask>,
+    /// Repairs the loop attempted, in execution order.
+    #[serde(default)]
+    pub repairs: Vec<RepairCycle>,
+    /// Reviews that exhausted the repair budget. Those tasks remain in
+    /// `failed`; this list explains what the loop already tried.
+    #[serde(default)]
+    pub needs_human_review: Vec<HumanReview>,
     pub duration_ms: u64,
 }
 
 impl OrchestrationReport {
     pub fn all_succeeded(&self) -> bool {
         self.failed.is_empty() && self.skipped.is_empty()
+    }
+
+    /// True when the repair loop gave up and a person must decide.
+    pub fn escalated(&self) -> bool {
+        !self.needs_human_review.is_empty()
     }
 
     pub fn pull_requests(&self) -> Vec<&TaskSuccess> {
@@ -101,9 +152,17 @@ impl OrchestrationReport {
 
 #[derive(Clone, Debug)]
 enum TaskOutcome {
-    Succeeded { attempts: u32 },
-    Failed { reason: String, attempts: u32 },
-    Skipped { reason: String },
+    Succeeded {
+        attempts: u32,
+    },
+    Failed {
+        reason: String,
+        attempts: u32,
+        visual_feedback: Option<String>,
+    },
+    Skipped {
+        reason: String,
+    },
 }
 
 pub struct Orchestrator {
@@ -197,6 +256,9 @@ impl Orchestrator {
         });
 
         let memory = SharedMemory::new();
+        // The plan outlives the scheduler so the repair loop can identify each
+        // review node's producer after the first pass has finished.
+        let plan_tasks = tasks.clone();
         let mut outcomes: HashMap<Uuid, watch::Sender<Option<TaskOutcome>>> = HashMap::new();
         let mut receivers: HashMap<Uuid, watch::Receiver<Option<TaskOutcome>>> = HashMap::new();
         for task in &tasks {
@@ -258,6 +320,7 @@ impl Orchestrator {
                                 TaskOutcome::Failed {
                                     reason: "orchestrator semaphore closed".to_owned(),
                                     attempts: 0,
+                                    visual_feedback: None,
                                 },
                             );
                         }
@@ -285,6 +348,7 @@ impl Orchestrator {
                         TaskOutcome::Failed {
                             reason: "agent task panicked".to_owned(),
                             attempts: 1,
+                            visual_feedback: None,
                         },
                     ),
                 }
@@ -296,6 +360,8 @@ impl Orchestrator {
             succeeded: Vec::new(),
             failed: Vec::new(),
             skipped: Vec::new(),
+            repairs: Vec::new(),
+            needs_human_review: Vec::new(),
             duration_ms: 0,
         };
 
@@ -309,6 +375,7 @@ impl Orchestrator {
                         role: AgentRole::Custom("unknown".to_owned()),
                         error: format!("agent task panicked: {err}"),
                         attempts: 0,
+                        visual_feedback: None,
                     });
                     continue;
                 }
@@ -325,12 +392,17 @@ impl Orchestrator {
                         report.succeeded.push(success);
                     }
                 }
-                TaskOutcome::Failed { reason, attempts } => {
+                TaskOutcome::Failed {
+                    reason,
+                    attempts,
+                    visual_feedback,
+                } => {
                     report.failed.push(TaskFailure {
                         task_id: task.id,
                         role: task.assigned_to.clone(),
                         error: reason,
                         attempts,
+                        visual_feedback,
                     });
                 }
                 TaskOutcome::Skipped { reason } => {
@@ -342,6 +414,9 @@ impl Orchestrator {
                 }
             }
         }
+
+        self.repair_review_failures(&mut report, &plan_tasks, &registry, &project, &memory)
+            .await;
 
         report.duration_ms = started_at.elapsed().as_millis() as u64;
         self.events.emit(OrchestratorEvent::RunFinished {
@@ -428,6 +503,239 @@ impl Orchestrator {
         }
         Ok(registry)
     }
+
+    /// Routes a failing QA or Security node's findings back to the producer that
+    /// owns the branch under review, then repeats the review. The loop is
+    /// bounded by [`OrchestratorConfig::max_repair_cycles`]; whatever is still
+    /// failing afterwards is escalated instead of silently skipped.
+    ///
+    /// Only producer roles receive repair work: a review never repairs another
+    /// review. A repaired attempt still needs a fresh workspace lease, must pass
+    /// validation and is published as an ordinary reviewable branch, so the loop
+    /// never merges, pushes or deploys anything on its own.
+    async fn repair_review_failures(
+        &self,
+        report: &mut OrchestrationReport,
+        plan: &[Task],
+        registry: &HashMap<AgentRole, Arc<dyn AgentRuntime>>,
+        project: &ProjectContext,
+        memory: &SharedMemory,
+    ) {
+        if self.config.max_repair_cycles == 0 {
+            return;
+        }
+        for cycle in 1..=self.config.max_repair_cycles {
+            let failures = report
+                .failed
+                .iter()
+                .filter(|failure| is_actionable_review_failure(failure))
+                .cloned()
+                .collect::<Vec<_>>();
+            if failures.is_empty() {
+                break;
+            }
+            let mut progressed = false;
+            for failure in failures {
+                let Some(review_task) = plan.iter().find(|task| task.id == failure.task_id) else {
+                    continue;
+                };
+                let Some(producer) = producer_for(review_task, plan) else {
+                    continue;
+                };
+                self.events.emit(OrchestratorEvent::TaskProgress {
+                    task_id: review_task.id,
+                    message: format!(
+                        "repair cycle {cycle}: routing {} findings to {} ({})",
+                        failure.role, producer.assigned_to, producer.id
+                    ),
+                });
+                // A visual review states the defects in design terms; that is
+                // what the producer needs, so it takes precedence over the
+                // short error line.
+                let findings = failure.visual_feedback.as_deref().unwrap_or(&failure.error);
+                let feedback = format!(
+                    "{} rejected the previous change from {} with:\n\n{}\n\nFix that specific failure and keep the rest of the change intact. Return the full corrected file set.",
+                    failure.role, producer.id, findings
+                );
+                let repaired = self
+                    .replay(producer, &feedback, registry, project, memory)
+                    .await;
+                let repaired_ok = repaired.is_some();
+                let resolved = if repaired_ok {
+                    self.replay(review_task, findings, registry, project, memory)
+                        .await
+                } else {
+                    None
+                };
+                report.repairs.push(RepairCycle {
+                    review_task: review_task.id,
+                    producer_task: producer.id,
+                    role: producer.assigned_to.clone(),
+                    cycle,
+                    resolved: resolved.is_some(),
+                });
+                if let Some(success) = repaired {
+                    record_success(report, success);
+                }
+                if let Some(success) = resolved {
+                    report
+                        .failed
+                        .retain(|entry| entry.task_id != review_task.id);
+                    record_success(report, success);
+                }
+                // The cycle is worth repeating whenever the producer actually
+                // re-ran: a review that still fails after a real repair is a
+                // new failure, not a repeat of the one that triggered the loop.
+                if repaired_ok {
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+
+        // Reviews still failing become an explicit human decision.
+        let unresolved = report
+            .failed
+            .iter()
+            .filter(|failure| is_actionable_review_failure(failure))
+            .cloned()
+            .collect::<Vec<_>>();
+        for failure in unresolved {
+            let mut repair_cycles = 0u32;
+            let mut repaired_task = None;
+            for repair in report
+                .repairs
+                .iter()
+                .filter(|repair| repair.review_task == failure.task_id)
+            {
+                repair_cycles = repair_cycles.saturating_add(1);
+                repaired_task = Some(repair.producer_task);
+            }
+            report.needs_human_review.push(HumanReview {
+                task_id: failure.task_id,
+                role: failure.role.clone(),
+                error: failure.error.clone(),
+                repaired_task,
+                repair_cycles,
+            });
+            self.events.emit(OrchestratorEvent::TaskProgress {
+                task_id: failure.task_id,
+                message: format!(
+                    "escalated to human review after {repair_cycles} repair cycle(s): {}",
+                    failure.error
+                ),
+            });
+        }
+
+        // A node skipped only because a repaired dependency failed can run now
+        // that its input exists again. Tasks are visited in plan order, which the
+        // planners produce in topological order.
+        let mut satisfied = report
+            .succeeded
+            .iter()
+            .map(|success| success.task_id)
+            .collect::<HashSet<_>>();
+        let skipped = std::mem::take(&mut report.skipped);
+        for entry in skipped {
+            let Some(task) = plan.iter().find(|task| task.id == entry.task_id) else {
+                report.skipped.push(entry);
+                continue;
+            };
+            if !task.dependencies.iter().all(|id| satisfied.contains(id)) {
+                report.skipped.push(entry);
+                continue;
+            }
+            let feedback = "The dependency this task was waiting for failed and has since been repaired. Run the task again.";
+            match self.replay(task, feedback, registry, project, memory).await {
+                Some(success) => {
+                    satisfied.insert(success.task_id);
+                    record_success(report, success);
+                }
+                None => report.skipped.push(entry),
+            }
+        }
+    }
+
+    /// Runs one task outside the scheduler. Used only by the repair loop; the
+    /// task still gets a fresh workspace lease, validation and publication, and
+    /// its failure is returned as `None` instead of spawning new work.
+    async fn replay(
+        &self,
+        task: &Task,
+        feedback: &str,
+        registry: &HashMap<AgentRole, Arc<dyn AgentRuntime>>,
+        project: &ProjectContext,
+        memory: &SharedMemory,
+    ) -> Option<TaskSuccess> {
+        let agent = registry.get(&task.assigned_to)?.clone();
+        let mut attempt_task = task.clone();
+        attempt_task
+            .metadata
+            .insert(RETRY_FEEDBACK_METADATA.to_owned(), cap_feedback(feedback));
+        let context = TaskContext {
+            project: project.clone(),
+            memory: memory.clone(),
+            models: self.models.clone(),
+            validator: self.validator.clone(),
+            workspace: None,
+            mcp: self.mcp.clone(),
+            events: self.events.clone(),
+        };
+        let (outcome, success) = execute_task(
+            &attempt_task,
+            agent,
+            context,
+            self.workspace.clone(),
+            self.events.clone(),
+            self.config.max_attempts.max(1),
+            self.diagnostic_sink.clone(),
+        )
+        .await;
+        match outcome {
+            TaskOutcome::Succeeded { .. } => success,
+            _ => None,
+        }
+    }
+}
+
+/// Failures the repair loop can hand to a producer: QA and Security reviews, plus
+/// any failure that carries parsed visual-review feedback.
+fn is_actionable_review_failure(failure: &TaskFailure) -> bool {
+    is_reviewer_role(&failure.role) || failure.visual_feedback.is_some()
+}
+
+/// Reviews whose failure is actionable feedback for a producer rather than a
+/// bug a producer can fix. QA and Security only.
+fn is_reviewer_role(role: &AgentRole) -> bool {
+    matches!(role, AgentRole::QaEngineer)
+        || matches!(role, AgentRole::Custom(name) if name == SECURITY_ROLE)
+}
+
+/// Producers that can act on a review failure.
+fn is_producer_role(role: &AgentRole) -> bool {
+    matches!(role, AgentRole::SeniorDeveloper | AgentRole::UiUxDesigner)
+        || matches!(role, AgentRole::Custom(name) if name == BACKEND_ROLE || name == ARCHITECT_ROLE)
+}
+
+/// Records a published task, replacing any earlier entry for the same task so a
+/// replayed producer or review does not appear twice in the report.
+fn record_success(report: &mut OrchestrationReport, success: TaskSuccess) {
+    report
+        .succeeded
+        .retain(|entry| entry.task_id != success.task_id);
+    report.succeeded.push(success);
+}
+
+/// The dependency that produced the branch a review node examined. The most
+/// recent producer dependency wins when a reviewer has several, because that is
+/// the branch the review most likely ran against.
+fn producer_for<'a>(review: &Task, plan: &'a [Task]) -> Option<&'a Task> {
+    review.dependencies.iter().rev().find_map(|id| {
+        let candidate = plan.iter().find(|task| task.id == *id)?;
+        is_producer_role(&candidate.assigned_to).then_some(candidate)
+    })
 }
 
 async fn wait_for_dependencies(
@@ -469,6 +777,9 @@ async fn execute_task(
 ) -> (TaskOutcome, Option<TaskSuccess>) {
     let mut last_error = String::from("task did not run");
     let mut feedback: Option<String> = None;
+    // Carried out of the attempt loop so a failed visual review reaches the
+    // repair loop as design feedback rather than an opaque failure.
+    let mut visual: Option<String> = None;
     let mut attempted_files: Vec<String> = Vec::new();
     let mut failure: Option<(FailureStage, String)> = None;
     for attempt in 1..=max_attempts {
@@ -540,6 +851,9 @@ async fn execute_task(
                 .error
                 .clone()
                 .unwrap_or_else(|| "agent reported failure".to_owned());
+            if let Some(feedback) = result.visual_feedback.clone() {
+                visual = Some(feedback);
+            }
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
             last_error = reason.clone();
@@ -575,6 +889,41 @@ async fn execute_task(
                 stage: TaskFailureStage::Agent,
             });
             continue;
+        }
+
+        // A visual review verdicts; it proposes nothing. There is nothing to
+        // stage, and the spec policy that requires tests for a change does not
+        // apply, so the verdict is recorded without a branch.
+        if result.success
+            && result.changes.is_empty()
+            && task
+                .metadata
+                .contains_key(crate::vision::VISUAL_REVIEW_METADATA)
+        {
+            let _ = lease.discard().await;
+            context.memory.insert(
+                task_summary_key(task.id),
+                result.output.chars().take(2_000).collect::<String>(),
+            );
+            events.emit(OrchestratorEvent::TaskSucceeded {
+                task_id: task.id,
+                role: task.assigned_to.clone(),
+                output: result.output.clone(),
+                attempts: attempt,
+            });
+            return (
+                TaskOutcome::Succeeded { attempts: attempt },
+                Some(TaskSuccess {
+                    task_id: task.id,
+                    role: task.assigned_to.clone(),
+                    agent: agent.identity().name.clone(),
+                    output: result.output.clone(),
+                    pr_id: String::new(),
+                    branch: String::new(),
+                    files: Vec::new(),
+                    attempts: attempt,
+                }),
+            );
         }
 
         events.emit(OrchestratorEvent::TaskPhase {
@@ -730,6 +1079,7 @@ async fn execute_task(
         TaskOutcome::Failed {
             reason: last_error,
             attempts: max_attempts,
+            visual_feedback: visual,
         },
         None,
     )
@@ -958,6 +1308,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 2,
                 max_attempts: 1,
+                max_repair_cycles: 0,
             });
         let first = Task::new("crash", AgentRole::ProjectManager);
         let second = Task::new("must skip", AgentRole::SeniorDeveloper).with_dependency(first.id);
@@ -1030,6 +1381,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 3,
                 max_attempts: 1,
+                max_repair_cycles: 0,
             });
         let agent: Arc<dyn AgentRuntime> = Arc::new(SleepAgent {
             identity: dev(),
@@ -1056,6 +1408,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 4,
                 max_attempts: 1,
+                max_repair_cycles: 0,
             });
         let started = Arc::new(StdMutex::new(Vec::new()));
         let agent: Arc<dyn AgentRuntime> = Arc::new(RecordingAgent {
@@ -1080,6 +1433,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 2,
+                max_repair_cycles: 0,
             });
         let agent: Arc<dyn AgentRuntime> = Arc::new(FlakyAgent {
             identity: dev(),
@@ -1105,6 +1459,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 2,
                 max_attempts: 1,
+                max_repair_cycles: 0,
             });
         let rolled_back = Arc::new(AtomicBool::new(false));
         let failing: Arc<dyn AgentRuntime> = Arc::new(FailingAgent {
@@ -1139,6 +1494,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 1,
+                max_repair_cycles: 0,
             });
         let rolled_back = Arc::new(AtomicBool::new(false));
         let agent: Arc<dyn AgentRuntime> = Arc::new(PassAfterApplyAgent {
@@ -1189,6 +1545,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 1,
+                max_repair_cycles: 0,
             });
         let agent: Arc<dyn AgentRuntime> = Arc::new(PassAfterApplyAgent {
             identity: dev(),
@@ -1269,6 +1626,7 @@ mod tests {
         .with_config(OrchestratorConfig {
             max_concurrency: 1,
             max_attempts: 2,
+            max_repair_cycles: 0,
         });
 
         let report = orchestrator
@@ -1356,6 +1714,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 2,
+                max_repair_cycles: 0,
             });
 
         let report = orchestrator
@@ -1491,6 +1850,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 1,
+                max_repair_cycles: 0,
             });
 
         let report = orchestrator
@@ -1543,6 +1903,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 2,
+                max_repair_cycles: 0,
             });
 
         let report = orchestrator
@@ -1582,6 +1943,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 2,
+                max_repair_cycles: 0,
             });
 
         let report = orchestrator
@@ -1617,6 +1979,7 @@ mod tests {
             .with_config(OrchestratorConfig {
                 max_concurrency: 1,
                 max_attempts: 2,
+                max_repair_cycles: 0,
             });
 
         let report = orchestrator
@@ -1642,5 +2005,405 @@ mod tests {
         assert_eq!(findings[0].code.as_deref(), Some("ryoko.publish.failed"));
         assert!(findings[0].message.contains("could not be published"));
         assert!(findings[0].message.contains("remote rejected the push"));
+    }
+
+    /// Producer that remembers the feedback it was given, so a test can prove a
+    /// review failure actually reached it.
+    struct RepairTargetAgent {
+        identity: AgentIdentity,
+        feedback: Arc<StdMutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for RepairTargetAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            self.feedback.lock().unwrap().push(
+                task.metadata
+                    .get(RETRY_FEEDBACK_METADATA)
+                    .map(ToOwned::to_owned),
+            );
+            Ok(TaskResult::success(task.id, "repaired").with_changes(change()))
+        }
+    }
+
+    /// Reviewer that fails a fixed number of times with a container/audit
+    /// message, then passes.
+    struct FlakyReviewer {
+        identity: AgentIdentity,
+        calls: AtomicU32,
+        failures: u32,
+        message: &'static str,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for FlakyReviewer {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.failures {
+                Ok(TaskResult::failure(task.id, self.message))
+            } else {
+                Ok(TaskResult::success(task.id, "verified").with_changes(change()))
+            }
+        }
+    }
+
+    fn qa_plan() -> (Task, Task) {
+        let producer = Task::new("implement", AgentRole::SeniorDeveloper);
+        let qa = Task::new("verify", AgentRole::QaEngineer).with_dependency(producer.id);
+        (producer, qa)
+    }
+
+    #[tokio::test]
+    async fn qa_failure_routes_test_logs_back_to_the_producer_and_recovers() {
+        let (producer, qa) = qa_plan();
+        let feedback = Arc::new(StdMutex::new(Vec::new()));
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 1,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(RepairTargetAgent {
+                identity: dev(),
+                feedback: feedback.clone(),
+            }),
+            Arc::new(FlakyReviewer {
+                identity: AgentIdentity::new(AgentRole::QaEngineer, "qa-01", "verifier"),
+                calls: AtomicU32::new(0),
+                failures: 1,
+                message: "container test failed: expected 200, got 500",
+            }),
+        ];
+
+        let report = orchestrator
+            .run(
+                vec![producer, qa.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(report.needs_human_review.is_empty());
+        assert_eq!(report.repairs.len(), 1);
+        assert!(report.repairs[0].resolved);
+        assert_eq!(report.repairs[0].review_task, qa.id);
+        assert!(
+            report
+                .succeeded
+                .iter()
+                .any(|success| success.task_id == qa.id),
+            "the repaired review must be published again"
+        );
+        let seen = feedback.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "the producer runs once normally and once to repair"
+        );
+        assert!(seen[0].is_none());
+        let repair = seen[1]
+            .as_deref()
+            .expect("repair feedback reaches the producer");
+        assert!(repair.contains("expected 200, got 500"), "{repair}");
+        assert!(repair.contains("qa-engineer"), "{repair}");
+    }
+
+    /// Reviewer that fails with parsed visual-review feedback before passing.
+    struct VisualReviewer {
+        identity: AgentIdentity,
+        calls: AtomicU32,
+        failures: u32,
+        feedback: &'static str,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for VisualReviewer {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.failures {
+                Ok(TaskResult::failure(task.id, "visual review failed")
+                    .with_visual_feedback(self.feedback))
+            } else {
+                Ok(TaskResult::success(task.id, "visual review passed").with_changes(change()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_visual_review_routes_design_feedback_to_the_producer() {
+        let producer = Task::new("build the checkout screen", AgentRole::SeniorDeveloper);
+        let review = Task::new("review the rendered UI", AgentRole::UiUxDesigner)
+            .with_dependency(producer.id);
+        let feedback = Arc::new(StdMutex::new(Vec::new()));
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 1,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(RepairTargetAgent {
+                identity: dev(),
+                feedback: feedback.clone(),
+            }),
+            Arc::new(VisualReviewer {
+                identity: AgentIdentity::new(AgentRole::UiUxDesigner, "ui-01", "designer"),
+                calls: AtomicU32::new(0),
+                failures: 1,
+                feedback: "checkout CTA contrast is 2.1:1; raise it to 4.5:1",
+            }),
+        ];
+
+        let report = orchestrator
+            .run(
+                vec![producer, review.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(report.needs_human_review.is_empty());
+        assert_eq!(report.repairs.len(), 1);
+        assert!(report.repairs[0].resolved);
+        assert_eq!(report.repairs[0].review_task, review.id);
+        assert_eq!(report.repairs[0].role, AgentRole::SeniorDeveloper);
+        let seen = feedback.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the producer runs once and once to repair");
+        let repair = seen[1]
+            .as_deref()
+            .expect("design feedback reaches the producer");
+        assert!(repair.contains("2.1:1"), "{repair}");
+        assert!(repair.contains("ui-ux-designer"), "{repair}");
+    }
+
+    #[test]
+    fn only_reviews_and_visual_failures_are_actionable() {
+        let mut failure = TaskFailure {
+            task_id: Uuid::new_v4(),
+            role: AgentRole::UiUxDesigner,
+            error: "visual review failed".to_owned(),
+            attempts: 1,
+            visual_feedback: None,
+        };
+        assert!(!is_actionable_review_failure(&failure));
+        failure.visual_feedback = Some("contrast too low".to_owned());
+        assert!(is_actionable_review_failure(&failure));
+    }
+
+    /// Review that passes without proposing any file, which is what a clean
+    /// visual critique produces.
+    struct SilentReviewer {
+        identity: AgentIdentity,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for SilentReviewer {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            Ok(TaskResult::success(task.id, "visual review passed"))
+        }
+    }
+
+    /// Mirrors the spec policy: a change set without tests is rejected. A review
+    /// must never reach it.
+    struct EmptyChangeRejected;
+
+    #[async_trait]
+    impl ChangeValidator for EmptyChangeRejected {
+        async fn validate(&self, changes: &StagedChanges) -> CoreResult<ValidationReport> {
+            if changes.files.is_empty() {
+                return Ok(ValidationReport::failed(
+                    "spec check failed",
+                    vec!["missing tests".to_owned()],
+                    Duration::ZERO,
+                ));
+            }
+            Ok(ValidationReport::passed(
+                "pre-flight passed",
+                Vec::new(),
+                Duration::ZERO,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_passing_visual_review_succeeds_without_proposing_files() {
+        let producer = Task::new("build the checkout screen", AgentRole::SeniorDeveloper);
+        let review = Task::new("review the rendered UI", AgentRole::UiUxDesigner)
+            .depends_on(&producer)
+            .with_metadata(crate::vision::VISUAL_REVIEW_METADATA, "true");
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(EmptyChangeRejected), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 1,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(SleepAgent {
+                identity: dev(),
+                delay: Duration::ZERO,
+            }),
+            Arc::new(SilentReviewer {
+                identity: AgentIdentity::new(AgentRole::UiUxDesigner, "ui-01", "designer"),
+            }),
+        ];
+
+        let report = orchestrator
+            .run(
+                vec![producer, review.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(
+            report
+                .succeeded
+                .iter()
+                .any(|success| success.task_id == review.id),
+            "a clean review is a success, not a skipped node"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_that_keeps_failing_escalates_to_human_review() {
+        let (producer, qa) = qa_plan();
+        let feedback = Arc::new(StdMutex::new(Vec::new()));
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 2,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(RepairTargetAgent {
+                identity: dev(),
+                feedback: feedback.clone(),
+            }),
+            Arc::new(FlakyReviewer {
+                identity: AgentIdentity::new(AgentRole::QaEngineer, "qa-01", "verifier"),
+                calls: AtomicU32::new(0),
+                failures: u32::MAX,
+                message: "audit finding: unauthenticated write endpoint",
+            }),
+        ];
+
+        let report = orchestrator
+            .run(
+                vec![producer, qa.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.escalated());
+        assert_eq!(report.needs_human_review.len(), 1);
+        let escalated = &report.needs_human_review[0];
+        assert_eq!(escalated.task_id, qa.id);
+        assert_eq!(escalated.repair_cycles, 2);
+        assert!(escalated.repaired_task.is_some());
+        assert!(escalated.error.contains("audit finding"));
+        assert!(report.failed.iter().any(|failure| failure.task_id == qa.id));
+        assert!(report.repairs.iter().all(|repair| !repair.resolved));
+    }
+
+    #[tokio::test]
+    async fn a_dependent_skipped_by_the_failed_review_runs_after_the_repair() {
+        let producer = Task::new("implement", AgentRole::SeniorDeveloper);
+        let qa = Task::new("verify", AgentRole::QaEngineer).with_dependency(producer.id);
+        let integrator = Task::new("integrate", AgentRole::Integrator).with_dependency(qa.id);
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 1,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(RepairTargetAgent {
+                identity: dev(),
+                feedback: Arc::new(StdMutex::new(Vec::new())),
+            }),
+            Arc::new(FlakyReviewer {
+                identity: AgentIdentity::new(AgentRole::QaEngineer, "qa-01", "verifier"),
+                calls: AtomicU32::new(0),
+                failures: 1,
+                message: "container test failed",
+            }),
+            Arc::new(RepairTargetAgent {
+                identity: AgentIdentity::new(AgentRole::Integrator, "integrator", "merger"),
+                feedback: Arc::new(StdMutex::new(Vec::new())),
+            }),
+        ];
+
+        let report = orchestrator
+            .run(
+                vec![producer, qa.clone(), integrator.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(
+            report
+                .succeeded
+                .iter()
+                .any(|success| success.task_id == integrator.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_cycles_of_zero_leave_the_original_behaviour() {
+        let (producer, qa) = qa_plan();
+        let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
+            .with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 0,
+            });
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(RepairTargetAgent {
+                identity: dev(),
+                feedback: Arc::new(StdMutex::new(Vec::new())),
+            }),
+            Arc::new(FlakyReviewer {
+                identity: AgentIdentity::new(AgentRole::QaEngineer, "qa-01", "verifier"),
+                calls: AtomicU32::new(0),
+                failures: 1,
+                message: "container test failed",
+            }),
+        ];
+        let report = orchestrator
+            .run(vec![producer, qa], agents, ProjectContext::default())
+            .await
+            .unwrap();
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.repairs.is_empty());
+        assert!(report.needs_human_review.is_empty());
     }
 }

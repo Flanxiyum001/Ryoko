@@ -1995,6 +1995,7 @@ mod tests {
         .with_config(OrchestratorConfig {
             max_concurrency: 1,
             max_attempts: 1,
+            max_repair_cycles: 1,
         });
 
         let report = orchestrator

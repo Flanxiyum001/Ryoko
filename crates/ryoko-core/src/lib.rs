@@ -12,6 +12,7 @@ pub mod agent;
 pub mod agents;
 pub mod context;
 pub mod diagnostic;
+pub mod encoding;
 pub mod error;
 pub mod event;
 pub mod iacp;
@@ -21,8 +22,10 @@ pub mod memory;
 pub mod model;
 pub mod orchestrator;
 pub mod project_memory;
+pub mod spec_link;
 pub mod team;
 pub mod validation;
+pub mod vision;
 pub mod workspace;
 
 pub use agent::{AgentRuntime, TaskContext};
@@ -31,7 +34,8 @@ pub use agents::{
     StructuredProposal, parse_structured_proposal, task_branch_key, task_summary_key,
 };
 pub use context::{
-    CallEdge, ContextError, ContextExtractor, ContextSnippet, FileContext, Language, Symbol,
+    CallEdge, ContextError, ContextExtractor, ContextSnippet, FileContext, Language, SourceFile,
+    Symbol, extract_files,
 };
 pub use diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 pub use error::{CoreError, CoreResult};
@@ -42,14 +46,16 @@ pub use iacp::{
 };
 pub use index::{CallerHit, IndexError, SymbolHit, WorkspaceIndex, goal_terms};
 pub use mcp::{
-    McpApprovalGate, McpClient, McpError, McpTool, McpToolPolicy, McpToolService, McpToolbox,
-    McpTransport,
+    McpApprovalAsker, McpApprovalDecision, McpApprovalGate, McpApprovalScope, McpClient, McpError,
+    McpTool, McpToolPolicy, McpToolService, McpToolbox, McpTransport, SessionApprovalGate,
 };
 pub use memory::SharedMemory;
 pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
 pub use orchestrator::{
-    OrchestrationReport, Orchestrator, OrchestratorConfig, SkippedTask, TaskFailure, TaskSuccess,
+    HumanReview, OrchestrationReport, Orchestrator, OrchestratorConfig, RepairCycle, SkippedTask,
+    TaskFailure, TaskSuccess,
 };
 pub use project_memory::{MemoryEntry, MemoryKind, ProjectMemory};
+pub use team::{DynamicPlan, GoalSignals, VERIFICATION_METADATA, dynamic_plan};
 pub use validation::{AllowAllValidator, ChangeValidator, StagedChanges, ValidationReport};
 pub use workspace::{InMemoryWorkspaceProvider, PullRequest, WorkspaceLease, WorkspaceProvider};

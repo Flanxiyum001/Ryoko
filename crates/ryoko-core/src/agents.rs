@@ -196,6 +196,44 @@ impl AgentRuntime for ModelAgent {
             .request(&enriched, &worktree_root, &ctx.project.active_branch, tools)
             .with_scope(task.id.to_string());
 
+        // A UI/UX task that has harness captures reviews the actual UI: the
+        // screenshots (or the ARIA tree for a text-only model) are attached and
+        // the reply is parsed as a critique rather than a file proposal.
+        let mut visual_review = false;
+        if task
+            .metadata
+            .contains_key(crate::vision::VISUAL_REVIEW_METADATA)
+        {
+            let model = request.model.clone();
+            match visual_review_message(&ctx.project.project_root, &enriched, &model) {
+                Ok(Some(message)) => {
+                    request.messages.push(message);
+                    visual_review = true;
+                    ctx.emit_progress(task.id, "attached captured UI artifacts to the review");
+                }
+                // Capturing is operator configuration, not a gate: a plan must
+                // not fail because no browser evidence exists. Say so plainly
+                // instead of asking a model to review an empty page.
+                Ok(None) => {
+                    ctx.emit_progress(
+                        task.id,
+                        "no captured routes for the tasks under review; visual review skipped",
+                    );
+                    return Ok(TaskResult::success(
+                        task.id,
+                        "visual review skipped: no routes were captured for the tasks under \
+                         review (configure --ui-command to capture them)",
+                    ));
+                }
+                Err(error) => {
+                    return Ok(TaskResult::failure(
+                        task.id,
+                        format!("cannot read UI verification artifacts: {error}"),
+                    ));
+                }
+            }
+        }
+
         // Tool rounds are bounded independently of the model's streamed tool
         // call list. Each execution still needs the host approval gate and the
         // toolbox's own call and budget caps.
@@ -210,7 +248,11 @@ impl AgentRuntime for ModelAgent {
                 }
             };
             if completion.tool_calls.is_empty() {
-                return Ok(task_result_from_text(task.id, &completion.text));
+                return Ok(if visual_review {
+                    task_result_from_critique(task.id, &completion.text)
+                } else {
+                    task_result_from_text(task.id, &completion.text)
+                });
             }
             let Some(mcp) = ctx.mcp.clone() else {
                 return Ok(TaskResult::failure(
@@ -290,6 +332,59 @@ impl AgentRuntime for ModelAgent {
             task.id,
             "model did not produce a proposal after tool use",
         ))
+    }
+}
+
+/// Where the verification harness writes its captures for one task. The path is
+/// derived, never supplied by the model, and sits outside every worktree.
+pub fn visual_artifacts_dir(project_root: &str, task_id: uuid::Uuid) -> std::path::PathBuf {
+    std::path::Path::new(project_root)
+        .join(".ryoko/artifacts")
+        .join(task_id.to_string())
+}
+
+/// Artifact directories a review task looks at: its own (a direct run) followed
+/// by every task it depends on, which is where the validator wrote the captures
+/// for the change under review.
+pub fn visual_artifacts_dirs(project_root: &str, task: &Task) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![visual_artifacts_dir(project_root, task.id)];
+    for dependency in &task.dependencies {
+        dirs.push(visual_artifacts_dir(project_root, *dependency));
+    }
+    dirs
+}
+
+/// Builds the attachment for a UI/UX review. Returns `None` when nothing was
+/// captured for the tasks under review, so the caller can say so instead of
+/// asking a model to review a blank page.
+pub fn visual_review_message(
+    project_root: &str,
+    task: &Task,
+    model: &str,
+) -> CoreResult<Option<Message>> {
+    let captures = crate::vision::read_captures_from(&visual_artifacts_dirs(project_root, task))?;
+    if captures.is_empty() {
+        return Ok(None);
+    }
+    crate::vision::vision_message(&captures, model).map(Some)
+}
+
+/// The UI/UX agent answers with a critique, not a file proposal. A failed
+/// critique becomes a task failure carrying its own feedback text, so the repair
+/// loop can route it to whichever agent produced the UI.
+fn task_result_from_critique(task_id: uuid::Uuid, text: &str) -> TaskResult {
+    match crate::vision::VisualCritique::parse(text) {
+        Ok(critique) if critique.passed => TaskResult::success(task_id, "visual review passed"),
+        Ok(critique) => {
+            let feedback = critique
+                .feedback()
+                .unwrap_or_else(|| "visual review failed".to_owned());
+            TaskResult::failure(task_id, format!("visual review failed: {feedback}"))
+                .with_visual_feedback(feedback)
+        }
+        // A malformed critique is not actionable design feedback: it stays a
+        // plain failure so it escalates instead of bouncing to a producer.
+        Err(error) => TaskResult::failure(task_id, format!("invalid visual critique: {error}")),
     }
 }
 
@@ -525,5 +620,225 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(user.contains("error[E0425]"));
+    }
+
+    fn agent_context(project_root: &str, router: ryoko_models::ModelRouter) -> TaskContext {
+        TaskContext {
+            project: ProjectContext {
+                project_root: project_root.to_owned(),
+                active_branch: "main".to_owned(),
+                shared_memory: Default::default(),
+            },
+            memory: SharedMemory::new(),
+            models: Arc::new(router),
+            validator: Arc::new(AllowAllValidator),
+            workspace: None,
+            mcp: None,
+            events: EventSink::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_ui_task_without_the_review_flag_still_proposes_files() {
+        let project = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockProvider::new("mock"));
+        mock.push_turn(ScriptedTurn::text(proposal_json()));
+        let mut router = ryoko_models::ModelRouter::new("mock");
+        router.register(mock.clone());
+        let agent = ModelAgent::new(AgentIdentity::new(
+            AgentRole::UiUxDesigner,
+            "ui-01",
+            "designer",
+        ))
+        .with_model("mock/coder");
+        // The producer's own task id has captures, because its change was
+        // rendered. Without the review flag it must still answer with files.
+        let task = Task::new("design the screen", AgentRole::UiUxDesigner);
+        write_capture(project.path(), task.id, "root", "button Buy");
+
+        let result = agent
+            .execute_task(
+                agent_context(project.path().to_str().unwrap(), router),
+                task,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.changes.len(), 2);
+        assert!(
+            !mock.requests()[0]
+                .messages
+                .iter()
+                .any(|message| message.content.iter().any(ContentBlock::is_image))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_without_captures_is_skipped_without_spending_a_request() {
+        let project = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockProvider::new("mock"));
+        let mut router = ryoko_models::ModelRouter::new("mock");
+        router.register(mock.clone());
+        let agent = ModelAgent::new(AgentIdentity::new(
+            AgentRole::UiUxDesigner,
+            "ui-01",
+            "designer",
+        ))
+        .with_model("mock/coder");
+        let task = Task::new("review the screen", AgentRole::UiUxDesigner)
+            .with_metadata(crate::vision::VISUAL_REVIEW_METADATA, "true");
+
+        let result = agent
+            .execute_task(
+                agent_context(project.path().to_str().unwrap(), router),
+                task,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("visual review skipped"),
+            "{}",
+            result.output
+        );
+        assert!(mock.requests().is_empty(), "no model call without evidence");
+    }
+
+    fn critique_json(passed: bool) -> String {
+        serde_json::json!({
+            "passed": passed,
+            "layout_issues": if passed {
+                Vec::<String>::new()
+            } else {
+                vec!["checkout CTA contrast is 2.1:1, below the 4.5:1 minimum".to_owned()]
+            },
+            "revision_instructions": if passed {
+                None
+            } else {
+                Some("darken the primary button and keep its label")
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_failed_critique_becomes_routable_design_feedback() {
+        let task_id = uuid::Uuid::new_v4();
+        let result = task_result_from_critique(task_id, &critique_json(false));
+
+        assert!(!result.success);
+        assert!(result.changes.is_empty(), "a review proposes no files");
+        let feedback = result
+            .visual_feedback
+            .as_deref()
+            .expect("design feedback is carried for the repair loop");
+        assert!(feedback.contains("2.1:1"), "{feedback}");
+        assert!(result.error.unwrap().contains("2.1:1"));
+    }
+
+    #[test]
+    fn a_passing_critique_succeeds() {
+        let task_id = uuid::Uuid::new_v4();
+        let fenced = format!(
+            "Here is my review:\n```json\n{}\n```\n",
+            critique_json(true)
+        );
+        let result = task_result_from_critique(task_id, &fenced);
+
+        assert!(result.success);
+        assert!(result.visual_feedback.is_none());
+    }
+
+    #[test]
+    fn a_malformed_critique_fails_without_requesting_repair() {
+        let result = task_result_from_critique(uuid::Uuid::new_v4(), "looks fine to me");
+
+        assert!(!result.success);
+        assert!(
+            result.visual_feedback.is_none(),
+            "prose cannot be routed as design feedback"
+        );
+        assert!(result.error.unwrap().contains("invalid visual critique"));
+    }
+
+    fn write_capture(project: &std::path::Path, task_id: uuid::Uuid, slug: &str, tree: &str) {
+        let root = visual_artifacts_dir(project.to_str().unwrap(), task_id).join(slug);
+        std::fs::create_dir_all(&root).unwrap();
+        let route = if slug == "root" {
+            "/".to_owned()
+        } else {
+            format!("/{slug}")
+        };
+        std::fs::write(
+            root.join("console-errors.json"),
+            serde_json::json!({ "route": route, "consoleErrors": ["Warning: missing key"] })
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("aria-tree.json"),
+            serde_json::json!({"source": "ariaSnapshot", "tree": tree}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(root.join("desktop.png"), b"\x89PNG\r\n\x1a\nfake").unwrap();
+    }
+
+    #[test]
+    fn a_review_reads_the_captures_of_the_tasks_it_reviews() {
+        let project = tempfile::TempDir::new().unwrap();
+        let producer = Task::new("build the screen", AgentRole::SeniorDeveloper);
+        let review =
+            Task::new("review the screen", AgentRole::UiUxDesigner).with_dependency(producer.id);
+        write_capture(project.path(), producer.id, "root", "button \"Buy now\"");
+
+        let root_path = project.path().to_str().unwrap();
+        let vision = visual_review_message(root_path, &review, "gpt-4o")
+            .unwrap()
+            .expect("the producer's captures are attached");
+        assert!(vision.content.iter().any(ContentBlock::is_image));
+
+        let text_only = visual_review_message(root_path, &review, "qwen2.5-coder")
+            .unwrap()
+            .expect("the producer's captures are attached");
+        assert!(
+            !text_only.content.iter().any(ContentBlock::is_image),
+            "a text-only model must not receive image bytes"
+        );
+        let text = text_only.text_content();
+        assert!(text.contains("Buy now"), "{text}");
+        assert!(text.contains("missing key"), "{text}");
+
+        let unmatched = Task::new("review nothing", AgentRole::UiUxDesigner);
+        assert!(
+            visual_review_message(root_path, &unmatched, "gpt-4o")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn captures_from_several_dependencies_are_merged_once_per_route() {
+        let project = tempfile::TempDir::new().unwrap();
+        let first = Task::new("first", AgentRole::SeniorDeveloper);
+        let second = Task::new("second", AgentRole::UiUxDesigner);
+        let review = Task::new("review both", AgentRole::UiUxDesigner)
+            .with_dependency(first.id)
+            .with_dependency(second.id);
+        write_capture(project.path(), first.id, "root", "main");
+        write_capture(project.path(), second.id, "root", "duplicate");
+        write_capture(project.path(), second.id, "pricing", "pricing page");
+
+        let captures = crate::vision::read_captures_from(&visual_artifacts_dirs(
+            project.path().to_str().unwrap(),
+            &review,
+        ))
+        .unwrap();
+
+        assert_eq!(captures.len(), 2, "one capture per route");
+        assert_eq!(captures[0].route, "/");
+        assert_eq!(captures[0].aria_tree.as_deref(), Some("main"));
+        assert_eq!(captures[1].route, "/pricing");
     }
 }

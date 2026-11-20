@@ -1900,6 +1900,7 @@ name = "ryoko-cli"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
  "ignore",
  "ryoko-core",
@@ -1983,6 +1984,7 @@ dependencies = [
  "async-trait",
  "ryoko-core",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -2026,6 +2028,7 @@ dependencies = [
  "ryoko-models",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

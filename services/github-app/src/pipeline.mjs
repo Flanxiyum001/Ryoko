@@ -6,7 +6,10 @@ import { cloneWithInstallationToken, pushBranchWithInstallationToken } from './c
 import { safeBranch, safeProjectName } from './security.mjs';
 
 const exec = promisify(execFile);
-const AGENT_LABEL = 'ryoko:agent';
+// `ryoko-fix` is the label operators add to an issue; `ryoko:agent` is the older
+// spelling and keeps existing installations working.
+const AGENT_LABELS = ['ryoko-fix', 'ryoko:agent'];
+const AGENT_LABEL = AGENT_LABELS[0];
 const MAX_GOAL = 12_000;
 const MAX_PR_BODY = 12_000;
 const MAX_ATTACHMENT = 9_000;
@@ -25,7 +28,7 @@ export function issueAgentRequest(event, payload) {
   if (event !== 'issues' || !payload || typeof payload !== 'object') return null;
   if (!['labeled', 'opened'].includes(payload.action)) return null;
   const labels = Array.isArray(payload.issue?.labels) ? payload.issue.labels : [];
-  if (!labels.some((label) => label?.name === AGENT_LABEL)) return null;
+  if (!labels.some((label) => AGENT_LABELS.includes(label?.name))) return null;
   const installationId = Number(payload.installation?.id);
   const repoId = Number(payload.repository?.id);
   const number = Number(payload.issue?.number);
@@ -53,9 +56,27 @@ export function issueAgentRequest(event, payload) {
   };
 }
 
+/**
+ * Pulls the pre-merge security audit out of the validation logs the CLI emits.
+ * The audit runs inside the container-backed pre-flight check, so its findings
+ * arrive as `security audit: ...` lines rather than a separate report field.
+ */
+export function securityAuditLines(report) {
+  const prefix = 'security audit:';
+  const lines = [];
+  for (const entry of Array.isArray(report?.validation) ? report.validation : []) {
+    for (const log of Array.isArray(entry?.logs) ? entry.logs : []) {
+      const line = String(log == null ? '' : log);
+      if (line.startsWith(prefix)) lines.push(line.slice(prefix.length).trim());
+    }
+  }
+  return lines; // bounded by the validation log cap, then by the body cut below
+}
+
 export function buildPullRequestBody(issue, report) {
   const ledger = JSON.stringify(report?.ledger || {}, null, 2).slice(0, MAX_ATTACHMENT);
   const validation = JSON.stringify(report?.validation || [], null, 2).slice(0, MAX_ATTACHMENT);
+  const audit = securityAuditLines(report).slice(0, 40).join('\n').slice(0, MAX_ATTACHMENT);
   const body = [
     `Closes #${issue.number}`,
     '',
@@ -69,6 +90,12 @@ export function buildPullRequestBody(issue, report) {
     ledger,
     '```',
     '',
+    '## Security audit',
+    '',
+    '```text',
+    audit || 'no security audit output was recorded for this run',
+    '```',
+    '',
     '## Validation report',
     '',
     '```json',
@@ -78,8 +105,39 @@ export function buildPullRequestBody(issue, report) {
   return body.slice(0, MAX_PR_BODY);
 }
 
-async function defaultRunCli({ binary, cwd, goal, reportPath, timeoutMs }) {
-  const args = ['run', '--team', '--repo', cwd, '--report', reportPath, goal];
+const MCP_FLAGS = [
+  ['server', '--mcp-server'],
+  ['serverArgs', '--mcp-server-arg'],
+  ['allowEnv', '--mcp-allow-env'],
+  ['allowTools', '--mcp-allow-tool'],
+  ['headlessApprove', '--mcp-headless-approve'],
+];
+
+/**
+ * Builds the `ryoko run` argv. MCP settings are operator configuration, so they
+ * are forwarded verbatim as separate argv entries - never through a shell - and a
+ * value that looks like a flag is dropped rather than allowed to become one.
+ */
+export function buildRunArgs({ cwd, goal, reportPath, mcp }) {
+  const args = ['run', '--team', '--repo', cwd, '--report', reportPath];
+  for (const [key, flag] of MCP_FLAGS) {
+    const value = mcp?.[key];
+    const values = Array.isArray(value) ? value : value == null ? [] : [value];
+    for (const item of values) {
+      const text = String(item).trim();
+      if (!text || text.startsWith('-')) continue;
+      args.push(flag, text);
+    }
+  }
+  if (Number.isSafeInteger(mcp?.maxCalls) && mcp.maxCalls > 0) {
+    args.push('--mcp-max-calls', String(mcp.maxCalls));
+  }
+  args.push(goal);
+  return args;
+}
+
+async function defaultRunCli({ binary, cwd, goal, reportPath, timeoutMs, mcp }) {
+  const args = buildRunArgs({ cwd, goal, reportPath, mcp });
   try {
     await exec(binary, args, {
       cwd, timeout: timeoutMs, maxBuffer: 4_000_000, shell: false,
@@ -127,6 +185,7 @@ export async function runIssuePipeline({
     goal: goal.slice(0, MAX_GOAL),
     reportPath,
     timeoutMs: settings.pipelineTimeoutMs || 15 * 60_000,
+    mcp: settings.mcp || null,
   });
   const report = JSON.parse(await readFile(reportPath, 'utf8'));
   const success = Array.isArray(report?.run?.succeeded) ? report.run.succeeded[0] : null;
@@ -157,4 +216,4 @@ export async function runIssuePipeline({
   };
 }
 
-export { AGENT_LABEL };
+export { AGENT_LABEL, AGENT_LABELS };

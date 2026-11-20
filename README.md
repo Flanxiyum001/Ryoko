@@ -93,7 +93,9 @@ The intentionally dangerous `--unsafe-host-check` escape hatch is restricted to 
 
 ## Executable multi-agent DAG (experimental)
 
-Pass `--team` to `ryoko run` to execute Architect → Backend → (QA and Security in parallel) → Integrator using the existing task DAG, with `--max-concurrency 1..4`. Each role makes a real model call, proposes code and tests, runs a container-backed pre-flight check, and publishes an independently reviewable Git branch. Backend inherits Architect's *validated published commit*; QA and Security inherit Backend. The Integrator starts a fresh worktree, three-way merges both validated sibling branches, asks the configured model to resolve textual conflicts into complete files, and returns one combined change set. That set still runs through the same container-backed validation and is published as a single reviewable diff. Failed dependencies are skipped rather than rerun from stale source. The original checkout is never edited automatically.
+Pass `--team` to `ryoko run` to execute a routed task DAG, with `--max-concurrency 1..4`. The project-manager plan is computed first and activates only the specialists the goal needs: UI/UX (with headless-browser and screenshot verification) and DevOps are added only when the goal mentions interface or delivery work, while Architect, full-stack, Security and QA always run and Backend is added unless the goal is interface-only. Each role makes a real model call, proposes code and tests, runs a container-backed pre-flight check, and publishes an independently reviewable Git branch. Backend inherits Architect's *validated published commit*; QA and Security inherit Backend. The Integrator starts a fresh worktree, three-way merges both validated sibling branches, asks the configured model to resolve textual conflicts into complete files, and returns one combined change set. That set still runs through the same container-backed validation and is published as a single reviewable diff.
+
+A failing QA or Security node is not skipped: `--repair-cycles N` (default 1, 0 disables) routes its container test logs or audit findings back to the producing agent, repeats the review, and only then escalates the task to human review. Nodes skipped only because that review failed are replayed once their inputs exist again. The original checkout is never edited automatically, and no repair cycle merges, pushes or deploys.
 
 Run with an explicit reviewed OCI image and configured model, for example:
 ```sh
@@ -255,6 +257,7 @@ Ryoko includes a browser-hosted, Tauri-ready code-inspection and Mission Control
 - GitHub OAuth login with owner allowlist; repository browsing, PRs, issues and CI status
 - HMAC-verified GitHub webhook timeline and optional real Rust worktree session state
 - Explicit human-approved clone, branch, commit-file, PR and PR-comment proposals
+- Issue-to-PR pipeline: applying the `ryoko-fix` label (or the older `ryoko:agent`) to an issue runs `ryoko run --team` in an isolated worktree, pushes the validated branch and opens a draft PR carrying the token ledger, the pre-merge security audit and the validation report
 - Dark/light responsive UI, read-only code inspection and review queue
 
 Requirements: Node.js 22+, Git for server-side clones. After configuring environment variables in the [GitHub App guide](docs/GITHUB_APP.md):

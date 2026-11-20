@@ -3,8 +3,10 @@ mod check;
 mod context_window;
 mod experience;
 mod mcp;
+mod perf;
+mod ui_capture;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io::Error as IoError;
 use std::path::{Path, PathBuf};
@@ -14,11 +16,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ignore::WalkBuilder;
 use ryoko_core::{
-    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, ContextExtractor,
-    EventSink, FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig,
-    OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA,
-    SharedMemory, StagedChanges, Task, TaskContext, WorkspaceIndex, goal_terms,
-    team::{application_plan, engineering_execution_plan, standard_team},
+    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, EventSink,
+    FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig, OrchestratorEvent,
+    ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory,
+    SourceFile, StagedChanges, Task, TaskContext, WorkspaceIndex, extract_files, goal_terms,
+    spec_link::SpecIndex,
+    team::{application_plan, dynamic_plan, standard_team},
     validation::ValidationReport,
 };
 use ryoko_models::{
@@ -27,8 +30,9 @@ use ryoko_models::{
 };
 use ryoko_sandbox::{BuildBackend, BuildSandbox, SandboxPlan, SpecPolicy};
 use ryoko_worktree::{
-    GitWorktreeManager, HunkPatch, IntegrationAgent, WorktreeDiff, WorktreeRecord, WorktreeSession,
-    WorktreeState,
+    AttestOptions, GitWorktreeManager, HunkPatch, IntegrationAgent, MergeReceipt, ModelProvenance,
+    SandboxProvenance, ValidationProvenance, WorktreeDiff, WorktreeRecord, WorktreeSession,
+    WorktreeState, attestation, attestation::Approver,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command;
@@ -36,6 +40,7 @@ use uuid::Uuid;
 
 use crate::check::{CommandValidator, detect_check_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
+use crate::ui_capture::UiCapture;
 use ryoko_scripting::{
     PluginAgent, PluginHost, PluginLimits, PluginManifest, PluginPolicy, sha256_hex,
 };
@@ -71,7 +76,7 @@ enum Commands {
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
     TeamPreview(TeamPreviewArgs),
     /// Ask an agent for a goal in a new isolated worktree.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Validate the current checkout in the configured build sandbox.
     Check(CheckArgs),
     /// Build or query the cross-file symbol and caller index.
@@ -90,6 +95,102 @@ enum Commands {
     Doctor(DoctorArgs),
     /// List saved agent worktrees and their review status.
     Sessions(SessionsArgs),
+    /// Compare markdown specifications with the code they govern.
+    Spec(SpecArgs),
+    /// Sign and verify merge provenance attestations stored in Git notes.
+    Attest(AttestArgs),
+}
+
+#[derive(Debug, Args)]
+struct AttestArgs {
+    /// Project root.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[command(subcommand)]
+    command: AttestCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum AttestCommands {
+    /// Create and sign an attestation for one merged commit.
+    Create(AttestCreateArgs),
+    /// Print the stored envelope for a commit without verifying it.
+    Show(AttestShowArgs),
+    /// Verify the stored attestation's signature and subject.
+    Verify(AttestVerifyArgs),
+}
+
+#[derive(Debug, Args)]
+struct AttestCreateArgs {
+    /// Commit to attest. A branch name is resolved to its commit first.
+    #[arg(long)]
+    commit: String,
+    /// Branch that received the merge.
+    #[arg(long)]
+    branch: Option<String>,
+    /// Model that took part, as `role=provider/model`. Repeat per agent.
+    #[arg(long = "model", value_name = "ROLE=MODEL")]
+    models: Vec<String>,
+    /// Isolation backend that validated the change.
+    #[arg(long = "sandbox-backend")]
+    sandbox_backend: String,
+    /// Sandbox image or digest, when the backend used one.
+    #[arg(long = "sandbox-image")]
+    sandbox_image: Option<String>,
+    /// Summary of the validation report.
+    #[arg(long = "validation-summary")]
+    validation_summary: String,
+    /// Mark the recorded validation as passed.
+    #[arg(long = "validation-passed")]
+    validation_passed: bool,
+    /// Approving human, as `Name <email>`. Repeat for co-approvers.
+    #[arg(long = "approver", value_name = "NAME <EMAIL>")]
+    approvers: Vec<String>,
+    /// Approval timestamp (RFC 3339). Defaults to the current UTC time.
+    #[arg(long = "approved-at")]
+    approved_at: Option<String>,
+    /// SSH private key used to sign. Never written to the repository.
+    #[arg(long = "signing-key")]
+    signing_key: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct AttestShowArgs {
+    #[arg(long)]
+    commit: String,
+}
+
+#[derive(Debug, Args)]
+struct AttestVerifyArgs {
+    #[arg(long)]
+    commit: String,
+    /// OpenSSH allowed_signers file.
+    #[arg(long = "allowed-signers", conflicts_with = "public_key")]
+    allowed_signers: Option<PathBuf>,
+    /// A single trusted public key.
+    #[arg(long = "public-key")]
+    public_key: Option<PathBuf>,
+    /// Principal to verify as. With --allowed-signers it must match a principal
+    /// in that file; with --public-key it only names the key you trust, because
+    /// an SSHSIG does not sign a principal.
+    #[arg(long, default_value = "ryoko")]
+    identity: String,
+}
+
+#[derive(Debug, Args)]
+struct SpecArgs {
+    /// Project root to scan.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Report drift against the recorded links. The default action.
+    #[arg(long, conflicts_with = "record")]
+    check: bool,
+    /// Record the current spec and file digests as the baseline.
+    #[arg(long)]
+    record: bool,
+    /// Print drift as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -297,6 +398,14 @@ struct RunArgs {
     /// Build/test command run inside the worktree. Auto-detected when omitted.
     #[arg(long)]
     check_command: Option<String>,
+    /// Command that serves the app (for example `npm run dev`), so UI-touching
+    /// changes are rendered with the sandbox's headless browser and the UI/UX
+    /// review has artifacts to look at.
+    #[arg(long = "ui-command", value_name = "COMMAND")]
+    ui_command: Option<String>,
+    /// Route to capture. Repeat per route; defaults to `/`.
+    #[arg(long = "ui-route", value_name = "PATH")]
+    ui_routes: Vec<String>,
     /// Timeout for the pre-flight command.
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
@@ -314,6 +423,10 @@ struct RunArgs {
     /// Number of concurrent agents in team mode, between 1 and 4.
     #[arg(long, default_value_t = 2)]
     max_concurrency: usize,
+    /// Times a failed QA or Security review may send its findings back to the
+    /// producing agent before escalating to human review. 0 disables the loop.
+    #[arg(long, default_value_t = 1)]
+    repair_cycles: u32,
     /// Explicitly chosen local MCP server executable for agent tool calls.
     #[arg(long, value_name = "PATH")]
     mcp_server: Option<PathBuf>,
@@ -326,9 +439,30 @@ struct RunArgs {
     /// MCP tool the agent may request. Repeat for each allowed tool.
     #[arg(long = "mcp-allow-tool")]
     mcp_allow_tools: Vec<String>,
+    /// MCP tool pre-approved when no approval prompt is possible. Repeat per
+    /// tool, or set RYOKO_MCP_HEADLESS_APPROVE to a comma-separated list. Each
+    /// tool must also appear in --mcp-allow-tool; every other tool stays denied.
+    #[arg(long = "mcp-headless-approve", value_name = "TOOL")]
+    mcp_headless_approve: Vec<String>,
     /// Hard cap on MCP tool calls for the whole run.
     #[arg(long = "mcp-max-calls", default_value_t = 50)]
     mcp_max_calls: u64,
+    /// Benchmark command run after the test command passes. It must print
+    /// `<metric>=<number>` on stdout.
+    #[arg(long = "perf-command", value_name = "COMMAND")]
+    perf_command: Option<String>,
+    /// Metric name the benchmark command prints, for example `latency_ms`.
+    #[arg(long = "perf-metric", value_name = "NAME")]
+    perf_metric: Option<String>,
+    /// Allowed regression before the gate blocks, in percent.
+    #[arg(long = "perf-max-regression-pct", default_value_t = 5.0)]
+    perf_max_regression_pct: f64,
+    /// Baseline file, relative to the project root.
+    #[arg(long = "perf-baseline", default_value = ".ryoko/perf-baseline.json")]
+    perf_baseline: PathBuf,
+    /// Record the current measurement as the baseline instead of comparing.
+    #[arg(long = "perf-update-baseline")]
+    perf_update_baseline: bool,
 }
 
 #[derive(Debug, Args)]
@@ -414,8 +548,19 @@ struct ReviewArgs {
     /// Attempts when sending feedback back to the agent.
     #[arg(long, default_value_t = 3)]
     attempts: u32,
+    /// SSH key that signs a provenance attestation when a merge is accepted.
+    /// Also read from RYOKO_ATTEST_KEY. Without a key, nothing is signed.
+    #[arg(long = "attest-key")]
+    attest_key: Option<PathBuf>,
     #[arg(long)]
     check_command: Option<String>,
+    /// Command that serves the app, so UI-touching changes are rendered before a
+    /// visual review. Omitted means no captures and no browser.
+    #[arg(long = "ui-command", value_name = "COMMAND")]
+    ui_command: Option<String>,
+    /// Route to capture. Repeat per route; defaults to `/`.
+    #[arg(long = "ui-route", value_name = "PATH")]
+    ui_routes: Vec<String>,
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
     #[command(flatten)]
@@ -616,7 +761,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::DiscoverLocal => discover_local().await,
         Commands::Ask(args) => ask(args).await,
         Commands::TeamPreview(args) => team_preview(args).await,
-        Commands::Run(args) => run_goal(args).await,
+        Commands::Run(args) => run_goal(*args).await,
         Commands::Check(args) => check_worktree(args).await,
         Commands::Index(args) => index_workspace(args).await,
         Commands::Sandbox(args) => sandbox(args).await,
@@ -626,7 +771,198 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Init(args) => init(args).await,
         Commands::Doctor(args) => doctor(args).await,
         Commands::Sessions(args) => sessions(args).await,
+        Commands::Spec(args) => spec(args).await,
+        Commands::Attest(args) => attest(args).await,
     }
+}
+
+fn parse_approver(value: &str) -> Result<Approver, Box<dyn Error>> {
+    let value = value.trim();
+    let open = value
+        .rfind('<')
+        .ok_or_else(|| cli_error("approver must look like `Name <email>`"))?;
+    let close = value
+        .rfind('>')
+        .ok_or_else(|| cli_error("approver must look like `Name <email>`"))?;
+    if close < open || close != value.len() - 1 {
+        return Err(cli_error("approver must look like `Name <email>`"));
+    }
+    let name = value[..open].trim();
+    let email = value[open + 1..close].trim();
+    if name.is_empty() || !email.contains('@') || email.contains(char::is_whitespace) {
+        return Err(cli_error("approver must look like `Name <email>`"));
+    }
+    Ok(Approver {
+        name: name.to_owned(),
+        email: email.to_owned(),
+        approved_at: String::new(),
+    })
+}
+
+fn parse_model(value: &str) -> Result<ModelProvenance, Box<dyn Error>> {
+    let (role, model) = value
+        .split_once('=')
+        .ok_or_else(|| cli_error("--model must look like `role=provider/model`"))?;
+    if role.trim().is_empty() || model.trim().is_empty() {
+        return Err(cli_error("--model must look like `role=provider/model`"));
+    }
+    Ok(ModelProvenance {
+        role: role.trim().to_owned(),
+        model: model.trim().to_owned(),
+    })
+}
+
+async fn attest(args: AttestArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    match args.command {
+        AttestCommands::Create(create) => {
+            if create.approvers.is_empty() {
+                return Err(cli_error(
+                    "an attestation needs at least one --approver; approvals are human",
+                ));
+            }
+            let approved_at = match create.approved_at {
+                Some(stamp) => stamp,
+                None => chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            };
+            let mut approvers = Vec::with_capacity(create.approvers.len());
+            for value in &create.approvers {
+                let mut approver = parse_approver(value)?;
+                approver.approved_at = approved_at.clone();
+                approvers.push(approver);
+            }
+            let mut models = Vec::with_capacity(create.models.len());
+            for value in &create.models {
+                models.push(parse_model(value)?);
+            }
+            let options = AttestOptions {
+                commit: create.commit,
+                branch: create.branch,
+                models,
+                sandbox: SandboxProvenance {
+                    backend: create.sandbox_backend,
+                    image: create.sandbox_image,
+                },
+                validation: ValidationProvenance {
+                    passed: create.validation_passed,
+                    summary: create.validation_summary,
+                },
+                approvers,
+                signing_key: create.signing_key,
+            };
+            let envelope = attestation::create(&root, &options).await?;
+            let keyid = envelope
+                .signatures
+                .first()
+                .map(|signature| signature.keyid.clone())
+                .unwrap_or_default();
+            println!(
+                "Attested merge at {} with key {}",
+                envelope.statement()?.predicate.commit,
+                keyid
+            );
+            println!(
+                "Store the public key and verify later with: ryoko attest verify --repo {} --commit <sha> --public-key <key.pub> --identity <name>",
+                root.display()
+            );
+            Ok(())
+        }
+        AttestCommands::Show(show) => {
+            let envelope = attestation::read(&root, &show.commit).await?;
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+            Ok(())
+        }
+        AttestCommands::Verify(verify) => {
+            let trust = match (verify.allowed_signers, verify.public_key) {
+                (Some(path), _) => attestation::Trust::AllowedSigners {
+                    path,
+                    identity: verify.identity,
+                },
+                (None, Some(path)) => attestation::Trust::PublicKey {
+                    path,
+                    identity: verify.identity,
+                },
+                (None, None) => {
+                    return Err(cli_error(
+                        "verify needs --allowed-signers or --public-key; trust is never implied",
+                    ));
+                }
+            };
+            let verified = attestation::verify(&root, &verify.commit, &trust).await?;
+            println!("Signature OK: {} ({})", verified.commit, verified.keyid);
+            for approver in &verified.approvers {
+                println!(
+                    "approved by {} <{}> at {}",
+                    approver.name, approver.email, approver.approved_at
+                );
+            }
+            for model in &verified.models {
+                println!("model {} for {}", model.model, model.role);
+            }
+            match &verified.sandbox.image {
+                Some(image) => println!("sandbox {} ({image})", verified.sandbox.backend),
+                None => println!("sandbox {}", verified.sandbox.backend),
+            }
+            println!("files {}", verified.files.join(", "));
+            Ok(())
+        }
+    }
+}
+
+async fn spec(args: SpecArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let state = root.join(".ryoko/state/specs.json");
+    let mut index = SpecIndex::load(&state)?;
+    if args.record {
+        let recorded = index.record(&root)?;
+        index.save(&state)?;
+        if args.json {
+            println!(
+                "{}",
+                serde_json::json!({"recorded": recorded, "state": state.display().to_string()})
+            );
+        } else {
+            println!(
+                "Recorded {recorded} specification(s) into {}",
+                state.display()
+            );
+        }
+        return Ok(());
+    }
+    let drift = index.drift(&root)?;
+    if args.json {
+        let entries = drift
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "spec": entry.spec.display().to_string(),
+                    "spec_changed": entry.spec_changed,
+                    "unrecorded": entry.unrecorded,
+                    "changed": entry.changed,
+                    "missing": entry.missing,
+                    "added": entry.added,
+                    "removed": entry.removed,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::json!({"drift": entries}));
+    } else if drift.is_empty() {
+        println!(
+            "No specification drift across {} spec(s)",
+            index.specs.len()
+        );
+    } else {
+        for entry in &drift {
+            println!("{}", entry.describe());
+        }
+    }
+    if drift.is_empty() {
+        return Ok(());
+    }
+    Err(cli_error(format!(
+        "{} specification(s) drifted; update the code or the spec, then re-record with `ryoko spec --record`",
+        drift.len()
+    )))
 }
 
 async fn roles() -> Result<(), Box<dyn Error>> {
@@ -1266,6 +1602,7 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 "ecosystem": plan.ecosystem,
                 "image": plan.image,
                 "dockerfile": plan.dockerfile,
+                "frontend": plan.frontend,
                 "built": !args.no_build,
             })
         );
@@ -1275,6 +1612,12 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
             plan.dockerfile.display(),
             plan.ecosystem.label()
         );
+        if plan.frontend.browser_stack {
+            println!(
+                "Baked headless Chromium at /ms-playwright for: {}",
+                plan.frontend.frameworks.join(", ")
+            );
+        }
         if args.no_build {
             println!("Skipped the image build; pass it to --sandbox-image after building it.");
         } else {
@@ -1391,7 +1734,6 @@ async fn check_worktree(args: CheckArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
-    let mut extractor = ContextExtractor::new()?;
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -1407,9 +1749,9 @@ fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
                     Some(".git" | ".ryoko" | "target" | "node_modules" | "dist")
                 )
         });
-    let mut files = Vec::new();
+    let mut candidates: Vec<SourceFile> = Vec::new();
     for entry in builder.build().filter_map(Result::ok) {
-        if files.len() >= 2_000 {
+        if candidates.len() >= 2_000 {
             break;
         }
         let Some(file_type) = entry.file_type() else {
@@ -1431,14 +1773,12 @@ fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
         if metadata.len() > 512 * 1024 {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        if let Ok(context) = extractor.extract(path, &source) {
-            files.push(context);
-        }
+        candidates.push((path, entry.path().to_path_buf()));
     }
-    Ok(files)
+    // Parsing dominates here, and tree-sitter parsers cannot be shared, so each
+    // worker owns one. The input order is preserved, which keeps the index the
+    // same on every machine regardless of how the walk interleaves.
+    Ok(extract_files(candidates))
 }
 
 fn symbol_index_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
@@ -1520,6 +1860,30 @@ async fn index_workspace(args: IndexArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Builds the optional benchmark gate from the operator's flags. Every perf flag
+/// requires `--perf-command`, and a command requires a metric to read, so a
+/// half-configured gate is rejected instead of silently doing nothing.
+fn perf_config(args: &RunArgs) -> Result<Option<perf::PerfConfig>, Box<dyn Error>> {
+    let Some(command) = args.perf_command.as_deref() else {
+        if args.perf_metric.is_some() {
+            return Err(cli_error("--perf-metric requires --perf-command"));
+        }
+        return Ok(None);
+    };
+    let Some(metric) = args.perf_metric.as_deref() else {
+        return Err(cli_error("--perf-command requires --perf-metric"));
+    };
+    let config = perf::PerfConfig {
+        command: command.to_owned(),
+        metric: metric.to_owned(),
+        max_regression_pct: args.perf_max_regression_pct,
+        baseline: args.perf_baseline.clone(),
+        update_baseline: args.perf_update_baseline,
+    };
+    config.validate().map_err(cli_error)?;
+    Ok(Some(config))
+}
+
 async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     if args.goal.trim().is_empty() {
         return Err(cli_error("goal cannot be empty"));
@@ -1529,51 +1893,60 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let (model, router) = args.model.load()?;
     let manager = GitWorktreeManager::new(&root);
     let sandbox = resolve_sandbox(&args.isolation)?;
+    let perf = perf_config(&args)?;
+    let ui = configured_ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
             SpecPolicy::default(),
             Duration::from_secs(args.timeout_secs),
         )
-        .with_sandbox(sandbox),
+        .with_sandbox(sandbox)
+        .with_perf(perf)
+        .with_ui_capture(ui)
+        .with_artifacts_root(root.join(".ryoko/artifacts")),
     );
     if args.team && !(1..=4).contains(&args.max_concurrency) {
         return Err(cli_error("--max-concurrency must be between 1 and 4"));
     }
-    let agents: Vec<Arc<dyn AgentRuntime>> = if args.team {
-        standard_team()
-            .into_iter()
-            .filter(|member| {
-                matches!(
-                    &member.role,
-                    AgentRole::QaEngineer | AgentRole::Integrator
-                ) || matches!(&member.role, AgentRole::Custom(name)
-                    if matches!(name.as_str(), "software-architect" | "backend-engineer" | "security-engineer"))
-            })
-            .map(|member| {
-                let identity = AgentIdentity::new(
-                    member.role.clone(),
-                    member.role.label(),
-                    member.instructions,
-                );
-                if member.role == AgentRole::Integrator {
-                    Arc::new(IntegrationAgent::new(identity).with_model(model.clone()))
-                        as Arc<dyn AgentRuntime>
-                } else {
-                    Arc::new(ModelAgent::new(identity).with_model(model.clone()))
-                        as Arc<dyn AgentRuntime>
-                }
-            })
-            .collect()
-    } else {
-        vec![Arc::new(
+    let goal = args.goal.clone();
+    // Dynamic routing: the project-manager decomposition decides which
+    // specialists this goal actually needs, so a UI/UX or DevOps agent is only
+    // registered (and only allocated a worktree) when the plan activates it.
+    let dynamic = args.team.then(|| dynamic_plan(&goal));
+    let activated = dynamic
+        .as_ref()
+        .map(|plan| plan.activated_roles().into_iter().collect::<HashSet<_>>());
+    let agents: Vec<Arc<dyn AgentRuntime>> = match activated {
+        Some(activated) => {
+            let members = standard_team();
+            activated
+                .into_iter()
+                .map(|role| {
+                    let member = members.iter().find(|member| member.role == role);
+                    let identity = AgentIdentity::new(
+                        role.clone(),
+                        role.label(),
+                        member.map_or("specialist agent", |member| member.instructions),
+                    );
+                    if role == AgentRole::Integrator {
+                        Arc::new(IntegrationAgent::new(identity).with_model(model.clone()))
+                            as Arc<dyn AgentRuntime>
+                    } else {
+                        Arc::new(ModelAgent::new(identity).with_model(model.clone()))
+                            as Arc<dyn AgentRuntime>
+                    }
+                })
+                .collect()
+        }
+        None => vec![Arc::new(
             ModelAgent::new(AgentIdentity::new(
                 AgentRole::SeniorDeveloper,
                 args.agent,
                 "structured code-generation agent",
             ))
             .with_model(model),
-        )]
+        )],
     };
     let event_log = args
         .event_log
@@ -1589,11 +1962,9 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         active_branch: current_branch(&root).await,
         shared_memory: HashMap::new(),
     };
-    let goal = args.goal.clone();
-    let mut tasks = if args.team {
-        engineering_execution_plan(&goal)
-    } else {
-        vec![Task::new(goal.clone(), AgentRole::SeniorDeveloper)]
+    let mut tasks = match &dynamic {
+        Some(plan) => plan.execution_tasks(),
+        None => vec![Task::new(goal.clone(), AgentRole::SeniorDeveloper)],
     };
     let project_outline = project_brief(&root).await;
     let symbol_context = match indexed_context(&root, &goal) {
@@ -1650,6 +2021,10 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     });
+    // A headless run has no prompt, so the operator names the tools that may
+    // run without one. This never widens the host allowlist; it only fills in
+    // the approval that a human would otherwise give.
+    let headless_approve = mcp::headless_approvals(&args.mcp_headless_approve);
     let mcp = match &args.mcp_server {
         Some(server) => Some(
             mcp::connect_toolbox(
@@ -1657,6 +2032,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 &args.mcp_server_args,
                 &args.mcp_allow_env,
                 &args.mcp_allow_tools,
+                &headless_approve,
                 args.mcp_max_calls,
                 router.ledger().clone(),
             )
@@ -1666,9 +2042,10 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             if !args.mcp_allow_tools.is_empty()
                 || !args.mcp_server_args.is_empty()
                 || !args.mcp_allow_env.is_empty()
+                || !headless_approve.is_empty()
             {
                 return Err(cli_error(
-                    "--mcp-allow-tool/--mcp-server-arg/--mcp-allow-env require --mcp-server",
+                    "--mcp-allow-tool/--mcp-headless-approve/--mcp-server-arg/--mcp-allow-env require --mcp-server",
                 ));
             }
             None
@@ -1678,6 +2055,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         .with_config(OrchestratorConfig {
             max_concurrency: if args.team { args.max_concurrency } else { 1 },
             max_attempts: args.attempts.max(1),
+            max_repair_cycles: args.repair_cycles,
         })
         .with_events(events)
         .with_mcp(mcp);
@@ -1714,6 +2092,24 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         println!("Wrote run report to {}", path.display());
     }
     for success in &report.succeeded {
+        // A visual review verdicts and publishes nothing, so it has no branch to
+        // review; report the verdict rather than an empty branch name.
+        if success.branch.is_empty() {
+            let verdict = success
+                .output
+                .lines()
+                .next()
+                .unwrap_or("passed")
+                .trim()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            println!(
+                "Reviewed {} ({} attempt(s)): {}",
+                success.task_id, success.attempts, verdict
+            );
+            continue;
+        }
         println!(
             "Published {} ({} attempt(s)) on {}",
             success.task_id, success.attempts, success.branch
@@ -1734,12 +2130,136 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     for skipped in &report.skipped {
         eprintln!("Task {} skipped: {}", skipped.task_id, skipped.reason);
     }
+    for repair in &report.repairs {
+        eprintln!(
+            "Repair cycle {}: {} findings routed to {} ({}) - {}",
+            repair.cycle,
+            repair.review_task,
+            repair.role,
+            repair.producer_task,
+            if repair.resolved {
+                "review passed"
+            } else {
+                "review still failing"
+            }
+        );
+    }
+    for escalated in &report.needs_human_review {
+        eprintln!(
+            "Human review required for {} after {} repair cycle(s): {}",
+            escalated.task_id, escalated.repair_cycles, escalated.error
+        );
+    }
     if !report.all_succeeded() {
         return Err(cli_error(
             "one or more agent tasks failed to publish a reviewable change",
         ));
     }
     Ok(())
+}
+
+/// Renders the operator's isolation choice as the provenance backend label.
+fn sandbox_label(isolation: &IsolationArgs) -> String {
+    if isolation.unsafe_host_check {
+        return "host".to_owned();
+    }
+    match isolation.sandbox_backend {
+        SandboxBackendArg::Auto => "oci-auto",
+        SandboxBackendArg::Docker => "docker",
+        SandboxBackendArg::Podman => "podman",
+    }
+    .to_owned()
+}
+
+/// Reads the identity that Git will attribute the commit to. The attestation
+/// names a real human, so a missing identity is an error rather than a guess.
+fn git_identity(root: &Path) -> Result<(String, String), Box<dyn Error>> {
+    let read = |key: &str| -> Result<String, Box<dyn Error>> {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["config", "--get", key])
+            .output()?;
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || value.is_empty() {
+            return Err(cli_error(format!(
+                "no {key} configured in {}; an attestation must name a real approver",
+                root.display()
+            )));
+        }
+        Ok(value)
+    };
+    let name = read("user.name")?;
+    let email = read("user.email")?;
+    if !email.contains('@') {
+        return Err(cli_error("git user.email is not an address"));
+    }
+    Ok((name, email))
+}
+
+/// Session facts an accepted merge records, gathered from the review invocation.
+struct MergeProvenance {
+    role: String,
+    model: String,
+    backend: String,
+    image: Option<String>,
+}
+
+/// Signs and stores the attestation for a merge the human just accepted.
+///
+/// Every field comes from the session that produced the merge: the model and
+/// role from the configured agent, the backend and image from the operator's
+/// isolation flags, the verdict from the validation report, and the approver
+/// from the Git identity that signs the commit. Nothing is inferred from model
+/// output, and with no key configured nothing is signed at all.
+async fn attest_accepted_merge(
+    root: &Path,
+    key: &Path,
+    receipt: &MergeReceipt,
+    report: &ValidationReport,
+    provenance: &MergeProvenance,
+) -> Result<String, String> {
+    let (name, email) = git_identity(root).map_err(|error| error.to_string())?;
+    let models = if provenance.model.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![ModelProvenance {
+            role: provenance.role.to_owned(),
+            model: provenance.model.to_owned(),
+        }]
+    };
+    let options = AttestOptions {
+        commit: receipt.merge_commit.clone(),
+        branch: Some(receipt.target_branch.clone()),
+        models,
+        sandbox: SandboxProvenance {
+            backend: provenance.backend.clone(),
+            image: provenance.image.clone(),
+        },
+        validation: ValidationProvenance {
+            passed: report.passed,
+            summary: report.summary.clone(),
+        },
+        approvers: vec![Approver {
+            name,
+            email,
+            approved_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }],
+        signing_key: key.to_path_buf(),
+    };
+    let envelope = attestation::create(root, &options)
+        .await
+        .map_err(|error| error.to_string())?;
+    let keyid = envelope
+        .signatures
+        .first()
+        .map(|signature| signature.keyid.clone())
+        .unwrap_or_default();
+    let commit = envelope
+        .statement()
+        .map_err(|error| error.to_string())?
+        .predicate
+        .commit;
+    Ok(format!("Attested merge at {commit} with key {keyid}"))
 }
 
 async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
@@ -1758,13 +2278,34 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| default_target(&session));
     let check_command = resolve_check_command(&root, args.check_command.as_deref())?;
     let sandbox = resolve_sandbox(&args.isolation)?;
+    // The signing key is operator configuration, never model output. Without a
+    // key an accepted merge is simply not attested.
+    let attest_key = args
+        .attest_key
+        .clone()
+        .or_else(|| std::env::var_os("RYOKO_ATTEST_KEY").map(PathBuf::from));
+    let attest_model = args
+        .model
+        .model
+        .clone()
+        .or_else(|| env("RYOKO_MODEL"))
+        .unwrap_or_default();
+    let provenance = MergeProvenance {
+        role: args.agent.clone(),
+        model: attest_model.clone(),
+        backend: sandbox_label(&args.isolation),
+        image: args.isolation.sandbox_image.clone(),
+    };
+    let ui = configured_ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
             SpecPolicy::default(),
             Duration::from_secs(args.timeout_secs),
         )
-        .with_sandbox(sandbox),
+        .with_sandbox(sandbox)
+        .with_ui_capture(ui)
+        .with_artifacts_root(root.join(".ryoko/artifacts")),
     );
     let project = ProjectContext {
         project_root: root.display().to_string(),
@@ -1815,6 +2356,16 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                             "Merged {} into {} at {}",
                             receipt.source_branch, receipt.target_branch, receipt.merge_commit
                         );
+                        if let Some(key) = &attest_key {
+                            match attest_accepted_merge(&root, key, &receipt, &report, &provenance)
+                                .await
+                            {
+                                Ok(message) => println!("{message}"),
+                                Err(error) => eprintln!(
+                                    "warning: merge succeeded but attestation failed: {error}"
+                                ),
+                            }
+                        }
                         if let Err(error) = manager.clean_worktree(&session).await {
                             eprintln!("warning: merge succeeded but cleanup failed: {error}");
                         }
@@ -1891,6 +2442,22 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                         {
                             Ok(receipt) => {
                                 println!("Merged selected hunks at {}", receipt.merge_commit);
+                                if let Some(key) = &attest_key {
+                                    match attest_accepted_merge(
+                                        &root,
+                                        key,
+                                        &receipt,
+                                        &selected_report,
+                                        &provenance,
+                                    )
+                                    .await
+                                    {
+                                        Ok(message) => println!("{message}"),
+                                        Err(error) => eprintln!(
+                                            "warning: merge succeeded but attestation failed: {error}"
+                                        ),
+                                    }
+                                }
                                 manager.clean_worktree(&selected).await?;
                                 manager.release_worktree(&session).await?;
                                 return Ok(());
@@ -2252,6 +2819,26 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<String, Bo
         return Ok(String::new());
     }
     Ok(line.trim().to_owned())
+}
+
+/// Builds the visual capture from operator flags. A route without a dev command
+/// is a mistake, not a silent no-op.
+fn configured_ui_capture(
+    command: Option<&str>,
+    routes: &[String],
+) -> Result<Option<UiCapture>, Box<dyn Error>> {
+    let Some(command) = command else {
+        if !routes.is_empty() {
+            return Err(cli_error("--ui-route requires --ui-command"));
+        }
+        return Ok(None);
+    };
+    let mut capture = UiCapture::new(command.trim());
+    for route in routes {
+        capture = capture.with_route(route.as_str());
+    }
+    capture.validate().map_err(cli_error)?;
+    Ok(Some(capture))
 }
 
 fn resolve_check_command(root: &Path, explicit: Option<&str>) -> Result<String, Box<dyn Error>> {
@@ -2691,5 +3278,127 @@ mod tests {
         std::fs::create_dir(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, root.join(".ryoko")).unwrap();
         assert!(symbol_index_path(&root).is_err());
+    }
+
+    async fn git_test(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .await
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn sandbox_label_reflects_the_operator_choice() {
+        let mut isolation = IsolationArgs {
+            sandbox_backend: SandboxBackendArg::Docker,
+            sandbox_image: Some("image:tag".to_owned()),
+            unsafe_host_check: false,
+        };
+        assert_eq!(sandbox_label(&isolation), "docker");
+        isolation.sandbox_backend = SandboxBackendArg::Podman;
+        assert_eq!(sandbox_label(&isolation), "podman");
+        isolation.sandbox_backend = SandboxBackendArg::Auto;
+        assert_eq!(sandbox_label(&isolation), "oci-auto");
+        let host = IsolationArgs {
+            sandbox_backend: SandboxBackendArg::Auto,
+            sandbox_image: None,
+            unsafe_host_check: true,
+        };
+        assert_eq!(sandbox_label(&host), "host");
+    }
+
+    #[test]
+    fn a_missing_git_identity_is_refused_instead_of_guessed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        std::process::Command::new("git")
+            .current_dir(root)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        let error = git_identity(root).unwrap_err().to_string();
+        assert!(error.contains("user.name"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn accepted_merge_is_attested_with_the_session_provenance() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        git_test(root, &["init", "-q", "-b", "main"]).await;
+        git_test(root, &["config", "user.name", "Pourush Nair"]).await;
+        git_test(root, &["config", "user.email", "pourushnair6@gmail.com"]).await;
+        git_test(root, &["config", "commit.gpgsign", "false"]).await;
+        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        git_test(root, &["add", "-A"]).await;
+        git_test(root, &["commit", "-qm", "base"]).await;
+        let base = git_test(root, &["rev-parse", "HEAD"]).await;
+        git_test(root, &["checkout", "-qb", "feature"]).await;
+        std::fs::write(root.join("feature.rs"), "// feature\n").unwrap();
+        git_test(root, &["add", "-A"]).await;
+        git_test(root, &["commit", "-qm", "feature"]).await;
+        git_test(root, &["checkout", "-q", "main"]).await;
+        git_test(root, &["merge", "-q", "--no-ff", "feature", "-m", "merge"]).await;
+        let merge = git_test(root, &["rev-parse", "HEAD"]).await;
+
+        let key = keys.path().join("attest-key");
+        let generated = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .output()
+            .await
+            .unwrap();
+        assert!(generated.status.success());
+
+        let receipt = MergeReceipt {
+            target_branch: "main".to_owned(),
+            previous_tip: base,
+            merge_commit: merge.clone(),
+            source_branch: "feature".to_owned(),
+        };
+        let report = ValidationReport::passed(
+            "pre-flight passed; security audit: clean",
+            Vec::new(),
+            std::time::Duration::from_millis(3),
+        );
+        let provenance = MergeProvenance {
+            role: "backend-developer".to_owned(),
+            model: "local/qwen2.5-coder".to_owned(),
+            backend: "docker".to_owned(),
+            image: Some("sha256:abcd".to_owned()),
+        };
+
+        let message = attest_accepted_merge(root, &key, &receipt, &report, &provenance)
+            .await
+            .unwrap();
+        assert!(message.starts_with("Attested merge at"), "{message}");
+
+        let verified = attestation::verify(
+            root,
+            &merge,
+            &ryoko_worktree::Trust::PublicKey {
+                path: keys.path().join("attest-key.pub"),
+                identity: "pourush".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(verified.commit, merge);
+        assert_eq!(verified.models.len(), 1);
+        assert_eq!(verified.models[0].model, "local/qwen2.5-coder");
+        assert_eq!(verified.models[0].role, "backend-developer");
+        assert_eq!(verified.sandbox.backend, "docker");
+        assert_eq!(verified.sandbox.image.as_deref(), Some("sha256:abcd"));
+        assert_eq!(verified.approvers[0].name, "Pourush Nair");
+        assert_eq!(verified.approvers[0].email, "pourushnair6@gmail.com");
+        assert_eq!(verified.files, vec!["feature.rs".to_owned()]);
     }
 }

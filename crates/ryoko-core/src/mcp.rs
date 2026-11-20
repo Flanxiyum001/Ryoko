@@ -3,9 +3,9 @@
 //! The core owns protocol validation and a mandatory human approval boundary.
 //! Transports and UI prompts are supplied by a trusted host (CLI/desktop).
 //! Tool output is untrusted data, never interpreted as agent instructions.
-use std::collections::{BTreeSet, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ryoko_models::{ToolDefinition, UsageLedger};
@@ -33,6 +33,8 @@ pub enum McpError {
     PermissionDenied,
     #[error("MCP tool `{0}` is not on the host allowlist")]
     ToolNotAllowed(String),
+    #[error("headless-approved MCP tool `{0}` is not on the host allowlist")]
+    HeadlessApprovalNotAllowlisted(String),
     #[error("MCP tool-call budget exceeded: {0}")]
     BudgetExceeded(String),
     #[error("MCP client has not been initialized")]
@@ -62,6 +64,175 @@ pub trait McpApprovalGate: Send + Sync {
     /// A trusted host displays the tool and arguments to a human. An agent
     /// must never supply its own gate or mint an approval token.
     async fn approve(&self, tool: &str, arguments: &Value) -> bool;
+}
+
+/// How long a host grant for one MCP tool applies. This is the scope a native
+/// approval dialog offers: allow this call, allow it for the rest of the run, or
+/// refuse it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpApprovalScope {
+    Once,
+    /// Applies to every later call of the same tool for the rest of the run.
+    ForRun,
+    Deny,
+}
+
+/// Asks a trusted host to choose a scope for one tool call. Implementations are
+/// UI channels (terminal prompt, native dialog); they must never be reachable
+/// from model output.
+#[async_trait]
+pub trait McpApprovalAsker: Send + Sync {
+    async fn ask(&self, tool: &str, arguments: &Value) -> McpApprovalScope;
+}
+
+/// One recorded approval decision. Only the tool name and scope are kept: the
+/// arguments may contain credentials or customer data and never enter the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpApprovalDecision {
+    pub tool: String,
+    pub scope: McpApprovalScope,
+    pub allowed: bool,
+    /// True when an earlier run-scoped grant answered this call without asking.
+    pub reused_grant: bool,
+}
+
+/// [`McpApprovalGate`] with per-tool session scopes.
+///
+/// A `ForRun` answer is remembered for that tool only, so approving `list_issues`
+/// once does not approve `delete_issue`. A `Deny` stops asking for the rest of
+/// the session, because re-prompting a refused tool is a nuisance, not consent.
+/// Everything else asks every time, and a blank tool name is refused without
+/// asking.
+pub struct SessionApprovalGate {
+    asker: Arc<dyn McpApprovalAsker>,
+    granted: Mutex<BTreeSet<String>>,
+    denied: Mutex<BTreeSet<String>>,
+    decisions: Mutex<VecDeque<McpApprovalDecision>>,
+}
+
+const MAX_SESSION_GRANTS: usize = 64;
+const MAX_DECISIONS: usize = 256;
+
+impl SessionApprovalGate {
+    pub fn new(asker: Arc<dyn McpApprovalAsker>) -> Self {
+        Self {
+            asker,
+            granted: Mutex::new(BTreeSet::new()),
+            denied: Mutex::new(BTreeSet::new()),
+            decisions: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// Tools currently allowed for the rest of the session, for display.
+    pub fn grants(&self) -> Vec<String> {
+        self.granted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Decisions in the order they were made, oldest first.
+    pub fn decisions(&self) -> Vec<McpApprovalDecision> {
+        self.decisions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Drops every session grant, for example when a new run starts. A refusal
+    /// stays in force until the gate itself is replaced.
+    pub fn revoke_grants(&self) {
+        self.granted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
+    fn record(&self, decision: McpApprovalDecision) {
+        let mut log = self
+            .decisions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if log.len() >= MAX_DECISIONS {
+            log.pop_front();
+        }
+        log.push_back(decision);
+    }
+}
+
+#[async_trait]
+impl McpApprovalGate for SessionApprovalGate {
+    async fn approve(&self, tool: &str, arguments: &Value) -> bool {
+        if tool.trim().is_empty() {
+            self.record(McpApprovalDecision {
+                tool: String::new(),
+                scope: McpApprovalScope::Deny,
+                allowed: false,
+                reused_grant: false,
+            });
+            return false;
+        }
+        if self
+            .denied
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(tool)
+        {
+            self.record(McpApprovalDecision {
+                tool: tool.to_owned(),
+                scope: McpApprovalScope::Deny,
+                allowed: false,
+                reused_grant: true,
+            });
+            return false;
+        }
+        if self
+            .granted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(tool)
+        {
+            self.record(McpApprovalDecision {
+                tool: tool.to_owned(),
+                scope: McpApprovalScope::ForRun,
+                allowed: true,
+                reused_grant: true,
+            });
+            return true;
+        }
+
+        let scope = self.asker.ask(tool, arguments).await;
+        let allowed = scope != McpApprovalScope::Deny;
+        if allowed && scope == McpApprovalScope::ForRun {
+            let mut granted = self
+                .granted
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            // A recursive approval loop must not grow without bound; past the
+            // cap the call still succeeds but is not remembered.
+            if granted.len() < MAX_SESSION_GRANTS {
+                granted.insert(tool.to_owned());
+            }
+        }
+        if !allowed {
+            self.denied
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(tool.to_owned());
+        }
+        self.record(McpApprovalDecision {
+            tool: tool.to_owned(),
+            scope,
+            allowed,
+            reused_grant: false,
+        });
+        allowed
+    }
 }
 
 /// JSON-RPC MCP client. Use a trusted transport and approval gate; do not
@@ -632,6 +803,168 @@ mod tests {
                 .filter(|method| *method == "tools/call")
                 .count(),
             1
+        );
+    }
+
+    /// Asker that replays a scripted answer list and records what it was asked.
+    struct ScriptedAsker {
+        answers: Mutex<VecDeque<McpApprovalScope>>,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedAsker {
+        fn new(answers: Vec<McpApprovalScope>) -> Self {
+            Self {
+                answers: Mutex::new(answers.into()),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl McpApprovalAsker for ScriptedAsker {
+        async fn ask(&self, tool: &str, _arguments: &Value) -> McpApprovalScope {
+            self.asked.lock().unwrap().push(tool.to_owned());
+            self.answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(McpApprovalScope::Deny)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_once_scope_is_not_remembered() {
+        let asker = Arc::new(ScriptedAsker::new(vec![
+            McpApprovalScope::Once,
+            McpApprovalScope::Once,
+        ]));
+        let gate = SessionApprovalGate::new(asker.clone());
+        assert!(gate.approve("list_issues", &json!({})).await);
+        assert!(gate.approve("list_issues", &json!({})).await);
+        assert_eq!(asker.asked().len(), 2, "a once-only answer must re-ask");
+        assert!(gate.grants().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_scope_applies_to_that_tool_only() {
+        let asker = Arc::new(ScriptedAsker::new(vec![
+            McpApprovalScope::ForRun,
+            McpApprovalScope::Once,
+        ]));
+        let gate = SessionApprovalGate::new(asker.clone());
+        assert!(gate.approve("list_issues", &json!({})).await);
+        assert!(gate.approve("list_issues", &json!({})).await);
+        assert_eq!(
+            asker.asked(),
+            vec!["list_issues"],
+            "the grant answers later calls"
+        );
+
+        // A different tool still asks, so approving one tool never widens the
+        // scope to the rest of the catalogue.
+        assert!(gate.approve("delete_issue", &json!({})).await);
+        assert_eq!(asker.asked(), vec!["list_issues", "delete_issue"]);
+        assert_eq!(gate.grants(), vec!["list_issues".to_owned()]);
+        assert!(gate.decisions()[1].reused_grant);
+    }
+
+    #[tokio::test]
+    async fn a_denial_is_sticky_and_never_re_asks() {
+        let asker = Arc::new(ScriptedAsker::new(vec![
+            McpApprovalScope::Deny,
+            McpApprovalScope::ForRun,
+        ]));
+        let gate = SessionApprovalGate::new(asker.clone());
+        assert!(!gate.approve("delete_issue", &json!({})).await);
+        assert!(!gate.approve("delete_issue", &json!({})).await);
+        assert_eq!(
+            asker.asked(),
+            vec!["delete_issue"],
+            "a refusal is not re-asked"
+        );
+        assert!(gate.grants().is_empty());
+        assert!(!gate.decisions()[1].allowed);
+    }
+
+    #[tokio::test]
+    async fn revoking_grants_forgets_allowances_but_not_refusals() {
+        let asker = Arc::new(ScriptedAsker::new(vec![
+            McpApprovalScope::ForRun,
+            McpApprovalScope::Deny,
+            McpApprovalScope::Once,
+            McpApprovalScope::Deny,
+        ]));
+        let gate = SessionApprovalGate::new(asker.clone());
+        assert!(gate.approve("list_issues", &json!({})).await);
+        assert!(!gate.approve("delete_issue", &json!({})).await);
+        gate.revoke_grants();
+        assert!(gate.grants().is_empty());
+        assert!(gate.approve("list_issues", &json!({})).await, "asks again");
+        assert!(!gate.approve("delete_issue", &json!({})).await);
+        assert_eq!(
+            asker.asked(),
+            vec!["list_issues", "delete_issue", "list_issues"]
+        );
+    }
+
+    #[tokio::test]
+    async fn decisions_and_grants_never_record_tool_arguments() {
+        let asker = Arc::new(ScriptedAsker::new(vec![McpApprovalScope::ForRun]));
+        let gate = SessionApprovalGate::new(asker);
+        gate.approve("list_issues", &json!({"token": "ghp_secret_value"}))
+            .await;
+        let logged = serde_json::to_string(&gate.decisions()).unwrap();
+        assert!(!logged.contains("ghp_secret_value"), "{logged}");
+        assert!(logged.contains("list_issues"));
+    }
+
+    #[tokio::test]
+    async fn a_blank_tool_name_is_refused_without_asking() {
+        let asker = Arc::new(ScriptedAsker::new(vec![McpApprovalScope::ForRun]));
+        let gate = SessionApprovalGate::new(asker.clone());
+        assert!(!gate.approve("   ", &json!({})).await);
+        assert!(asker.asked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_gate_drives_the_client_approval_boundary() {
+        let asker = Arc::new(ScriptedAsker::new(vec![McpApprovalScope::ForRun]));
+        let gate = Arc::new(SessionApprovalGate::new(asker));
+        let client = McpClient::new(
+            FakeTransport {
+                calls: Mutex::new(Vec::new()),
+            },
+            gate.clone(),
+        );
+        client.initialize().await.unwrap();
+        assert!(
+            client
+                .call_tool("read_issue", json!({"id": 1}))
+                .await
+                .is_ok()
+        );
+        assert!(
+            client
+                .call_tool("read_issue", json!({"id": 2}))
+                .await
+                .is_ok()
+        );
+        let calls = client
+            .transport
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| *method == "tools/call")
+            .count();
+        assert_eq!(
+            calls, 2,
+            "the run scope still gates every call through the gate"
         );
     }
 }
