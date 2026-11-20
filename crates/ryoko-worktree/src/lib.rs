@@ -7,14 +7,20 @@
 //! daemon can recover published branches after a restart. Publication returns
 //! a patch, and merging requires a passed validation report.
 
+pub mod attestation;
 pub mod git;
 pub mod hunks;
 pub mod integration;
+
+pub use attestation::{
+    Approver, AttestError, AttestOptions, Envelope, ModelProvenance, SandboxProvenance, Statement,
+    Trust, ValidationProvenance, Verified,
+};
 
 pub use git::{
     GitWorktreeManager, MergeReceipt, WorktreeDiff, WorktreeError, WorktreePullRequest,
     WorktreeRecord, WorktreeSession, WorktreeState,
 };
 
-pub use hunks::{HunkPatch, ReviewHunk};
+pub use hunks::{HunkGroup, HunkPatch, ReviewHunk};
 pub use integration::IntegrationAgent;

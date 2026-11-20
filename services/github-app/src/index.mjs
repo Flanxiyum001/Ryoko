@@ -34,6 +34,33 @@ const broker = new GitHubBroker({
   privateKey,
 });
 const frontendPath = resolve(fileURLToPath(new URL('../../../apps/desktop/', import.meta.url)));
+
+const list = (value) => String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+function jsonList(value, name) {
+  if (!value) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(name + ' must be a JSON array of strings');
+  }
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+    throw new Error(name + ' must be a JSON array of strings');
+  }
+  return parsed;
+}
+// MCP is entirely opt-in for pipeline runs. Without RYOKO_MCP_SERVER the child
+// process gets no server, and every tool call would be denied anyway.
+const mcpServer = process.env.RYOKO_MCP_SERVER ? resolve(process.env.RYOKO_MCP_SERVER) : '';
+const mcp = mcpServer ? {
+  server: mcpServer,
+  serverArgs: jsonList(process.env.RYOKO_MCP_SERVER_ARGS, 'RYOKO_MCP_SERVER_ARGS'),
+  allowEnv: list(process.env.RYOKO_MCP_ALLOW_ENV),
+  allowTools: list(process.env.RYOKO_MCP_ALLOW_TOOLS),
+  // The only approval a headless run can obtain. Every other tool stays denied.
+  headlessApprove: list(process.env.RYOKO_MCP_HEADLESS_APPROVE),
+  maxCalls: Number(process.env.RYOKO_MCP_MAX_CALLS || 0),
+} : null;
 const server = createRyokoServer({
   broker,
   frontendPath,
@@ -47,6 +74,7 @@ const server = createRyokoServer({
     ryokoBinary: process.env.RYOKO_CLI_BIN || '',
     projectRoot: process.env.RYOKO_PROJECT_ROOT || '',
     projectsRoot: process.env.RYOKO_PROJECTS_ROOT || '',
+    mcp,
   },
 });
 

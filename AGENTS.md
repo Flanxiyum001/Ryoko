@@ -77,3 +77,18 @@ architecture decision records, and `docs/releases/` for gates.
 State what you verified and what you did not. "Tests passed" is not a substitute
 for saying which tests ran. A passing build does not prove that a UI renders, a
 provider responds, or a sandbox isolates.
+
+## Authorship
+
+This repository is solely authored and maintained by Pourush Nair
+<pourushnair6@gmail.com>, GitHub `Flanxiyum001`. Every commit is authored and
+committed under that identity.
+
+No AI attribution anywhere in this repository:
+
+- no `Co-Authored-By` trailers naming an AI tool, model or agent;
+- no "Generated with" or "Made with" footer in commit messages;
+- no attribution lines, badges or notes in source comments, docs, README files
+  or release notes.
+
+Commit messages end at their own last line. Do not add a trailer of any kind.

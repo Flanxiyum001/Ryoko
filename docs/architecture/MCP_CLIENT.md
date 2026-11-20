@@ -22,10 +22,77 @@ cargo run -p ryoko-cli -- mcp --server node \
   call --tool list_issues --arguments '{"state":"open"}'
 ```
 
-The CLI prints the chosen tool and its exact argument JSON. It invokes the
-tool **only** if the operator types `YES` for that invocation. A fresh
-approval is required for every call. Server tools cannot grant themselves
-permissions, and listing tools does not imply approval.
+The CLI prints the chosen tool and its exact argument JSON and asks for a scope:
+`[o]` allow once, `[r]` allow this tool for the rest of the run, or `[d]` deny.
+Only an explicit allow widens anything; `YES` is still accepted as "allow once",
+and a blank line, an unknown word, a closed stdin or the 90-second timeout
+denies. While `RYOKO_NONINTERACTIVE` is set the caller refuses without reading
+stdin, so a headless run can never block on a prompt nobody can answer. Server
+tools cannot grant themselves permissions, and listing tools does not imply
+approval.
+
+## Session approval scopes
+
+A host that can show a richer prompt uses `SessionApprovalGate` instead of a
+one-shot boolean. It implements the same `McpApprovalGate` trait and offers the
+three scopes a native dialog needs:
+
+| Scope | Effect |
+| --- | --- |
+| `Once` | This call only. The next call asks again. |
+| `ForRun` | Later calls of **that same tool** are allowed for the rest of the run without asking. Every call still passes through the gate, so the host allowlist, call budget and argument limits still apply. |
+| `Deny` | Refused, and not asked again for the rest of the session. |
+
+Grants are per tool: approving `list_issues` for the run never approves
+`delete_issue`. `revoke_grants()` drops the session's allowances (for example
+when a new run starts) and leaves refusals in force. `decisions()` returns the
+bounded decision log, which records the tool and scope only - the arguments may
+hold credentials or customer data and are never logged. A blank tool name is
+refused without asking, and the grant set is capped so a loop cannot grow it
+without bound.
+
+Scopes are granted by the host. No model output, tool listing or earlier
+successful call can produce a `ForRun` grant on its own.
+
+The CLI wires this gate to `TerminalScopeAsker`. Selecting `[r]` prints the
+tool that was granted for the run, and the run's gate lives for the duration of
+that `ryoko run` invocation only.
+
+## Headless policy
+
+A run with no approval prompt cannot ask anyone, so the operator pre-approves
+named tools instead:
+
+```sh
+ryoko run --team --repo . \
+  --mcp-server /srv/ryoko-mcp --mcp-server-arg --stdio \
+  --mcp-allow-tool list_issues --mcp-allow-tool get_issue \
+  --mcp-headless-approve list_issues \
+  "Fix the failing parser test"
+```
+
+`--mcp-headless-approve` (or `RYOKO_MCP_HEADLESS_APPROVE`, a comma-separated
+list) is consulted **only** when no prompt is possible, that is when
+`RYOKO_NONINTERACTIVE` is set. An interactive session always asks, so a stale
+policy can never answer a question on a human's behalf.
+
+The policy is an approval, not a permission grant:
+
+- every pre-approved tool must also appear in `--mcp-allow-tool`, otherwise the
+  run fails before connecting (`headless-approved MCP tool ... is not on the
+  host allowlist`); the allowlist remains the outer boundary;
+- a pre-approval becomes a `ForRun` scope for that one tool, so the call budget,
+  argument limits and per-call gate still apply;
+- **every tool not named is denied.** An empty or absent policy denies all tool
+  calls, which is the default for a headless run;
+- entries are trimmed, de-duplicated and dropped when blank or containing control
+  characters, and dropping an entry can only ever deny a call.
+
+The GitHub App passes the same settings through its own environment
+(`RYOKO_MCP_SERVER`, `RYOKO_MCP_SERVER_ARGS`, `RYOKO_MCP_ALLOW_ENV`,
+`RYOKO_MCP_ALLOW_TOOLS`, `RYOKO_MCP_HEADLESS_APPROVE`, `RYOKO_MCP_MAX_CALLS`),
+so the issue-to-PR pipeline can use a small, explicitly approved tool set and
+nothing more.
 
 Servers may need credentials. The child gets a minimal PATH and
 temporary-directory environment; all other variables are denied by default.
@@ -80,13 +147,16 @@ build their own trusted transport and approval UI.
 - 15-second per-message timeout; child killed when the transport drops.
 - No shell is invoked to run the server; the server binary and argument
   array are explicitly provided by the operator.
-- Tool calls require human approval through a trusted host-owned gate.
+- Tool calls require human approval through a trusted host-owned gate, either
+  per call or through an explicit per-tool session scope.
 - Agent tools require a non-empty host allowlist; the server catalogue cannot
   add tools to it. Call count and argument size are host-bounded.
 - Remote Streamable HTTP, OAuth, multi-session persistence, sampling and
-  elicitation are **not** implemented. The desktop approval dialog is still
-  pending; the CLI uses its terminal gate.
+  elicitation are **not** implemented. The scoped gate is wired into the CLI;
+  the desktop native approval dialog is still pending, so nothing in the Tauri
+  shell offers the scopes yet.
 
-Next: integrate the gate into Tauri IPC with native approval dialogs. Never
-permit an agent to fabricate an approval gate or execute MCP calls without that
-trusted host implementation.
+Next: surface `SessionApprovalGate` through Tauri IPC so the dialog can offer
+"allow once", "allow for this run" and "deny", and extend the same scoped gate
+to agent shell and network actions. Never permit an agent to fabricate an
+approval gate or execute MCP calls without that trusted host implementation.

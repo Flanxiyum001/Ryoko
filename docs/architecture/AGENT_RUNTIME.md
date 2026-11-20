@@ -85,6 +85,49 @@ proposal requires approval and grants nothing implicitly.
 | Authentication | architect + backend + security + QA |
 | New application | PM + architect + selected specialists |
 
+### Dynamic DAG routing
+
+`ryoko_core::team::dynamic_plan` implements the proposal step for the built-in
+team. The Project Manager task always runs first and owns decomposition; the
+remaining nodes are activated from `GoalSignals`, which is a keyword classifier
+over the goal:
+
+- **UI/UX** runs only when the goal names an interface concern (screen, layout,
+  accessibility, component, theme, ...). Its task carries
+  `ryoko.verify = headless-browser,screenshot`, and QA repeats the same
+  verification metadata so browser evidence is requested rather than assumed.
+- **DevOps** runs only when the goal names delivery work (deploy, CI, container,
+  monitoring, rollback, ...).
+- Architect, backend, full-stack, security and QA are always present, because a
+  change without a producer or a review is not reviewable.
+- The Integrator is appended only when QA and Security both publish a branch,
+  which is its documented minimum.
+
+Signals are routing hints only. They grant no filesystem, network or deployment
+permission, and the generated plan still has to pass
+`Orchestrator::validate_plan` before anything executes.
+
+## Self-healing reviews
+
+A failing QA or Security node is feedback for a producer, not a dead end. After
+the scheduled DAG finishes, `Orchestrator` runs a bounded repair loop
+(`OrchestratorConfig::max_repair_cycles`, default 1, 0 disables it):
+
+1. Each failed QA/Security task is matched to the producer dependency that owns
+   the branch under review (architect, backend, full-stack or UI/UX).
+2. The producer is replayed with the review's test logs or audit findings in
+   `ryoko.feedback`, so a retry is corrective rather than a blind replay.
+3. The review is replayed against the repaired branch.
+4. A review that still fails consumes another cycle until the budget is spent,
+   then the task is reported in `OrchestrationReport::needs_human_review` with
+   the producer it tried and the cycles spent. It stays in `failed` as well.
+5. Nodes that were skipped only because a repaired review had failed are replayed
+   once their dependencies are satisfied again.
+
+Every replay still allocates a fresh workspace lease, must pass validation and
+publishes an ordinary reviewable branch. The loop never merges, pushes or
+deploys.
+
 ## Conflict handling
 
 File locks are necessary but insufficient: two agents can edit different files

@@ -183,6 +183,13 @@ pub fn gemini_wire_body(request: &ChatRequest) -> Result<Value, ModelError> {
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => parts.push(json!({"text":text})),
+                ContentBlock::Image {
+                    media_type,
+                    data_base64,
+                    ..
+                } => parts.push(json!({
+                    "inlineData": {"mimeType": media_type, "data": data_base64}
+                })),
                 ContentBlock::ToolCall {
                     id,
                     name,

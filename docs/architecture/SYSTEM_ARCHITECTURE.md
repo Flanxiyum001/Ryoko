@@ -89,6 +89,10 @@ only record of execution state.
 ## Failure semantics
 
 - A failed validation rolls back the task's lease and skips dependents.
+- A failed QA or Security review routes its test logs or audit findings back to
+  the producing agent for a bounded number of repair cycles, then escalates to
+  human review (`OrchestrationReport::needs_human_review`). Nodes skipped only
+  because that review failed are replayed once their inputs exist again.
 - A crashed run is recoverable from the journal; incomplete attempts are marked
   as such rather than silently resumed.
 - Cancellation propagates to tool execution, runner processes and provider

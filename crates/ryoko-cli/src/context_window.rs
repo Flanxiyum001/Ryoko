@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ryoko_core::context::{ContextExtractor, Language};
+use ryoko_core::context::{Language, SourceFile, extract_files};
 
 const MAX_FILES: usize = 60;
 const MAX_DEPTH: usize = 6;
@@ -34,10 +34,7 @@ pub fn structural_context(root: &Path) -> String {
     walk(root, 0, &mut files);
     files.sort();
 
-    let Ok(mut extractor) = ContextExtractor::new() else {
-        return String::new();
-    };
-    let mut rendered = String::new();
+    let mut sources: Vec<SourceFile> = Vec::with_capacity(files.len());
     for path in files {
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
@@ -46,13 +43,13 @@ pub fn structural_context(root: &Path) -> String {
             continue;
         };
         // Keep prompt paths stable across platforms.
-        let relative = relative.replace('\\', "/");
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(context) = extractor.extract(relative, &source) else {
-            continue;
-        };
+        sources.push((relative.replace('\\', "/"), path));
+    }
+
+    // One parse per file, spread over the available workers. The sorted input
+    // keeps the rendered outline stable.
+    let mut rendered = String::new();
+    for context in extract_files(sources) {
         if context.symbols.is_empty() && context.imports.is_empty() {
             continue;
         }

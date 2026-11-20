@@ -4,7 +4,7 @@
 //! commands only in a container, unless an operator explicitly chooses the
 //! unsafe host backend. No implicit fallback to the host is allowed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,19 @@ use tokio::process::Command;
 const MAX_STREAM_BYTES: u64 = 128 * 1024;
 const MAX_BUILD_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const WORKDIR: &str = "/workspace";
+
+/// Where read-only output (screenshots, traces, reports) is mounted. It is a
+/// bind mount of its own, so artefacts never appear in the Git worktree.
+pub const ARTIFACT_MOUNT: &str = "/ryoko-artifacts";
+
+/// Chromium writes outside its install directory even with a read-only root.
+const TMPFS: &str = "/tmp:rw,noexec,nosuid,size=512m";
+/// Chromium renderers communicate through /dev/shm; the default 64 MiB makes
+/// them crash with SIGBUS on real pages.
+const SHM_SIZE: &str = "512m";
+/// A browser launch forks renderer, GPU and utility processes. 128 was enough
+/// for a test runner and not for Chromium, so this is deliberately generous.
+const PIDS_LIMIT: u32 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildBackend {
@@ -30,6 +43,9 @@ pub struct BuildSandbox {
     /// Operator-prepared OCI image containing the project's compiler and
     /// dependencies. Images are never downloaded during a validation run.
     pub image: Option<String>,
+    /// Optional host directory exposed at [`ARTIFACT_MOUNT`]. It must sit
+    /// outside the worktree that is being checked.
+    artifacts: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,9 +64,104 @@ pub enum BuildSandboxError {
     OutputLimit,
 }
 
+/// The complete `docker run` argument list. It is a pure function so the
+/// hardening flags can be asserted without a container runtime.
+fn run_arguments(
+    name: &str,
+    uid_gid: &str,
+    root: &Path,
+    image: &str,
+    command: &str,
+    artifacts: Option<&Path>,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "--name".to_owned(),
+        name.to_owned(),
+        "--pull=never".to_owned(),
+        "--network=none".to_owned(),
+        "--read-only".to_owned(),
+        "--cap-drop=ALL".to_owned(),
+        "--security-opt=no-new-privileges".to_owned(),
+        format!("--pids-limit={PIDS_LIMIT}"),
+        "--memory=2g".to_owned(),
+        "--cpus=2".to_owned(),
+        // A private IPC namespace still provides /dev/shm. `--ipc=none` hides
+        // it entirely, which is exactly what makes Chromium renderers die.
+        "--ipc=private".to_owned(),
+        format!("--shm-size={SHM_SIZE}"),
+        "--user".to_owned(),
+        uid_gid.to_owned(),
+        "--tmpfs".to_owned(),
+        TMPFS.to_owned(),
+        "--mount".to_owned(),
+        format!("type=bind,source={},target={WORKDIR}", root.display()),
+    ];
+    if let Some(artifacts) = artifacts {
+        args.push("--mount".to_owned());
+        args.push(format!(
+            "type=bind,source={},target={ARTIFACT_MOUNT}",
+            artifacts.display()
+        ));
+    }
+    args.extend([
+        "--workdir".to_owned(),
+        WORKDIR.to_owned(),
+        "--env".to_owned(),
+        "HOME=/tmp".to_owned(),
+        "--env".to_owned(),
+        "CI=true".to_owned(),
+        image.to_owned(),
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        command.to_owned(),
+    ]);
+    args
+}
+
 impl BuildSandbox {
     pub fn new(backend: BuildBackend, image: Option<String>) -> Self {
-        Self { backend, image }
+        Self {
+            backend,
+            image,
+            artifacts: None,
+        }
+    }
+
+    /// Exposes a writable host directory at [`ARTIFACT_MOUNT`] for the duration
+    /// of one run. Everything else in the container stays read-only.
+    pub fn with_artifacts(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.artifacts = Some(dir.into());
+        self
+    }
+
+    /// Creates and validates the artefact directory. It is refused when it sits
+    /// inside the worktree: screenshots must never show up in `git status`.
+    fn prepare_artifacts(&self, root: &Path) -> Result<Option<PathBuf>, BuildSandboxError> {
+        let Some(dir) = &self.artifacts else {
+            return Ok(None);
+        };
+        if dir
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        std::fs::create_dir_all(dir)?;
+        let canonical = dir.canonicalize()?;
+        if !canonical.is_dir()
+            || canonical.starts_with(root)
+            || canonical
+                .to_string_lossy()
+                .chars()
+                .any(|ch| matches!(ch, ',' | '\n' | '\r'))
+        {
+            // Remove the directory only if this call created it empty.
+            let _ = std::fs::remove_dir(&canonical);
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        Ok(Some(canonical))
     }
 
     pub async fn run(
@@ -88,40 +199,17 @@ impl BuildSandbox {
             .map_err(|_| BuildSandboxError::InvalidConfiguration)?
             .as_nanos();
         let name = format!("ryoko-check-{}-{unique}", std::process::id());
-        let mount = format!("type=bind,source={},target={WORKDIR}", root.display());
+        let artifacts = self.prepare_artifacts(&root)?;
 
         let mut process = Command::new(runtime);
-        process.args([
-            "run",
-            "--rm",
-            "--name",
+        process.args(run_arguments(
             &name,
-            "--pull=never",
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--pids-limit=128",
-            "--memory=2g",
-            "--cpus=2",
-            "--ipc=none",
-            "--user",
             &uid_gid,
-            "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=256m",
-            "--mount",
-            &mount,
-            "--workdir",
-            WORKDIR,
-            "--env",
-            "HOME=/tmp",
-            "--env",
-            "CI=true",
+            &root,
             image,
-            "/bin/sh",
-            "-c",
             command,
-        ]);
+            artifacts.as_deref(),
+        ));
         // Even when the CLI is interrupted, remove the named container.
         // Killing the client alone does not guarantee the container stops.
         let result = run_bounded(process, timeout).await;
@@ -300,6 +388,93 @@ async fn run_bounded_with_limit(
         stdout,
         stderr,
     })
+}
+
+#[cfg(test)]
+mod runtime_flags {
+    use super::*;
+
+    fn run_args(artifacts: Option<&Path>) -> Vec<String> {
+        run_arguments(
+            "ryoko-check-1",
+            "1000:1000",
+            Path::new("/repo/worktree"),
+            "ryoko-sandbox:latest",
+            "cargo test",
+            artifacts,
+        )
+    }
+
+    #[test]
+    fn chromium_gets_writable_scratch_space_and_enough_processes() {
+        let args = run_args(None);
+        let has = |value: &str| args.iter().any(|arg| arg == value);
+        assert!(has("--shm-size=512m"), "{args:?}");
+        assert!(has("--pids-limit=256"), "{args:?}");
+        assert!(has("/tmp:rw,noexec,nosuid,size=512m"), "{args:?}");
+        assert!(
+            has("--ipc=private"),
+            "a private IPC namespace keeps /dev/shm"
+        );
+        assert!(!has("--ipc=none"), "--ipc=none removes /dev/shm entirely");
+        // The hardening that must not regress while adding scratch space.
+        assert!(has("--network=none"));
+        assert!(has("--read-only"));
+        assert!(has("--cap-drop=ALL"));
+        assert!(has("--security-opt=no-new-privileges"));
+        assert!(args.contains(&"/bin/sh".to_owned()));
+    }
+
+    #[test]
+    fn artifacts_are_a_separate_optional_mount() {
+        let args = run_args(None);
+        assert!(!args.iter().any(|arg| arg.contains(ARTIFACT_MOUNT)));
+
+        let args = run_args(Some(Path::new("/repo/.ryoko/artifacts/task-1")));
+        assert!(args.contains(&format!(
+            "type=bind,source=/repo/.ryoko/artifacts/task-1,target={ARTIFACT_MOUNT}"
+        )));
+        assert!(args.contains(&"type=bind,source=/repo/worktree,target=/workspace".to_owned()));
+        // The worktree stays the only source mount; artefacts are never mixed in.
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.starts_with("type=bind"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn an_artifacts_directory_inside_the_worktree_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        let sandbox = BuildSandbox::new(BuildBackend::Docker, Some("image:1".to_owned()))
+            .with_artifacts(worktree.join("screenshots"));
+        assert!(matches!(
+            sandbox.prepare_artifacts(&worktree),
+            Err(BuildSandboxError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn an_artifacts_directory_outside_the_worktree_is_created_and_returned() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        let artifacts = dir.path().join(".ryoko/artifacts/task-1");
+        let sandbox = BuildSandbox::new(BuildBackend::Docker, Some("image:1".to_owned()))
+            .with_artifacts(&artifacts);
+        let prepared = sandbox.prepare_artifacts(&worktree).unwrap().unwrap();
+        assert!(prepared.ends_with(".ryoko/artifacts/task-1"));
+        assert!(prepared.is_dir());
+        assert!(
+            BuildSandbox::new(BuildBackend::Docker, None)
+                .prepare_artifacts(&worktree)
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 #[cfg(test)]
