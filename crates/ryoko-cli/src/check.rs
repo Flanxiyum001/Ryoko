@@ -25,6 +25,9 @@ pub struct CommandValidator {
     /// Root for per-task artefact output, mounted into the container. It sits
     /// outside every worktree, so screenshots never reach `git status`.
     artifacts_root: Option<std::path::PathBuf>,
+    /// Operator-configured visual capture. Absent unless the operator named a dev
+    /// command, so no run starts a browser by default.
+    ui: Option<crate::ui_capture::UiCapture>,
 }
 
 impl CommandValidator {
@@ -36,7 +39,15 @@ impl CommandValidator {
             sandbox: BuildSandbox::new(BuildBackend::Auto, None),
             perf: None,
             artifacts_root: None,
+            ui: None,
         }
+    }
+
+    /// Renders UI-touching changes with the sandbox's headless browser, writing
+    /// captures into the task's artifact directory for the UI/UX review.
+    pub fn with_ui_capture(mut self, ui: Option<crate::ui_capture::UiCapture>) -> Self {
+        self.ui = ui;
+        self
     }
 
     /// Exposes `<root>/<task id>` to the container as a writable artefact mount.
@@ -142,6 +153,21 @@ impl ChangeValidator for CommandValidator {
                 self.command,
                 audit.summary()
             );
+            // Captures are evidence for the review, never a gate: a harness that
+            // cannot start is reported in the logs and the change still passes on
+            // its tests and audit.
+            if let Some(ui) = self.ui.as_ref().filter(|ui| ui.touches_ui(&changes.files)) {
+                match ui.capture(&sandbox, root, self.timeout).await {
+                    Ok(lines) => {
+                        logs.extend(lines);
+                        summary.push_str(&format!(
+                            "; visual capture: {} route(s)",
+                            ui.routes().len().max(1)
+                        ));
+                    }
+                    Err(error) => logs.push(format!("visual capture skipped: {error}")),
+                }
+            }
             if let Some(perf) = &self.perf {
                 let outcome = crate::perf::run_gate(&sandbox, root, perf, self.timeout)
                     .await
@@ -301,6 +327,78 @@ mod tests {
         assert!(report.summary.contains("security audit"));
         assert!(report.logs.iter().any(|line| line.contains("GitHub token")));
         assert!(!report.logs.iter().any(|line| line.contains(&token)));
+    }
+
+    #[tokio::test]
+    async fn ui_changes_are_captured_and_other_changes_are_not() {
+        let dir = TempDir::new().unwrap();
+        let harness = dir.path().join("verify-ui.mjs");
+        std::fs::write(&harness, "console.log('captured routes');").unwrap();
+        let validator =
+            CommandValidator::new("true", SpecPolicy::default(), Duration::from_secs(10))
+                .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None))
+                .with_ui_capture(Some(
+                    crate::ui_capture::UiCapture::new("npm run dev")
+                        .with_harness(harness.to_str().unwrap()),
+                ));
+
+        let mut ui_changes = changes(dir.path(), true);
+        ui_changes.files.push(ProposedChange::new(
+            "app/page.tsx",
+            "export default function Page() { return null; }\n",
+        ));
+        let report = validator.validate(&ui_changes).await.unwrap();
+        assert!(report.passed);
+        assert!(
+            report.summary.contains("visual capture: 1 route(s)"),
+            "{}",
+            report.summary
+        );
+        assert!(
+            report
+                .logs
+                .iter()
+                .any(|line| line.contains("captured routes"))
+        );
+
+        let report = validator
+            .validate(&changes(dir.path(), true))
+            .await
+            .unwrap();
+        assert!(report.passed);
+        assert!(
+            !report.summary.contains("visual capture"),
+            "a change that cannot alter a page starts no browser: {}",
+            report.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_ui_harness_is_logged_rather_than_failing_validation() {
+        let dir = TempDir::new().unwrap();
+        let harness = dir.path().join("verify-ui.mjs");
+        std::fs::write(&harness, "process.exit(2);").unwrap();
+        let validator =
+            CommandValidator::new("true", SpecPolicy::default(), Duration::from_secs(10))
+                .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None))
+                .with_ui_capture(Some(
+                    crate::ui_capture::UiCapture::new("npm run dev")
+                        .with_harness(harness.to_str().unwrap()),
+                ));
+        let mut ui_changes = changes(dir.path(), true);
+        ui_changes
+            .files
+            .push(ProposedChange::new("app/page.tsx", "export default null;"));
+
+        let report = validator.validate(&ui_changes).await.unwrap();
+
+        assert!(report.passed, "tests and audit still decide");
+        assert!(
+            report
+                .logs
+                .iter()
+                .any(|line| line.contains("visual capture skipped"))
+        );
     }
 
     #[tokio::test]

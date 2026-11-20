@@ -196,6 +196,69 @@ pub enum ContextError {
     Parse,
 }
 
+/// One file queued for a workspace parse: its repository-relative path and its
+/// location on disk.
+pub type SourceFile = (String, std::path::PathBuf);
+
+/// Parses many files with one extractor per worker, bounded by the available
+/// parallelism, and returns them in the input order.
+///
+/// Parsing dominates a workspace index build, and tree-sitter parsers are cheap
+/// to create but not shareable, so each worker owns one. Files that cannot be
+/// read or parsed are skipped exactly as a sequential build would skip them, and
+/// the stable order keeps the index and the prompt context deterministic.
+pub fn extract_files(files: Vec<SourceFile>) -> Vec<FileContext> {
+    let workers = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(files.len().max(1));
+    if workers <= 1 {
+        let Ok(mut extractor) = ContextExtractor::new() else {
+            return Vec::new();
+        };
+        return parse_files(&mut extractor, &files);
+    }
+
+    let chunk = files.len().div_ceil(workers);
+    let chunks = files.len().div_ceil(chunk);
+    let mut results: Vec<Vec<FileContext>> = vec![Vec::new(); chunks];
+    std::thread::scope(|scope| {
+        let handles = files
+            .chunks(chunk)
+            .enumerate()
+            .map(|(index, slice)| {
+                (
+                    index,
+                    scope.spawn(move || {
+                        let mut extractor = ContextExtractor::new().ok()?;
+                        Some(parse_files(&mut extractor, slice))
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (index, handle) in handles {
+            if let Ok(Some(parsed)) = handle.join() {
+                results[index] = parsed;
+            }
+        }
+    });
+    results.into_iter().flatten().collect()
+}
+
+fn parse_files(extractor: &mut ContextExtractor, files: &[SourceFile]) -> Vec<FileContext> {
+    let mut parsed = Vec::with_capacity(files.len());
+    for (path, location) in files {
+        let Ok(source) = std::fs::read_to_string(location) else {
+            continue;
+        };
+        if let Ok(context) = extractor.extract(path.clone(), &source) {
+            parsed.push(context);
+        }
+    }
+    parsed
+}
+
 /// Parses source into an outline and optional focused snippets.
 pub struct ContextExtractor {
     parser: Parser,
@@ -1010,6 +1073,44 @@ int load() {
         assert_eq!(Language::from_path("a.swift"), Some(Language::Swift));
         assert_eq!(Language::from_path("a.sql"), Some(Language::Sql));
         assert_eq!(Language::from_path("a.txt"), None);
+    }
+
+    #[test]
+    fn parallel_parse_preserves_input_order_and_contents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut files = Vec::new();
+        for index in 0..64 {
+            let name = format!("file_{index}.rs");
+            let source =
+                format!("use std::fmt;\npub fn symbol_{index}() {{}}\npub fn helper() {{}}\n");
+            std::fs::write(dir.path().join(&name), source).unwrap();
+            files.push((format!("src/{name}"), dir.path().join(&name)));
+        }
+
+        let parsed = extract_files(files.clone());
+
+        assert_eq!(parsed.len(), 64);
+        for (index, context) in parsed.iter().enumerate() {
+            assert_eq!(context.path, format!("src/file_{index}.rs"));
+            assert!(
+                context
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.name == format!("symbol_{index}")),
+                "{} must keep its own outline",
+                context.path
+            );
+        }
+        // The worker split must not leak into the result.
+        assert_eq!(parsed, extract_files(files));
+    }
+
+    #[test]
+    fn extracting_no_files_yields_nothing_and_missing_files_are_skipped() {
+        assert!(extract_files(Vec::new()).is_empty());
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = vec![("src/missing.rs".to_owned(), dir.path().join("missing.rs"))];
+        assert!(extract_files(missing).is_empty());
     }
 
     #[test]

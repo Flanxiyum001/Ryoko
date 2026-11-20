@@ -4,6 +4,7 @@ mod context_window;
 mod experience;
 mod mcp;
 mod perf;
+mod ui_capture;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -15,10 +16,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ignore::WalkBuilder;
 use ryoko_core::{
-    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, ContextExtractor,
-    EventSink, FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig,
-    OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA,
-    SharedMemory, StagedChanges, Task, TaskContext, WorkspaceIndex, goal_terms,
+    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, EventSink,
+    FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig, OrchestratorEvent,
+    ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory,
+    SourceFile, StagedChanges, Task, TaskContext, WorkspaceIndex, extract_files, goal_terms,
     spec_link::SpecIndex,
     team::{application_plan, dynamic_plan, standard_team},
     validation::ValidationReport,
@@ -39,6 +40,7 @@ use uuid::Uuid;
 
 use crate::check::{CommandValidator, detect_check_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
+use crate::ui_capture::UiCapture;
 use ryoko_scripting::{
     PluginAgent, PluginHost, PluginLimits, PluginManifest, PluginPolicy, sha256_hex,
 };
@@ -396,6 +398,14 @@ struct RunArgs {
     /// Build/test command run inside the worktree. Auto-detected when omitted.
     #[arg(long)]
     check_command: Option<String>,
+    /// Command that serves the app (for example `npm run dev`), so UI-touching
+    /// changes are rendered with the sandbox's headless browser and the UI/UX
+    /// review has artifacts to look at.
+    #[arg(long = "ui-command", value_name = "COMMAND")]
+    ui_command: Option<String>,
+    /// Route to capture. Repeat per route; defaults to `/`.
+    #[arg(long = "ui-route", value_name = "PATH")]
+    ui_routes: Vec<String>,
     /// Timeout for the pre-flight command.
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
@@ -544,6 +554,13 @@ struct ReviewArgs {
     attest_key: Option<PathBuf>,
     #[arg(long)]
     check_command: Option<String>,
+    /// Command that serves the app, so UI-touching changes are rendered before a
+    /// visual review. Omitted means no captures and no browser.
+    #[arg(long = "ui-command", value_name = "COMMAND")]
+    ui_command: Option<String>,
+    /// Route to capture. Repeat per route; defaults to `/`.
+    #[arg(long = "ui-route", value_name = "PATH")]
+    ui_routes: Vec<String>,
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
     #[command(flatten)]
@@ -1717,7 +1734,6 @@ async fn check_worktree(args: CheckArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
-    let mut extractor = ContextExtractor::new()?;
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -1733,9 +1749,9 @@ fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
                     Some(".git" | ".ryoko" | "target" | "node_modules" | "dist")
                 )
         });
-    let mut files = Vec::new();
+    let mut candidates: Vec<SourceFile> = Vec::new();
     for entry in builder.build().filter_map(Result::ok) {
-        if files.len() >= 2_000 {
+        if candidates.len() >= 2_000 {
             break;
         }
         let Some(file_type) = entry.file_type() else {
@@ -1757,14 +1773,12 @@ fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
         if metadata.len() > 512 * 1024 {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        if let Ok(context) = extractor.extract(path, &source) {
-            files.push(context);
-        }
+        candidates.push((path, entry.path().to_path_buf()));
     }
-    Ok(files)
+    // Parsing dominates here, and tree-sitter parsers cannot be shared, so each
+    // worker owns one. The input order is preserved, which keeps the index the
+    // same on every machine regardless of how the walk interleaves.
+    Ok(extract_files(candidates))
 }
 
 fn symbol_index_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
@@ -1880,6 +1894,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let manager = GitWorktreeManager::new(&root);
     let sandbox = resolve_sandbox(&args.isolation)?;
     let perf = perf_config(&args)?;
+    let ui = ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
@@ -1888,6 +1903,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         )
         .with_sandbox(sandbox)
         .with_perf(perf)
+        .with_ui_capture(ui)
         .with_artifacts_root(root.join(".ryoko/artifacts")),
     );
     if args.team && !(1..=4).contains(&args.max_concurrency) {
@@ -2262,6 +2278,7 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         backend: sandbox_label(&args.isolation),
         image: args.isolation.sandbox_image.clone(),
     };
+    let ui = ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
@@ -2269,6 +2286,7 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
             Duration::from_secs(args.timeout_secs),
         )
         .with_sandbox(sandbox)
+        .with_ui_capture(ui)
         .with_artifacts_root(root.join(".ryoko/artifacts")),
     );
     let project = ProjectContext {
@@ -2783,6 +2801,26 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<String, Bo
         return Ok(String::new());
     }
     Ok(line.trim().to_owned())
+}
+
+/// Builds the visual capture from operator flags. A route without a dev command
+/// is a mistake, not a silent no-op.
+fn ui_capture(
+    command: Option<&str>,
+    routes: &[String],
+) -> Result<Option<UiCapture>, Box<dyn Error>> {
+    let Some(command) = command else {
+        if !routes.is_empty() {
+            return Err(cli_error("--ui-route requires --ui-command"));
+        }
+        return Ok(None);
+    };
+    let mut capture = UiCapture::new(command.trim());
+    for route in routes {
+        capture = capture.with_route(route.as_str());
+    }
+    capture.validate().map_err(cli_error)?;
+    Ok(Some(capture))
 }
 
 fn resolve_check_command(root: &Path, explicit: Option<&str>) -> Result<String, Box<dyn Error>> {

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentRuntime, TaskContext};
 use crate::error::CoreResult;
-use crate::model::{AgentIdentity, AgentRole, ProposedChange, Task, TaskResult};
+use crate::model::{AgentIdentity, ProposedChange, Task, TaskResult};
 use crate::workspace::validate_relative_path;
 
 /// Metadata key used by the orchestrator to carry validation or agent errors
@@ -200,15 +200,31 @@ impl AgentRuntime for ModelAgent {
         // screenshots (or the ARIA tree for a text-only model) are attached and
         // the reply is parsed as a critique rather than a file proposal.
         let mut visual_review = false;
-        if self.identity.role == AgentRole::UiUxDesigner {
+        if task
+            .metadata
+            .contains_key(crate::vision::VISUAL_REVIEW_METADATA)
+        {
             let model = request.model.clone();
-            match visual_review_message(&ctx.project.project_root, task.id, &model) {
+            match visual_review_message(&ctx.project.project_root, &enriched, &model) {
                 Ok(Some(message)) => {
                     request.messages.push(message);
                     visual_review = true;
                     ctx.emit_progress(task.id, "attached captured UI artifacts to the review");
                 }
-                Ok(None) => {}
+                // Capturing is operator configuration, not a gate: a plan must
+                // not fail because no browser evidence exists. Say so plainly
+                // instead of asking a model to review an empty page.
+                Ok(None) => {
+                    ctx.emit_progress(
+                        task.id,
+                        "no captured routes for the tasks under review; visual review skipped",
+                    );
+                    return Ok(TaskResult::success(
+                        task.id,
+                        "visual review skipped: no routes were captured for the tasks under \
+                         review (configure --ui-command to capture them)",
+                    ));
+                }
                 Err(error) => {
                     return Ok(TaskResult::failure(
                         task.id,
@@ -327,15 +343,26 @@ pub fn visual_artifacts_dir(project_root: &str, task_id: uuid::Uuid) -> std::pat
         .join(task_id.to_string())
 }
 
-/// Builds the attachment for a UI/UX task. Returns `None` when the task has no
-/// captured routes, so a role that runs before any verification simply gets its
-/// normal text prompt.
+/// Artifact directories a review task looks at: its own (a direct run) followed
+/// by every task it depends on, which is where the validator wrote the captures
+/// for the change under review.
+pub fn visual_artifacts_dirs(project_root: &str, task: &Task) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![visual_artifacts_dir(project_root, task.id)];
+    for dependency in &task.dependencies {
+        dirs.push(visual_artifacts_dir(project_root, *dependency));
+    }
+    dirs
+}
+
+/// Builds the attachment for a UI/UX review. Returns `None` when nothing was
+/// captured for the tasks under review, so the caller can say so instead of
+/// asking a model to review a blank page.
 pub fn visual_review_message(
     project_root: &str,
-    task_id: uuid::Uuid,
+    task: &Task,
     model: &str,
 ) -> CoreResult<Option<Message>> {
-    let captures = crate::vision::read_captures(&visual_artifacts_dir(project_root, task_id))?;
+    let captures = crate::vision::read_captures_from(&visual_artifacts_dirs(project_root, task))?;
     if captures.is_empty() {
         return Ok(None);
     }
@@ -595,6 +622,90 @@ mod tests {
         assert!(user.contains("error[E0425]"));
     }
 
+    fn agent_context(project_root: &str, router: ryoko_models::ModelRouter) -> TaskContext {
+        TaskContext {
+            project: ProjectContext {
+                project_root: project_root.to_owned(),
+                active_branch: "main".to_owned(),
+                shared_memory: Default::default(),
+            },
+            memory: SharedMemory::new(),
+            models: Arc::new(router),
+            validator: Arc::new(AllowAllValidator),
+            workspace: None,
+            mcp: None,
+            events: EventSink::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_ui_task_without_the_review_flag_still_proposes_files() {
+        let project = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockProvider::new("mock"));
+        mock.push_turn(ScriptedTurn::text(proposal_json()));
+        let mut router = ryoko_models::ModelRouter::new("mock");
+        router.register(mock.clone());
+        let agent = ModelAgent::new(AgentIdentity::new(
+            AgentRole::UiUxDesigner,
+            "ui-01",
+            "designer",
+        ))
+        .with_model("mock/coder");
+        // The producer's own task id has captures, because its change was
+        // rendered. Without the review flag it must still answer with files.
+        let task = Task::new("design the screen", AgentRole::UiUxDesigner);
+        write_capture(project.path(), task.id, "root", "button Buy");
+
+        let result = agent
+            .execute_task(
+                agent_context(project.path().to_str().unwrap(), router),
+                task,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.changes.len(), 2);
+        assert!(
+            !mock.requests()[0]
+                .messages
+                .iter()
+                .any(|message| message.content.iter().any(ContentBlock::is_image))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_without_captures_is_skipped_without_spending_a_request() {
+        let project = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockProvider::new("mock"));
+        let mut router = ryoko_models::ModelRouter::new("mock");
+        router.register(mock.clone());
+        let agent = ModelAgent::new(AgentIdentity::new(
+            AgentRole::UiUxDesigner,
+            "ui-01",
+            "designer",
+        ))
+        .with_model("mock/coder");
+        let task = Task::new("review the screen", AgentRole::UiUxDesigner)
+            .with_metadata(crate::vision::VISUAL_REVIEW_METADATA, "true");
+
+        let result = agent
+            .execute_task(
+                agent_context(project.path().to_str().unwrap(), router),
+                task,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("visual review skipped"),
+            "{}",
+            result.output
+        );
+        assert!(mock.requests().is_empty(), "no model call without evidence");
+    }
+
     fn critique_json(passed: bool) -> String {
         serde_json::json!({
             "passed": passed,
@@ -652,33 +763,45 @@ mod tests {
         assert!(result.error.unwrap().contains("invalid visual critique"));
     }
 
-    #[test]
-    fn ui_captures_are_attached_to_the_review_prompt() {
-        let project = tempfile::TempDir::new().unwrap();
-        let task_id = uuid::Uuid::new_v4();
-        let root = visual_artifacts_dir(project.path().to_str().unwrap(), task_id).join("root");
+    fn write_capture(project: &std::path::Path, task_id: uuid::Uuid, slug: &str, tree: &str) {
+        let root = visual_artifacts_dir(project.to_str().unwrap(), task_id).join(slug);
         std::fs::create_dir_all(&root).unwrap();
+        let route = if slug == "root" {
+            "/".to_owned()
+        } else {
+            format!("/{slug}")
+        };
         std::fs::write(
             root.join("console-errors.json"),
-            r#"{"route":"/","consoleErrors":["Warning: missing key"]}"#,
+            serde_json::json!({ "route": route, "consoleErrors": ["Warning: missing key"] })
+                .to_string(),
         )
         .unwrap();
         std::fs::write(
             root.join("aria-tree.json"),
-            r#"{"source":"ariaSnapshot","tree":"button \"Buy now\""}"#,
+            serde_json::json!({"source": "ariaSnapshot", "tree": tree}).to_string(),
         )
         .unwrap();
         std::fs::write(root.join("desktop.png"), b"\x89PNG\r\n\x1a\nfake").unwrap();
+    }
+
+    #[test]
+    fn a_review_reads_the_captures_of_the_tasks_it_reviews() {
+        let project = tempfile::TempDir::new().unwrap();
+        let producer = Task::new("build the screen", AgentRole::SeniorDeveloper);
+        let review =
+            Task::new("review the screen", AgentRole::UiUxDesigner).with_dependency(producer.id);
+        write_capture(project.path(), producer.id, "root", "button \"Buy now\"");
 
         let root_path = project.path().to_str().unwrap();
-        let vision = visual_review_message(root_path, task_id, "gpt-4o")
+        let vision = visual_review_message(root_path, &review, "gpt-4o")
             .unwrap()
-            .expect("captures exist for this task");
+            .expect("the producer's captures are attached");
         assert!(vision.content.iter().any(ContentBlock::is_image));
 
-        let text_only = visual_review_message(root_path, task_id, "qwen2.5-coder")
+        let text_only = visual_review_message(root_path, &review, "qwen2.5-coder")
             .unwrap()
-            .expect("captures exist for this task");
+            .expect("the producer's captures are attached");
         assert!(
             !text_only.content.iter().any(ContentBlock::is_image),
             "a text-only model must not receive image bytes"
@@ -687,7 +810,35 @@ mod tests {
         assert!(text.contains("Buy now"), "{text}");
         assert!(text.contains("missing key"), "{text}");
 
-        let missing = visual_review_message(root_path, uuid::Uuid::new_v4(), "gpt-4o").unwrap();
-        assert!(missing.is_none());
+        let unmatched = Task::new("review nothing", AgentRole::UiUxDesigner);
+        assert!(
+            visual_review_message(root_path, &unmatched, "gpt-4o")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn captures_from_several_dependencies_are_merged_once_per_route() {
+        let project = tempfile::TempDir::new().unwrap();
+        let first = Task::new("first", AgentRole::SeniorDeveloper);
+        let second = Task::new("second", AgentRole::UiUxDesigner);
+        let review = Task::new("review both", AgentRole::UiUxDesigner)
+            .with_dependency(first.id)
+            .with_dependency(second.id);
+        write_capture(project.path(), first.id, "root", "main");
+        write_capture(project.path(), second.id, "root", "duplicate");
+        write_capture(project.path(), second.id, "pricing", "pricing page");
+
+        let captures = crate::vision::read_captures_from(&visual_artifacts_dirs(
+            project.path().to_str().unwrap(),
+            &review,
+        ))
+        .unwrap();
+
+        assert_eq!(captures.len(), 2, "one capture per route");
+        assert_eq!(captures[0].route, "/");
+        assert_eq!(captures[0].aria_tree.as_deref(), Some("main"));
+        assert_eq!(captures[1].route, "/pricing");
     }
 }
