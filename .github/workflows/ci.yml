@@ -27,7 +27,16 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run tests
-        run: cargo test --workspace --locked
+        run: |
+          # Annotations are readable without fetching logs, and logs need a
+          # signed-in session, so every failing test is surfaced as an error.
+          set +e
+          cargo test --workspace --locked --no-fail-fast > "$RUNNER_TEMP/tests.log" 2>&1
+          status=$?
+          tail -n 150 "$RUNNER_TEMP/tests.log"
+          grep -E "^(test .* FAILED|---- .* stdout ----|thread '.*' panicked at)" "$RUNNER_TEMP/tests.log" \
+            | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+          exit "$status"
       - name: Verify container filesystem and network isolation
         run: |
           docker pull alpine:3.21
