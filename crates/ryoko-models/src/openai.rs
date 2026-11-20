@@ -205,11 +205,17 @@ pub fn wire_body(request: &ChatRequest, stream: bool) -> Value {
 fn wire_message(message: &Message) -> Value {
     let mut text = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut images: Vec<(String, String)> = Vec::new();
     let mut tool_call_id = None;
 
     for block in &message.content {
         match block {
             ContentBlock::Text { text: value } => text.push(value.clone()),
+            ContentBlock::Image {
+                media_type,
+                data_base64,
+                ..
+            } => images.push((media_type.clone(), data_base64.clone())),
             ContentBlock::ToolCall {
                 id,
                 name,
@@ -243,7 +249,19 @@ fn wire_message(message: &Message) -> Value {
     };
     let content = text.join("\n");
     let mut wire = json!({"role": role});
-    if !content.is_empty() || tool_calls.is_empty() {
+    if !images.is_empty() {
+        let mut parts = Vec::new();
+        if !content.is_empty() {
+            parts.push(json!({"type": "text", "text": content}));
+        }
+        for (media_type, data) in &images {
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": {"url": format!("data:{media_type};base64,{data}")}
+            }));
+        }
+        wire["content"] = Value::Array(parts);
+    } else if !content.is_empty() || tool_calls.is_empty() {
         wire["content"] = Value::String(content);
     } else {
         wire["content"] = Value::Null;
@@ -444,6 +462,41 @@ fn map_stop_reason(reason: &str) -> StopReason {
 mod tests {
     use super::*;
     use crate::types::ToolDefinition;
+
+    #[test]
+    fn image_blocks_become_data_url_parts() {
+        let image =
+            ContentBlock::image("image/png", "iVBORw0KGgo=", Some("desktop".into())).unwrap();
+        let message = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "Review these screenshots".to_owned(),
+                },
+                image,
+            ],
+        );
+        let wire = wire_message(&message);
+        let content = wire["content"].as_array().expect("content becomes parts");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+
+        // A text-only message must keep the simpler string content form.
+        let plain = wire_message(&Message::user("just text"));
+        assert!(plain["content"].is_string());
+    }
+
+    #[test]
+    fn invalid_image_blocks_are_refused_before_the_wire() {
+        assert!(ContentBlock::image("image/gif", "AAAA", None).is_err());
+        assert!(ContentBlock::image("image/png", "", None).is_err());
+        assert!(ContentBlock::image("image/png", "not base64!", None).is_err());
+        assert!(ContentBlock::image("image/png", "iVBORw0KGgo=", None).is_ok());
+    }
 
     #[test]
     fn maps_normalized_messages_to_openai_wire_format() {
