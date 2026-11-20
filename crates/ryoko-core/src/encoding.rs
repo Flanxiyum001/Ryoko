@@ -34,8 +34,9 @@ pub fn base64_encode(bytes: &[u8]) -> String {
         written += 4;
     }
     debug_assert_eq!(written, out.len());
-    // The table and the padding are ASCII by construction.
-    String::from_utf8(out).unwrap_or_default()
+    // The table and the padding are ASCII by construction; an empty string here
+    // would silently corrupt a signature or an image payload.
+    String::from_utf8(out).expect("base64 output is ASCII")
 }
 
 /// Decodes canonical base64. Non-canonical padding bits, wrong lengths and any
