@@ -34,7 +34,8 @@ pub use agents::{
     StructuredProposal, parse_structured_proposal, task_branch_key, task_summary_key,
 };
 pub use context::{
-    CallEdge, ContextError, ContextExtractor, ContextSnippet, FileContext, Language, Symbol,
+    CallEdge, ContextError, ContextExtractor, ContextSnippet, FileContext, Language, SourceFile,
+    Symbol, extract_files,
 };
 pub use diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 pub use error::{CoreError, CoreResult};

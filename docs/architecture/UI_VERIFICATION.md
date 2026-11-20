@@ -94,13 +94,21 @@ into the same `ValidationReport` shape every other check uses.
 
 ## The review loop
 
-A `UiUxDesigner` task is a visual review when the harness has captured routes for
-it. The agent reads `<project root>/.ryoko/artifacts/<task id>/`, which the
-validator's writable mount owns, and attaches `vision_message(captures, model)`:
+A task is a visual review only when it carries `ryoko.visual-review`
+(`VISUAL_REVIEW_METADATA`); `dynamic_plan` adds such a node for a design goal,
+depending on the fullstack implementation task. The flag, not the role, decides
+this: `UiUxDesigner` is an ordinary producer otherwise, and a producer must keep
+returning files even when its own branch was rendered. `visual_artifacts_dirs`
+lists the review task's own directory first and then every task it depends on, so
+the captures of the change under review are the ones attached. `read_captures_from`
+merges them one capture per route, and `vision_message(captures, model)` renders
 screenshots and the overflow report for a model that `supports_vision`, the ARIA
-tree and the overflow report alone for a text-only model. With no captures the
-task keeps its ordinary text prompt and proposal contract, so a designer task that
-runs before any verification still works.
+tree and the overflow report alone for a text-only model.
+
+With no captures at all the review is skipped: the task succeeds with a summary
+saying so and emits a progress event, without spending a model request. Capture
+is operator configuration, so a plan is never blocked because no browser evidence
+exists.
 
 A review reply is parsed with `VisualCritique::parse` instead of as a file
 proposal. Passing answers succeed with no proposed changes. A failing critique
@@ -113,12 +121,41 @@ re-runs the review. Whatever still fails after the repair budget escalates to
 human review. A reply that is not a valid critique is a plain failure: prose
 cannot be routed as design feedback.
 
+## Where the captures come from
+
+The validator produces them, in the same worktree and sandbox that ran the tests.
+`--ui-command <cmd>` names the command that serves the app and `--ui-route
+<path>` names each route to render (repeatable, default `/`); without
+`--ui-command` no browser is ever started. When a staged change touches a
+renderable file type (`html`, `css`, `scss`, `sass`, `less`, `jsx`, `tsx`, `vue`,
+`svelte`, `astro`, `mdx`, `styl`) and the test command and security audit have
+already passed, `CommandValidator` runs
+
+```sh
+node /opt/ryoko/verify-ui.mjs --dev-command '<cmd>' --url http://127.0.0.1:4173 \
+  --routes '/,/pricing' --out /ryoko-artifacts --allow-issues
+```
+
+inside the task's sandbox. `/ryoko-artifacts` is the task's artifact mount, so the
+artifacts land in `<project root>/.ryoko/artifacts/<task id>/<route>/` and never in
+the worktree. The operator's dev command is single-quoted rather than
+interpolated, and routes are rejected unless they are absolute, bounded and free
+of whitespace, quotes, commas and `..`.
+
+Captures are evidence, not a gate. `--allow-issues` means captured console errors
+and overflow do not fail validation — the UI/UX review judges them — and a harness
+that cannot start is written to the validation logs as `visual capture skipped:`
+while the change keeps its tests-and-audit verdict. A passing review publishes no
+branch and skips the change-spec policy: an empty change set is not a change, so
+it is recorded as a success without a pull request.
+
 ## What is not implemented
 
-- **Nothing schedules the capture for a review task.** The loop works from
-  whatever captures exist under the review task's artifact directory; no
-  component runs `verify-ui.mjs` for that task id yet. Captures are produced today
-  by an operator or the validator for a producer task.
+- **A breakpoint is not a browser.** The invocation, quoting, route validation and
+  artifact directory are tested with a stand-in harness, and the validator tests
+  cover the UI-touching and broken-harness paths, but no real Chromium ever ran:
+  this environment has no browser binaries and no container image with them baked
+  in.
 - **No browser was executed.** The harness is syntax-checked, its argument
   handling and its process lifecycle are tested against a real local server, but
   the Playwright capture path has never run: this environment has no browser

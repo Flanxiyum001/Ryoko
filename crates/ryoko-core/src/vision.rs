@@ -24,6 +24,10 @@ pub const CONSOLE_ERRORS_FILE: &str = "console-errors.json";
 /// Metadata key the orchestrator reads to route a visual critique back to the
 /// implementing agent.
 pub const VISUAL_FEEDBACK_METADATA: &str = "ryoko.visual-feedback";
+/// Metadata flag that marks a task as a visual review of the tasks it depends
+/// on. Only a task carrying it answers with a critique: the UI/UX role is also
+/// a producer, and a producer must still return files.
+pub const VISUAL_REVIEW_METADATA: &str = "ryoko.visual-review";
 
 const MAX_CAPTURES: usize = 25;
 const MAX_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
@@ -141,6 +145,26 @@ fn failed_requests(value: Option<&serde_json::Value>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Merges several artifact directories, as a review task sees the captures of
+/// every task it depends on. The first capture of a route wins, so the task under
+/// review keeps precedence over a name collision.
+pub fn read_captures_from(dirs: &[PathBuf]) -> CoreResult<Vec<RouteCapture>> {
+    let mut merged: Vec<RouteCapture> = Vec::new();
+    for dir in dirs {
+        for capture in read_captures(dir)? {
+            if merged.iter().any(|kept| kept.route == capture.route) {
+                continue;
+            }
+            if merged.len() >= MAX_CAPTURES {
+                break;
+            }
+            merged.push(capture);
+        }
+    }
+    merged.sort_by(|left, right| left.route.cmp(&right.route));
+    Ok(merged)
 }
 
 /// Reads one artifact directory, sorted by route directory name.

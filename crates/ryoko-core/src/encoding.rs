@@ -1,28 +1,41 @@
 //! Small, dependency-free encodings shared by attestations and vision payloads.
 
 /// Standard base64 with padding, as required by DSSE and by image payloads.
+///
+/// Writes into a pre-sized byte buffer rather than pushing `char`s: image
+/// payloads reach several megabytes, and the whole table is ASCII, so one
+/// allocation plus four stores per three bytes is the cheap path without a new
+/// dependency or any `unsafe`.
 pub fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = u32::from(chunk[0]);
-        let b1 = chunk.get(1).map(|b| u32::from(*b)).unwrap_or(0);
-        let b2 = chunk.get(2).map(|b| u32::from(*b)).unwrap_or(0);
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(triple >> 18) as usize & 0x3f] as char);
-        out.push(TABLE[(triple >> 12) as usize & 0x3f] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(triple >> 6) as usize & 0x3f] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[triple as usize & 0x3f] as char
-        } else {
-            '='
-        });
+    let mut out = vec![0u8; bytes.len().div_ceil(3) * 4];
+    let mut written = 0usize;
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in &mut chunks {
+        let triple = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        out[written] = TABLE[(triple >> 18) as usize & 0x3f];
+        out[written + 1] = TABLE[(triple >> 12) as usize & 0x3f];
+        out[written + 2] = TABLE[(triple >> 6) as usize & 0x3f];
+        out[written + 3] = TABLE[triple as usize & 0x3f];
+        written += 4;
     }
-    out
+    let rest = chunks.remainder();
+    if let Some(&first) = rest.first() {
+        let second = rest.get(1).copied().unwrap_or(0);
+        let triple = (u32::from(first) << 16) | (u32::from(second) << 8);
+        out[written] = TABLE[(triple >> 18) as usize & 0x3f];
+        out[written + 1] = TABLE[(triple >> 12) as usize & 0x3f];
+        out[written + 2] = if rest.len() > 1 {
+            TABLE[(triple >> 6) as usize & 0x3f]
+        } else {
+            b'='
+        };
+        out[written + 3] = b'=';
+        written += 4;
+    }
+    debug_assert_eq!(written, out.len());
+    // The table and the padding are ASCII by construction.
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// Decodes canonical base64. Non-canonical padding bits, wrong lengths and any
@@ -84,6 +97,13 @@ mod tests {
             assert_eq!(base64_decode(&encoded).unwrap(), bytes);
         }
         assert_eq!(base64_decode("QQ==").unwrap(), b"A".to_vec());
+        // Large inputs exercise the chunked path, not only the tail.
+        let large: Vec<u8> = (0..10_000usize)
+            .map(|index| (index * 31 % 256) as u8)
+            .collect();
+        assert_eq!(base64_decode(&base64_encode(&large)).unwrap(), large);
+        assert_eq!(base64_encode(b"\0\0\0"), "AAAA");
+        assert_eq!(base64_encode(b"\0\0"), "AAA=");
         assert!(base64_decode("not base64!!").is_none());
         assert!(
             base64_decode("QQ=").is_none(),

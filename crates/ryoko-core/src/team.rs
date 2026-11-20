@@ -1,6 +1,7 @@
 //! Opinionated, extensible team profiles for an application-building IDE.
 //! These are role contracts, not grants of filesystem, shell or network access.
 use crate::model::{AgentRole, Task};
+use crate::vision::VISUAL_REVIEW_METADATA;
 
 /// Task metadata key naming the verification steps a task must run before it
 /// may be validated. Values are a comma-separated list such as
@@ -306,6 +307,21 @@ pub fn dynamic_plan(goal: &str) -> DynamicPlan {
     }
     tasks.push(implementation.clone());
 
+    // A design goal gets a second UI/UX node: a review of what was rendered,
+    // depending on the implementation so it sees that task's captures. The
+    // designer role is otherwise a producer, so the flag is what makes the reply
+    // a critique instead of a file proposal.
+    if signals.needs_design {
+        tasks.push(
+            Task::new(
+                format!("VISUAL: Review the rendered UI for: {goal}. Judge layout, contrast, spacing, responsive overflow and console errors in the captured routes, and report concrete defects."),
+                AgentRole::UiUxDesigner,
+            )
+            .depends_on(&implementation)
+            .with_metadata(VISUAL_REVIEW_METADATA, "true"),
+        );
+    }
+
     let qa = Task::new(
         format!("QA: Implement executable regression tests for: {goal}. Distinguish proposed tests from executed results."),
         AgentRole::QaEngineer,
@@ -411,6 +427,35 @@ mod tests {
         assert_eq!(tasks[3].dependencies, vec![tasks[1].id]);
         assert_eq!(tasks[4].assigned_to, AgentRole::Integrator);
         assert_eq!(tasks[4].dependencies, vec![tasks[2].id, tasks[3].id]);
+    }
+
+    #[test]
+    fn a_design_goal_reviews_the_rendered_ui_after_the_implementation() {
+        let plan = dynamic_plan("build a responsive dashboard with an accessible layout");
+        let tasks = plan.all_tasks();
+        Orchestrator::validate_plan(&tasks).unwrap();
+        let implementation = tasks
+            .iter()
+            .find(|task| task.assigned_to == AgentRole::SeniorDeveloper)
+            .expect("the plan always has a producer");
+        let review = tasks
+            .iter()
+            .find(|task| task.metadata.contains_key(VISUAL_REVIEW_METADATA))
+            .expect("a design goal needs a visual review");
+        assert_eq!(review.assigned_to, AgentRole::UiUxDesigner);
+        assert_eq!(review.dependencies, vec![implementation.id]);
+        assert_ne!(
+            review.id, implementation.id,
+            "review and producer are distinct"
+        );
+
+        let backend_only = dynamic_plan("add a database migration and a queue worker");
+        assert!(
+            !backend_only
+                .all_tasks()
+                .iter()
+                .any(|task| task.metadata.contains_key(VISUAL_REVIEW_METADATA))
+        );
     }
 
     #[test]
