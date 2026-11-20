@@ -221,29 +221,26 @@ pub fn extract_files(files: Vec<SourceFile>) -> Vec<FileContext> {
     }
 
     let chunk = files.len().div_ceil(workers);
-    let chunks = files.len().div_ceil(chunk);
-    let mut results: Vec<Vec<FileContext>> = vec![Vec::new(); chunks];
+    let mut parsed = Vec::with_capacity(files.len());
     std::thread::scope(|scope| {
         let handles = files
             .chunks(chunk)
-            .enumerate()
-            .map(|(index, slice)| {
-                (
-                    index,
-                    scope.spawn(move || {
-                        let mut extractor = ContextExtractor::new().ok()?;
-                        Some(parse_files(&mut extractor, slice))
-                    }),
-                )
+            .map(|slice| {
+                scope.spawn(move || {
+                    let mut extractor = ContextExtractor::new().ok()?;
+                    Some(parse_files(&mut extractor, slice))
+                })
             })
             .collect::<Vec<_>>();
-        for (index, handle) in handles {
-            if let Ok(Some(parsed)) = handle.join() {
-                results[index] = parsed;
+        // Joining in spawn order is joining in input order, so the result needs
+        // no index bookkeeping to stay deterministic.
+        for handle in handles {
+            if let Ok(Some(parsed_chunk)) = handle.join() {
+                parsed.extend(parsed_chunk);
             }
         }
     });
-    results.into_iter().flatten().collect()
+    parsed
 }
 
 fn parse_files(extractor: &mut ContextExtractor, files: &[SourceFile]) -> Vec<FileContext> {

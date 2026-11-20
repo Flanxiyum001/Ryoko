@@ -1894,7 +1894,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let manager = GitWorktreeManager::new(&root);
     let sandbox = resolve_sandbox(&args.isolation)?;
     let perf = perf_config(&args)?;
-    let ui = ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
+    let ui = configured_ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
@@ -2092,6 +2092,24 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         println!("Wrote run report to {}", path.display());
     }
     for success in &report.succeeded {
+        // A visual review verdicts and publishes nothing, so it has no branch to
+        // review; report the verdict rather than an empty branch name.
+        if success.branch.is_empty() {
+            let verdict = success
+                .output
+                .lines()
+                .next()
+                .unwrap_or("passed")
+                .trim()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            println!(
+                "Reviewed {} ({} attempt(s)): {}",
+                success.task_id, success.attempts, verdict
+            );
+            continue;
+        }
         println!(
             "Published {} ({} attempt(s)) on {}",
             success.task_id, success.attempts, success.branch
@@ -2278,7 +2296,7 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         backend: sandbox_label(&args.isolation),
         image: args.isolation.sandbox_image.clone(),
     };
-    let ui = ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
+    let ui = configured_ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
@@ -2805,7 +2823,7 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<String, Bo
 
 /// Builds the visual capture from operator flags. A route without a dev command
 /// is a mistake, not a silent no-op.
-fn ui_capture(
+fn configured_ui_capture(
     command: Option<&str>,
     routes: &[String],
 ) -> Result<Option<UiCapture>, Box<dyn Error>> {
