@@ -12,8 +12,10 @@ mod init;
 mod process;
 mod spec;
 
-pub use init::{Ecosystem, InitError, SandboxPlan};
-pub use process::{BuildBackend, BuildSandbox, BuildSandboxError};
+pub use init::{
+    Ecosystem, FrontendProfile, InitError, SandboxPlan, VERIFY_UI_CONTAINER_PATH, verify_ui_script,
+};
+pub use process::{ARTIFACT_MOUNT, BuildBackend, BuildSandbox, BuildSandboxError};
 
 pub use spec::{SandboxSpecValidator, SpecError, SpecEvidence, SpecPolicy};
 

@@ -22,6 +22,9 @@ pub struct CommandValidator {
     sandbox: BuildSandbox,
     /// Optional benchmark regression gate. Absent unless the operator set one.
     perf: Option<PerfConfig>,
+    /// Root for per-task artefact output, mounted into the container. It sits
+    /// outside every worktree, so screenshots never reach `git status`.
+    artifacts_root: Option<std::path::PathBuf>,
 }
 
 impl CommandValidator {
@@ -32,7 +35,14 @@ impl CommandValidator {
             timeout: timeout.max(Duration::from_secs(1)),
             sandbox: BuildSandbox::new(BuildBackend::Auto, None),
             perf: None,
+            artifacts_root: None,
         }
+    }
+
+    /// Exposes `<root>/<task id>` to the container as a writable artefact mount.
+    pub fn with_artifacts_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.artifacts_root = Some(root.into());
+        self
     }
 
     /// Runs an additional benchmark gate in the same sandbox after the test
@@ -78,7 +88,15 @@ impl ChangeValidator for CommandValidator {
             ));
         }
 
-        let output = match self.sandbox.run(&self.command, root, self.timeout).await {
+        // One artefact directory per task, created outside the worktree.
+        let sandbox = match &self.artifacts_root {
+            Some(root) => self
+                .sandbox
+                .clone()
+                .with_artifacts(root.join(changes.task_id.to_string())),
+            None => self.sandbox.clone(),
+        };
+        let output = match sandbox.run(&self.command, root, self.timeout).await {
             Ok(output) => output,
             Err(error) => {
                 return Ok(ValidationReport::failed(
@@ -125,7 +143,7 @@ impl ChangeValidator for CommandValidator {
                 audit.summary()
             );
             if let Some(perf) = &self.perf {
-                let outcome = crate::perf::run_gate(&self.sandbox, root, perf, self.timeout)
+                let outcome = crate::perf::run_gate(&sandbox, root, perf, self.timeout)
                     .await
                     .unwrap_or_else(PerfOutcome::Unusable);
                 logs.extend(outcome.describe(&perf.metric));

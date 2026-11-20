@@ -12,6 +12,7 @@ pub mod agent;
 pub mod agents;
 pub mod context;
 pub mod diagnostic;
+pub mod encoding;
 pub mod error;
 pub mod event;
 pub mod iacp;
@@ -24,6 +25,7 @@ pub mod project_memory;
 pub mod spec_link;
 pub mod team;
 pub mod validation;
+pub mod vision;
 pub mod workspace;
 
 pub use agent::{AgentRuntime, TaskContext};

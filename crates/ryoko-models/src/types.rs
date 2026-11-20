@@ -48,6 +48,55 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// Base64 image content for vision-capable models. Adapters render this as
+    /// their own image part; text-only models must never receive it.
+    Image {
+        media_type: String,
+        data_base64: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+}
+
+/// Largest base64 image payload accepted in a single block (~4.5 MiB decoded).
+pub const MAX_IMAGE_BASE64_BYTES: usize = 6 * 1024 * 1024;
+
+impl ContentBlock {
+    /// Builds a validated image block. Unsupported media types, non-base64 data
+    /// and oversized payloads are rejected before they reach a provider.
+    pub fn image(
+        media_type: &str,
+        data_base64: &str,
+        label: Option<String>,
+    ) -> Result<Self, ModelError> {
+        if !matches!(media_type, "image/png" | "image/jpeg" | "image/webp") {
+            return Err(ModelError::Configuration(format!(
+                "unsupported image media type: {media_type}"
+            )));
+        }
+        if data_base64.is_empty() || data_base64.len() > MAX_IMAGE_BASE64_BYTES {
+            return Err(ModelError::Configuration(
+                "image payload is empty or too large".to_owned(),
+            ));
+        }
+        if !data_base64
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        {
+            return Err(ModelError::Configuration(
+                "image payload is not base64".to_owned(),
+            ));
+        }
+        Ok(Self::Image {
+            media_type: media_type.to_owned(),
+            data_base64: data_base64.to_owned(),
+            label,
+        })
+    }
+
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::Image { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
