@@ -31,6 +31,9 @@ pub struct ServerEntry {
 impl ServerEntry {
     fn validate(&self) -> Result<(), String> {
         valid_server_id(&self.id)?;
+        if self.id == crate::lsp::RYOKO_LSP_ID {
+            return Err("ryoko-lsp is reserved for the built-in language server".to_owned());
+        }
         let command = self.command.trim();
         if command.is_empty() {
             return Err(format!("server {} has an empty command", self.id));
@@ -299,6 +302,12 @@ mod tests {
                 "command must be rejected: {command}"
             );
         }
+    }
+
+    #[test]
+    fn the_builtin_server_id_cannot_be_overridden() {
+        let registry = r#"{"servers":[{"id":"ryoko-lsp","command":"python3","languages":["rust"]}]}"#;
+        assert!(LspRegistry::parse(registry).is_err());
     }
 
     #[test]
