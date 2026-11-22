@@ -1,0 +1,942 @@
+//! Operator-controlled MCP stdio transport for the CLI.
+//! External server processes never inherit the complete Ryoko environment.
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use ryoko_core::ConnectorConfig;
+use ryoko_core::connectors::{ConnectorTransport, resolve_required_env};
+use ryoko_core::mcp::{
+    McpApprovalAsker, McpApprovalGate, McpApprovalScope, McpClient, McpError, McpToolPolicy,
+    McpToolService, McpToolbox, McpTransport, NamespacedApprovalGate, SessionApprovalGate,
+    TOOL_NAMESPACE_SEPARATOR,
+};
+use ryoko_models::UsageLedger;
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
+
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MCP_TIMEOUT: Duration = Duration::from_secs(15);
+
+struct McpProcess {
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+pub struct StdioMcpTransport {
+    inner: Mutex<McpProcess>,
+}
+
+impl StdioMcpTransport {
+    pub async fn spawn(
+        executable: &Path,
+        args: &[String],
+        pass_env: &[String],
+    ) -> Result<Self, McpError> {
+        let mut command = Command::from(command_for(executable, args, pass_env)?);
+        command.kill_on_drop(true);
+        Self::start(command).await
+    }
+
+    /// Spawns a connector child with exactly the values the registry resolved
+    /// for it, so an undeclared host variable has no way in.
+    pub async fn spawn_with_env(
+        executable: &Path,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Result<Self, McpError> {
+        let pairs = env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let mut command = Command::from(command_for_env(executable, args, &pairs)?);
+        command.kill_on_drop(true);
+        Self::start(command).await
+    }
+
+    async fn start(mut command: Command) -> Result<Self, McpError> {
+        let mut child = command
+            .spawn()
+            .map_err(|error| McpError::Transport(error.to_string()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpError::Transport("server stdin unavailable".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| McpError::Transport("server stdout unavailable".into()))?;
+        Ok(Self {
+            inner: Mutex::new(McpProcess {
+                _child: child,
+                stdin,
+                stdout: BufReader::new(stdout),
+            }),
+        })
+    }
+}
+
+fn command_for(
+    executable: &Path,
+    args: &[String],
+    pass_env: &[String],
+) -> Result<std::process::Command, McpError> {
+    let mut resolved = Vec::with_capacity(pass_env.len());
+    for name in pass_env {
+        if !valid_env_name(name) {
+            return Err(McpError::Transport("invalid --allow-env name".into()));
+        }
+        let value = std::env::var(name)
+            .map_err(|_| McpError::Transport(format!("environment variable {name} not set")))?;
+        resolved.push((name.clone(), value));
+    }
+    command_for_env(executable, args, &resolved)
+}
+
+fn command_for_env(
+    executable: &Path,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<std::process::Command, McpError> {
+    if args.len() > 64 || env.len() > 32 {
+        return Err(McpError::Transport(
+            "server argument/environment limit exceeded".into(),
+        ));
+    }
+    let mut command = std::process::Command::new(executable);
+    command.args(args);
+    // PATH enables explicitly chosen interpreter wrappers. HOME and
+    // USERPROFILE are deliberately not forwarded: they expose ~/.ssh, ~/.aws
+    // and other per-user credentials to the MCP server.
+    command.env_clear();
+    for name in ["PATH", "TMPDIR", "TEMP"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    for (name, value) in env {
+        if !valid_env_name(name) {
+            return Err(McpError::Transport(
+                "invalid connector environment name".into(),
+            ));
+        }
+        command.env(name, value);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'_'))
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Consume at most 1 MiB for one newline-terminated JSON-RPC frame. Unlike
+/// read_line, a malicious server cannot force unbounded memory allocation.
+async fn read_frame(reader: &mut BufReader<ChildStdout>) -> Result<Value, McpError> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|error| McpError::Transport(error.to_string()))?;
+        if available.is_empty() {
+            return Err(McpError::Transport("MCP server closed stdout".into()));
+        }
+        let take = available
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if bytes.len().saturating_add(take) > MAX_FRAME_BYTES {
+            return Err(McpError::InvalidResponse("MCP frame size exceeded".into()));
+        }
+        let ended = available[take - 1] == b'\n';
+        bytes.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if ended {
+            break;
+        }
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| McpError::InvalidResponse("invalid server JSON".into()))
+}
+
+async fn write_payload(state: &mut McpProcess, payload: &Value) -> Result<(), McpError> {
+    let mut bytes =
+        serde_json::to_vec(payload).map_err(|error| McpError::Transport(error.to_string()))?;
+    if bytes.len() > MAX_REQUEST_BYTES {
+        return Err(McpError::InvalidResponse(
+            "MCP request exceeds 64 KiB".into(),
+        ));
+    }
+    bytes.push(b'\n');
+    state
+        .stdin
+        .write_all(&bytes)
+        .await
+        .map_err(|error| McpError::Transport(error.to_string()))?;
+    state
+        .stdin
+        .flush()
+        .await
+        .map_err(|error| McpError::Transport(error.to_string()))
+}
+
+#[async_trait]
+impl McpTransport for StdioMcpTransport {
+    async fn request(&self, payload: &Value) -> Result<Value, McpError> {
+        let mut state = self.inner.lock().await;
+        tokio::time::timeout(MCP_TIMEOUT, async {
+            write_payload(&mut state, payload).await?;
+            for _ in 0..32 {
+                let reply = read_frame(&mut state.stdout).await?;
+                // MCP server notifications are not user approvals.
+                if reply.get("id").is_some() {
+                    return Ok(reply);
+                }
+            }
+            Err(McpError::InvalidResponse(
+                "too many server notifications".into(),
+            ))
+        })
+        .await
+        .map_err(|_| McpError::Transport("MCP server timed out".into()))?
+    }
+
+    async fn notify(&self, payload: &Value) -> Result<(), McpError> {
+        let mut state = self.inner.lock().await;
+        tokio::time::timeout(MCP_TIMEOUT, write_payload(&mut state, payload))
+            .await
+            .map_err(|_| McpError::Transport("MCP notification timed out".into()))?
+    }
+}
+
+/// Terminal approval asker for the CLI. It offers the same three scopes a native
+/// dialog does: allow this call, allow this tool for the rest of the run, or
+/// deny. Anything unrecognised, a closed stdin or a timeout denies.
+pub struct TerminalScopeAsker {
+    interactive: bool,
+    /// Tools the operator pre-approved for this headless run. Only consulted
+    /// when no prompt is possible; an interactive session always asks.
+    approved: BTreeSet<String>,
+}
+
+impl TerminalScopeAsker {
+    /// Prompts on stdin, waiting up to 90 seconds for an answer.
+    pub fn new() -> Self {
+        Self {
+            interactive: true,
+            approved: BTreeSet::new(),
+        }
+    }
+
+    /// Denies by default, except for the tools the operator pre-approved for
+    /// this run. Never prompts.
+    pub fn non_interactive_with(approved: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            interactive: false,
+            approved: approved.into_iter().collect(),
+        }
+    }
+}
+
+/// The headless policy decision. Absence is a denial: a tool runs without a
+/// human only when the operator named it explicitly.
+fn policy_scope(approved: &BTreeSet<String>, tool: &str) -> McpApprovalScope {
+    if approved.contains(tool) {
+        McpApprovalScope::ForRun
+    } else {
+        McpApprovalScope::Deny
+    }
+}
+
+/// A batch run must never block on a prompt that nobody can answer, so the
+/// non-interactive marker denies instead of waiting for the 90-second timeout.
+fn non_interactive() -> bool {
+    std::env::var("RYOKO_NONINTERACTIVE")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Maps an operator answer to a scope. Only an explicit allow widens it; a blank
+/// line, an unknown word or a closed stdin denies.
+fn scope_from_answer(answer: &str) -> McpApprovalScope {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "o" | "once" | "y" | "yes" => McpApprovalScope::Once,
+        "r" | "run" => McpApprovalScope::ForRun,
+        _ => McpApprovalScope::Deny,
+    }
+}
+
+#[async_trait]
+impl McpApprovalAsker for TerminalScopeAsker {
+    async fn ask(&self, tool: &str, arguments: &Value) -> McpApprovalScope {
+        if !self.interactive {
+            let scope = policy_scope(&self.approved, tool);
+            if scope == McpApprovalScope::Deny {
+                eprintln!("MCP tool `{tool}` denied: no approval UI is attached and the ");
+                eprintln!(
+                    "headless policy (--mcp-headless-approve or RYOKO_MCP_HEADLESS_APPROVE) does not list it"
+                );
+            }
+            return scope;
+        }
+        eprintln!("MCP tool: {tool}");
+        eprintln!("Arguments: {arguments}");
+        eprintln!(
+            "Answer [o] allow once, [r] allow `{tool}` for the rest of this run, or [d] deny (default): "
+        );
+        let mut answer = String::new();
+        let input = tokio::io::stdin();
+        let mut reader = BufReader::new(input);
+        let scope = match tokio::time::timeout(
+            Duration::from_secs(90),
+            tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut answer),
+        )
+        .await
+        {
+            Ok(Ok(_)) => scope_from_answer(&answer),
+            _ => McpApprovalScope::Deny,
+        };
+        if scope == McpApprovalScope::ForRun {
+            eprintln!("Allowed for this run: {tool}");
+        }
+        scope
+    }
+}
+
+/// Session gate wired to the terminal asker: run-scoped grants are remembered
+/// per tool, denials are not re-asked, and every call still passes the host
+/// allowlist, call budget and argument limits inside [`McpClient`].
+fn terminal_gate(headless_approved: &[String]) -> Arc<SessionApprovalGate> {
+    let asker = if non_interactive() {
+        TerminalScopeAsker::non_interactive_with(headless_approved.iter().cloned())
+    } else {
+        TerminalScopeAsker::new()
+    };
+    Arc::new(SessionApprovalGate::new(Arc::new(asker)))
+}
+
+/// Rejects a headless approval that is not also on the host allowlist. The
+/// allowlist is the outer boundary; a pre-approval can never widen it.
+fn validate_headless_policy(allow_tools: &[String], headless: &[String]) -> Result<(), McpError> {
+    match headless.iter().find(|tool| !allow_tools.contains(tool)) {
+        Some(tool) => Err(McpError::HeadlessApprovalNotAllowlisted(tool.clone())),
+        None => Ok(()),
+    }
+}
+
+/// Merges `--mcp-headless-approve` with `RYOKO_MCP_HEADLESS_APPROVE` (comma
+/// separated), trimming, de-duplicating and dropping unusable names. Dropping an
+/// entry can only ever deny a call, so a malformed value fails closed.
+pub fn headless_approvals(flag: &[String]) -> Vec<String> {
+    let env = std::env::var("RYOKO_MCP_HEADLESS_APPROVE").ok();
+    headless_approvals_from(flag, env.as_deref())
+}
+
+fn headless_approvals_from(flag: &[String], env: Option<&str>) -> Vec<String> {
+    let mut tools: Vec<String> = Vec::new();
+    let mut push = |value: &str| {
+        let tool = value.trim();
+        if !tool.is_empty()
+            && tool.len() <= 128
+            && !tool.chars().any(char::is_control)
+            && !tools.iter().any(|seen| seen == tool)
+        {
+            tools.push(tool.to_owned());
+        }
+    };
+    for tool in flag {
+        push(tool);
+    }
+    if let Some(value) = env {
+        for tool in value.split(',') {
+            push(tool);
+        }
+    }
+    tools
+}
+
+/// Builds the host-approved tool surface attached to a `run --team` session.
+/// The allowlist is mandatory, every call still goes through the terminal gate,
+/// and the run's shared ledger is checked before each call.
+pub async fn connect_toolbox(
+    server: &Path,
+    args: &[String],
+    pass_env: &[String],
+    allow_tools: &[String],
+    headless_approve: &[String],
+    max_calls: u64,
+    ledger: UsageLedger,
+) -> Result<Arc<dyn McpToolService>, McpError> {
+    if allow_tools.is_empty() {
+        return Err(McpError::ToolNotAllowed(
+            "pass at least one --mcp-allow-tool".into(),
+        ));
+    }
+    validate_headless_policy(allow_tools, headless_approve)?;
+    let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
+    let client = McpClient::new(transport, terminal_gate(headless_approve))
+        .with_allowed_tools(allow_tools.iter().cloned());
+    let toolbox = McpToolbox::connect(
+        client,
+        McpToolPolicy::new(allow_tools.iter().cloned(), max_calls),
+        Some(ledger),
+        None,
+    )
+    .await?;
+    Ok(Arc::new(toolbox))
+}
+
+/// Splits pre-approvals into tools for the explicitly chosen `--mcp-server` and
+/// tools scoped to a configured connector (`github__list_issues`).
+///
+/// Scoping happens here so that an approval for one connector can never be read
+/// as consent for another connector or the legacy server.
+pub fn split_headless_approvals(
+    approvals: &[String],
+    connector_ids: &[String],
+) -> (Vec<String>, BTreeMap<String, Vec<String>>) {
+    let mut local = Vec::new();
+    let mut scoped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in approvals {
+        let owner = connector_ids.iter().find(|id| {
+            entry
+                .strip_prefix(id.as_str())
+                .and_then(|rest| rest.strip_prefix(TOOL_NAMESPACE_SEPARATOR))
+                .is_some_and(|tool| !tool.is_empty())
+        });
+        match owner {
+            Some(id) => scoped.entry(id.clone()).or_default().push(entry.clone()),
+            None => local.push(entry.clone()),
+        }
+    }
+    (local, scoped)
+}
+
+/// A headless pre-approval for a connector must name a tool that connector
+/// allows, otherwise the run fails before any server starts.
+fn validate_connector_approvals(
+    connector: &ConnectorConfig,
+    approvals: &[String],
+) -> Result<(), McpError> {
+    let prefix = format!("{}{TOOL_NAMESPACE_SEPARATOR}", connector.id);
+    for entry in approvals {
+        let tool = entry.strip_prefix(&prefix).unwrap_or(entry);
+        if !connector
+            .allowed_tools
+            .iter()
+            .any(|allowed| allowed == tool)
+        {
+            return Err(McpError::HeadlessApprovalNotAllowlisted(entry.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Connects every enabled connector as its own namespaced toolbox.
+///
+/// Each child receives only its declared credential variables, keeps its own
+/// allowlist and call budget, and asks through a gate that shows the connector
+/// name before anything runs.
+pub async fn connect_connectors(
+    connectors: &[ConnectorConfig],
+    scoped_approvals: &BTreeMap<String, Vec<String>>,
+    ledger: UsageLedger,
+) -> Result<Vec<(String, Arc<dyn McpToolService>)>, McpError> {
+    let mut mounts = Vec::with_capacity(connectors.len());
+    for connector in connectors {
+        let ConnectorTransport::Stdio { command, args } = &connector.transport else {
+            return Err(McpError::Transport(format!(
+                "connector `{}` uses the {} transport, which this build does not mount",
+                connector.id,
+                connector.transport.kind()
+            )));
+        };
+        let approved = scoped_approvals
+            .get(&connector.id)
+            .cloned()
+            .unwrap_or_default();
+        validate_connector_approvals(connector, &approved)?;
+        let env = resolve_required_env(&connector.id, &connector.required_env, |name| {
+            std::env::var(name).ok()
+        })
+        .map_err(|error| McpError::Transport(error.to_string()))?;
+        let transport = StdioMcpTransport::spawn_with_env(Path::new(command), args, &env).await?;
+        let gate: Arc<dyn McpApprovalGate> = Arc::new(NamespacedApprovalGate::new(
+            connector.id.clone(),
+            terminal_gate(&approved),
+        ));
+        let client = McpClient::new(transport, gate)
+            .with_allowed_tools(connector.allowed_tools.iter().cloned());
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(
+                connector.allowed_tools.iter().cloned(),
+                connector.call_limit(),
+            ),
+            Some(ledger.clone()),
+            None,
+        )
+        .await?;
+        mounts.push((
+            connector.id.clone(),
+            Arc::new(toolbox) as Arc<dyn McpToolService>,
+        ));
+    }
+    Ok(mounts)
+}
+
+pub async fn tools(server: &Path, args: &[String], pass_env: &[String]) -> Result<(), McpError> {
+    let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
+    let client = McpClient::new(transport, terminal_gate(&[]));
+    client.initialize().await?;
+    let tools = client.list_tools().await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&tools)
+            .map_err(|error| McpError::Transport(error.to_string()))?
+    );
+    Ok(())
+}
+
+pub async fn call(
+    server: &Path,
+    args: &[String],
+    pass_env: &[String],
+    tool: &str,
+    arguments: &str,
+) -> Result<(), McpError> {
+    let arguments: Value = serde_json::from_str(arguments)
+        .map_err(|_| McpError::InvalidResponse("tool arguments must be valid JSON".into()))?;
+    if !arguments.is_object() {
+        return Err(McpError::InvalidResponse(
+            "tool arguments must be a JSON object".into(),
+        ));
+    }
+    let transport = StdioMcpTransport::spawn(server, args, pass_env).await?;
+    let client = McpClient::new(transport, terminal_gate(&[]));
+    client.initialize().await?;
+    let available = client.list_tools().await?;
+    if !available.iter().any(|entry| entry.name == tool) {
+        return Err(McpError::InvalidResponse(
+            "tool not advertised by the MCP server".into(),
+        ));
+    }
+    let result = client.call_tool(tool, arguments).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&result)
+            .map_err(|error| McpError::Transport(error.to_string()))?
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryoko_core::mcp::{McpApprovalGate, McpClient, McpToolbox};
+    use ryoko_models::{Budget, UsageLedger};
+    use serde_json::json;
+    use std::path::Path;
+    use std::sync::{Arc, OnceLock};
+    use tempfile::{TempDir, tempdir};
+
+    /// A tiny MCP server compiled with the toolchain that is already running
+    /// these tests. This avoids depending on python3, node or any other
+    /// interpreter being installed on the test machine.
+    const FAKE_SERVER: &str = r##"
+use std::io::{self, BufRead, Write};
+
+fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":");
+    let start = line.find(&needle)? + needle.len();
+    let rest = line[start..].trim_start();
+    if let Some(rest) = rest.strip_prefix('"') {
+        let end = rest.find('"')?;
+        Some(&rest[..end])
+    } else {
+        let end = rest.find(|ch| ch == ',' || ch == '}').unwrap_or(rest.len());
+        Some(rest[..end].trim())
+    }
+}
+
+fn main() {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let method = field(&line, "method").unwrap_or("");
+        if method == "notifications/initialized" {
+            continue;
+        }
+        let id = field(&line, "id").unwrap_or("0");
+        let response = match method {
+            "initialize" => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{INIT}}}"
+            ),
+            "tools/list" => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{TOOLS}}}"
+            ),
+            "tools/call" => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{CALL}}}"
+            ),
+            _ => format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32601,\"message\":\"method not found\"}}}}"
+            ),
+        };
+        let _ = writeln!(stdout, "{response}");
+        let _ = stdout.flush();
+    }
+}
+
+const INIT: &str = r#"{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}"#;
+const TOOLS: &str = r#"{"tools":[{"name":"allowed_tool","description":"allowed","inputSchema":{"type":"object"}},{"name":"other_tool","description":"other","inputSchema":{"type":"object"}}]}"#;
+const CALL: &str = r#"{"content":[{"type":"text","text":"ok"}]}"#;
+"##;
+
+    struct TestApproval(bool);
+    #[async_trait::async_trait]
+    impl McpApprovalGate for TestApproval {
+        async fn approve(&self, _tool: &str, _arguments: &serde_json::Value) -> bool {
+            self.0
+        }
+    }
+
+    fn fake_server_binary() -> &'static Path {
+        static SERVER: OnceLock<(TempDir, std::path::PathBuf)> = OnceLock::new();
+        let (_, binary) = SERVER.get_or_init(|| {
+            let dir = tempdir().expect("fake MCP server temp dir");
+            let source = dir.path().join("fake_mcp_server.rs");
+            std::fs::write(&source, FAKE_SERVER).expect("write fake MCP server source");
+            let binary = dir.path().join(if cfg!(windows) {
+                "fake_mcp_server.exe"
+            } else {
+                "fake_mcp_server"
+            });
+            let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+            let output = std::process::Command::new(rustc)
+                .arg("--edition=2021")
+                .arg("-O")
+                .arg(&source)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .expect("rustc must be available to build the fake MCP server");
+            assert!(
+                output.status.success(),
+                "could not build fake MCP server: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (dir, binary)
+        });
+        binary
+    }
+
+    #[test]
+    fn stdio_command_does_not_forward_home_or_userprofile() {
+        let command = command_for(Path::new("mcp-server"), &[], &[]).unwrap();
+        let names: Vec<String> = command
+            .get_envs()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|name| name.eq_ignore_ascii_case("HOME")),
+            "HOME must not be forwarded: {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("USERPROFILE")),
+            "USERPROFILE must not be forwarded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_environment_names() {
+        assert!(valid_env_name("GITHUB_TOKEN"));
+        assert!(!valid_env_name("PATH=bad"));
+        assert!(!valid_env_name("lowercase"));
+        assert!(!valid_env_name(""));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_allowlist_and_call_cap() {
+        let transport = StdioMcpTransport::spawn(fake_server_binary(), &[], &[])
+            .await
+            .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(true)))
+            .with_allowed_tools(["allowed_tool".to_string()]);
+        let ledger = UsageLedger::new(None);
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(["allowed_tool".to_string()], 1),
+            Some(ledger),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(toolbox.definitions().len(), 1);
+        assert!(
+            toolbox
+                .call("allowed_tool", json!({"id": 1}), None)
+                .await
+                .is_ok()
+        );
+        assert_eq!(toolbox.remaining_calls(), 0);
+        assert!(matches!(
+            toolbox.call("allowed_tool", json!({"id": 2}), None).await,
+            Err(McpError::BudgetExceeded(_))
+        ));
+        assert!(matches!(
+            toolbox.call("other_tool", json!({}), None).await,
+            Err(McpError::ToolNotAllowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_approval_denial() {
+        let transport = StdioMcpTransport::spawn(fake_server_binary(), &[], &[])
+            .await
+            .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(false)));
+        client.initialize().await.unwrap();
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(matches!(
+            client.call_tool("allowed_tool", json!({"id": 1})).await,
+            Err(McpError::PermissionDenied)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stdio_fake_server_budget_exceeded() {
+        let transport = StdioMcpTransport::spawn(fake_server_binary(), &[], &[])
+            .await
+            .unwrap();
+        let client = McpClient::new(transport, Arc::new(TestApproval(true)))
+            .with_allowed_tools(["allowed_tool".to_string()]);
+        let ledger = UsageLedger::new(Some(Budget::new(0.0)));
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(["allowed_tool".to_string()], 3),
+            Some(ledger),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            toolbox.call("allowed_tool", json!({"id": 1}), None).await,
+            Err(McpError::BudgetExceeded(_))
+        ));
+        assert_eq!(toolbox.remaining_calls(), 3);
+    }
+
+    #[test]
+    fn operator_answers_map_to_explicit_scopes() {
+        assert_eq!(scope_from_answer("o"), McpApprovalScope::Once);
+        assert_eq!(scope_from_answer("once"), McpApprovalScope::Once);
+        assert_eq!(scope_from_answer("YES\n"), McpApprovalScope::Once);
+        assert_eq!(scope_from_answer(" R "), McpApprovalScope::ForRun);
+        assert_eq!(scope_from_answer("run"), McpApprovalScope::ForRun);
+        // Anything that is not an explicit allow denies, including a blank line.
+        for answer in ["", "   ", "d", "deny", "n", "no", "allow everything"] {
+            assert_eq!(
+                scope_from_answer(answer),
+                McpApprovalScope::Deny,
+                "answer {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_headless_policy_merges_the_flag_and_the_environment() {
+        let flag = vec![" list_issues ".to_string(), "get_issue".to_string()];
+        assert_eq!(
+            headless_approvals_from(&flag, Some("get_issue, create_comment,")),
+            vec!["list_issues", "get_issue", "create_comment"]
+        );
+        // A malformed or blank entry is dropped, which can only deny a call.
+        assert_eq!(
+            headless_approvals_from(&[], Some(" ,ok,\n\u{0}, ")),
+            vec!["ok"]
+        );
+        assert!(headless_approvals_from(&[], None).is_empty());
+    }
+
+    fn connector(id: &str) -> ConnectorConfig {
+        let mut connector = ryoko_core::builtin_preset("github").unwrap();
+        connector.id = id.to_owned();
+        connector.allowed_tools = vec!["list_issues".to_string()];
+        connector.write_tools.clear();
+        connector
+    }
+
+    #[test]
+    fn headless_approvals_are_scoped_to_the_connector_that_owns_them() {
+        let approvals = vec![
+            "list_issues".to_string(),
+            "github__list_issues".to_string(),
+            "cloudflare__kv_get".to_string(),
+        ];
+        let (local, scoped) = split_headless_approvals(
+            &approvals,
+            &["github".to_string(), "cloudflare".to_string()],
+        );
+        assert_eq!(local, vec!["list_issues"]);
+        assert_eq!(scoped["github"], vec!["github__list_issues"]);
+        assert_eq!(scoped["cloudflare"], vec!["cloudflare__kv_get"]);
+        // A prefix that is not a configured connector stays with the local
+        // server, where the allowlist gate will refuse it.
+        let (local, scoped) =
+            split_headless_approvals(&["slack__post".to_string()], &["github".to_string()]);
+        assert_eq!(local, vec!["slack__post"]);
+        assert!(scoped.is_empty());
+    }
+
+    #[test]
+    fn a_connector_approval_must_be_on_that_connectors_allowlist() {
+        let github = connector("github");
+        assert!(
+            validate_connector_approvals(&github, &["github__list_issues".to_string()]).is_ok()
+        );
+        // An approval for another connector never widens this one.
+        let error = validate_connector_approvals(&github, &["cloudflare__kv_get".to_string()])
+            .expect_err("a foreign approval is not consent");
+        assert!(matches!(
+            error,
+            McpError::HeadlessApprovalNotAllowlisted(tool) if tool == "cloudflare__kv_get"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_connector_with_a_missing_credential_fails_before_spawning() {
+        let mut github = connector("github");
+        github.required_env = vec!["RYOKO_TEST_CONNECTOR_UNSET_VARIABLE".to_string()];
+        let error =
+            match connect_connectors(&[github], &BTreeMap::new(), UsageLedger::new(None)).await {
+                Ok(_) => panic!("a missing credential must stop the mount"),
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(
+            message.contains("RYOKO_TEST_CONNECTOR_UNSET_VARIABLE"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_connector_child_only_receives_its_declared_variables() {
+        let env = vec![
+            (
+                "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "value".to_string(),
+            ),
+            ("CLOUDFLARE_API_TOKEN".to_string(), "other".to_string()),
+        ];
+        let command = command_for_env(Path::new("server"), &[], &env).unwrap();
+        let names = command
+            .get_envs()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for expected in ["GITHUB_PERSONAL_ACCESS_TOKEN", "CLOUDFLARE_API_TOKEN"] {
+            assert!(names.iter().any(|name| name == expected), "{names:?}");
+        }
+        for denied in ["HOME", "USERPROFILE", "AWS_SECRET_ACCESS_KEY"] {
+            assert!(!names.iter().any(|name| name == denied), "{names:?}");
+        }
+        // Only the registry's declared values reach the child.
+        let value = command
+            .get_envs()
+            .find(|(name, _)| *name == "GITHUB_PERSONAL_ACCESS_TOKEN")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(value.as_deref(), Some("value"));
+        assert!(command_for_env(Path::new("server"), &[], &[("home".into(), "x".into())]).is_err());
+    }
+
+    #[test]
+    fn a_headless_approval_must_still_be_on_the_host_allowlist() {
+        let allow = vec!["list_issues".to_string(), "get_issue".to_string()];
+        assert!(validate_headless_policy(&allow, &["list_issues".to_string()]).is_ok());
+        assert!(validate_headless_policy(&allow, &[]).is_ok());
+        let error = validate_headless_policy(&allow, &["delete_issue".to_string()])
+            .expect_err("a pre-approval cannot widen the allowlist");
+        assert!(matches!(
+            error,
+            McpError::HeadlessApprovalNotAllowlisted(tool) if tool == "delete_issue"
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_headless_policy_pre_approves_only_the_listed_tools() {
+        let asker = TerminalScopeAsker::non_interactive_with(["allowed_tool".to_string()]);
+        assert_eq!(
+            asker.ask("allowed_tool", &json!({})).await,
+            McpApprovalScope::ForRun
+        );
+        assert_eq!(
+            asker.ask("other_tool", &json!({})).await,
+            McpApprovalScope::Deny
+        );
+
+        let gate = SessionApprovalGate::new(Arc::new(asker));
+        assert!(gate.approve("allowed_tool", &json!({})).await);
+        // The pre-approval is a run grant, so the next call reuses it.
+        assert!(gate.approve("allowed_tool", &json!({})).await);
+        assert_eq!(gate.grants(), vec!["allowed_tool".to_string()]);
+        assert!(gate.decisions()[1].reused_grant);
+        assert!(!gate.approve("other_tool", &json!({})).await);
+    }
+
+    #[tokio::test]
+    async fn an_empty_headless_policy_denies_every_tool() {
+        let asker = TerminalScopeAsker::non_interactive_with(Vec::<String>::new());
+        for tool in ["allowed_tool", "other_tool"] {
+            assert_eq!(asker.ask(tool, &json!({})).await, McpApprovalScope::Deny);
+        }
+    }
+
+    #[test]
+    fn an_interactive_asker_never_pre_approves_anything() {
+        // Constructing `new` does not touch stdin; only `ask` does. Its policy
+        // set must be empty so the prompt is always the deciding step.
+        assert!(TerminalScopeAsker::new().approved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_non_interactive_run_denies_without_waiting_for_input() {
+        let asker = TerminalScopeAsker::non_interactive_with(Vec::<String>::new());
+        assert_eq!(
+            asker.ask("allowed_tool", &json!({"id": 1})).await,
+            McpApprovalScope::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn the_non_interactive_terminal_gate_denies_every_call() {
+        let gate =
+            SessionApprovalGate::new(Arc::new(TerminalScopeAsker::non_interactive_with(Vec::<
+                String,
+            >::new(
+            ))));
+        assert!(!gate.approve("allowed_tool", &json!({})).await);
+        assert!(gate.grants().is_empty());
+        assert_eq!(gate.decisions().len(), 1);
+        assert!(!gate.decisions()[0].allowed);
+    }
+}

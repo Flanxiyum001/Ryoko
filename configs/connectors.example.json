@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "connectors": [
+    {
+      "id": "github",
+      "name": "GitHub",
+      "category": "Source Control",
+      "description": "Issues, pull requests and repository files through the official GitHub MCP server. Uses a fine-grained personal access token read from GITHUB_PERSONAL_ACCESS_TOKEN.",
+      "transport": {
+        "kind": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-github"]
+      },
+      "required_env": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+      "allowed_tools": [
+        "list_issues",
+        "get_issue",
+        "list_pull_requests",
+        "get_pull_request",
+        "search_repositories",
+        "get_file_contents"
+      ],
+      "write_tools": [
+        "create_issue",
+        "create_pull_request",
+        "create_or_update_file",
+        "push_files",
+        "create_branch"
+      ],
+      "enabled": false,
+      "max_calls_per_run": 20
+    },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare",
+      "category": "Cloud & Infra",
+      "description": "Workers, KV and DNS inspection through the Cloudflare MCP server. Requires a scoped API token and the account identifier.",
+      "transport": {
+        "kind": "stdio",
+        "command": "npx",
+        "args": ["-y", "@cloudflare/mcp-server-cloudflare"]
+      },
+      "required_env": ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+      "allowed_tools": [
+        "list_workers",
+        "get_worker",
+        "list_kv_namespaces",
+        "kv_get",
+        "list_d1_databases",
+        "list_dns_records"
+      ],
+      "write_tools": ["kv_put", "kv_delete", "deploy_worker", "create_dns_record", "delete_dns_record"],
+      "enabled": false,
+      "max_calls_per_run": 20
+    },
+    {
+      "id": "filesystem",
+      "name": "Filesystem",
+      "category": "Workspace",
+      "description": "Bounded read access to the workspace through the reference filesystem server. Writes stay disabled until you allow them explicitly.",
+      "transport": {
+        "kind": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      },
+      "required_env": [],
+      "allowed_tools": ["read_file", "read_multiple_files", "list_directory", "directory_tree", "search_files"],
+      "write_tools": ["write_file", "edit_file", "move_file", "create_directory"],
+      "enabled": false,
+      "max_calls_per_run": 25
+    },
+    {
+      "id": "fetch",
+      "name": "Fetch",
+      "category": "Workspace",
+      "description": "Fetch a public URL and convert it to markdown. Useful for documentation lookups without handing over credentials.",
+      "transport": {
+        "kind": "stdio",
+        "command": "npx",
+        "args": ["-y", "mcp-server-fetch"]
+      },
+      "required_env": [],
+      "allowed_tools": ["fetch"],
+      "write_tools": [],
+      "enabled": false,
+      "max_calls_per_run": 10
+    },
+    {
+      "id": "custom",
+      "name": "Custom MCP connector",
+      "category": "Custom",
+      "description": "Template for any reviewed MCP server. Replace the command and arguments, then list exactly the tools you allow. Secrets belong in environment variables, never in this file.",
+      "transport": {
+        "kind": "stdio",
+        "command": "npx",
+        "args": ["-y", "@your-scope/mcp-server"]
+      },
+      "required_env": [],
+      "allowed_tools": [],
+      "write_tools": [],
+      "enabled": false
+    }
+  ]
+}

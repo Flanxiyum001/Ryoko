@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Ryoko</title>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
+      <div class="workspace-name" id="workspaceName">No folder open</div>
+      <div class="top-actions">
+        <button id="openFolder" class="button primary" type="button">Open folder…</button>
+        <button id="saveFile" class="button ghost" type="button" disabled>Save</button>
+        <button id="openSettings" class="button ghost" type="button">Settings</button>
+        <span class="shortcut-hint">⌘S / Ctrl+S</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="explorer" aria-label="Workspace explorer">
+        <div class="panel-head"><span>EXPLORER</span><span id="fileCount" class="counter">0 files</span></div>
+        <label class="sr-only" for="fileFilter">Filter files</label>
+        <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
+        <div id="fileList" class="file-list">
+          <p class="hint">Open a folder to browse its files.</p>
+        </div>
+      </aside>
+
+      <main class="editor-column" aria-label="Code editor">
+        <div class="tabbar">
+          <span id="activePath" class="active-path">No file open</span>
+          <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
+          <span class="status-spacer"></span>
+          <button id="toggleTerminal" class="button ghost compact" type="button">Terminal</button>
+          <button id="toggleDebug" class="button ghost compact" type="button">Debug</button>
+        </div>
+        <div id="editor" class="editor hidden"></div>
+        <div class="diff-review hidden" id="diffReview">
+          <div class="diff-review-bar">
+            <span id="diffReviewPath">Review diff</span>
+            <span class="hint">Inline hunk actions update the working tree or start a revision run.</span>
+            <button id="diffReviewClose" class="button ghost compact" type="button">Close diff</button>
+          </div>
+          <div id="diffEditor" class="diff-editor"></div>
+        </div>
+        <div id="emptyEditor" class="empty-editor">
+          <div class="empty-mark" aria-hidden="true">⌘</div>
+          <h1>Ryoko Desktop</h1>
+          <p>Open a folder, edit files with Monaco, and see findings published by <code>ryoko-lsp</code>.</p>
+        </div>
+        <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
+          <div class="bottom-tabs">
+            <button id="terminalTab" class="bottom-tab active" type="button">TERMINAL</button>
+            <button id="searchTab" class="bottom-tab" type="button">SEARCH</button>
+            <button id="debugTab" class="bottom-tab" type="button">DEBUG</button>
+            <span id="bottomStatus" class="hint"></span>
+            <span class="status-spacer"></span>
+            <button id="bottomClose" class="button ghost compact" type="button">Hide</button>
+          </div>
+          <div id="terminalPanel" class="bottom-content terminal-panel">
+            <div class="terminal-toolbar">
+              <button id="terminalStart" class="button primary compact" type="button">Start shell</button>
+              <button id="terminalStop" class="button ghost compact" type="button" disabled>Stop</button>
+              <span class="hint">Local PTY in the open workspace. The shell starts only when you ask.</span>
+            </div>
+            <div id="terminalHost" class="terminal-host"></div>
+          </div>
+                    <div id="searchPanel" class="bottom-content search-panel hidden">
+            <div class="search-controls">
+              <input id="searchInput" type="search" placeholder="Search workspace (regex…)" autocomplete="off" spellcheck="false">
+              <label class="run-check"><input id="searchCaseSensitive" type="checkbox"> Aa</label>
+              <button id="searchRun" class="button primary compact" type="button">Search</button>
+              <input id="searchReplace" type="text" placeholder="Replace with… ($1 groups)" autocomplete="off" spellcheck="false">
+              <button id="searchReplaceRun" class="button compact" type="button" disabled>Preview, then apply</button>
+            </div>
+            <div id="searchResults" class="search-results" aria-live="polite">
+              <p class="hint">Searches the open workspace with the Rust regex engine.</p>
+            </div>
+          </div>
+<div id="debugPanel" class="bottom-content debug-panel hidden">
+            <div class="debug-toolbar">
+              <label for="debugAdapter">Adapter</label>
+              <input id="debugAdapter" type="text" spellcheck="false" placeholder="dlv">
+              <label for="debugArgs">Args</label>
+              <input id="debugArgs" type="text" spellcheck="false" placeholder="dap">
+              <label for="debugProgram">Program</label>
+              <input id="debugProgram" type="text" spellcheck="false" placeholder="path/to/program">
+              <button id="debugStart" class="button primary compact" type="button">Start</button>
+              <button id="debugStop" class="button ghost compact" type="button" disabled>Stop</button>
+            </div>
+            <div class="debug-toolbar">
+              <button id="debugContinue" class="button ghost compact" type="button" disabled>Continue</button>
+              <button id="debugNext" class="button ghost compact" type="button" disabled>Step over</button>
+              <button id="debugStepIn" class="button ghost compact" type="button" disabled>Step in</button>
+              <button id="debugStepOut" class="button ghost compact" type="button" disabled>Step out</button>
+              <button id="debugBreakpoint" class="button ghost compact" type="button" disabled>Toggle breakpoint</button>
+              <span id="debugStatus" class="hint">Start a DAP adapter over stdio. No debugger is emulated.</span>
+            </div>
+            <pre id="debugLog" class="debug-log" aria-live="polite"></pre>
+          </div>
+        </section>
+      </main>
+
+      <aside class="problems" aria-label="Mission Control and diagnostics">
+        <section class="agent-sessions" aria-label="Agent sessions">
+          <div class="panel-head"><span>AGENT SESSIONS</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
+          <div class="agent-session-toolbar">
+            <button id="agentSessionRefresh" class="button ghost compact" type="button">Refresh</button>
+          </div>
+          <div id="agentSessionList" class="agent-session-list" aria-live="polite">
+            <p class="hint">Open a workspace to see active and published agent worktrees.</p>
+          </div>
+        </section>
+        <section class="mission" aria-label="Mission Control">
+          <div class="panel-head"><span>MISSION CONTROL</span><span id="missionSummary" class="counter">no events</span></div>
+          <form id="runForm" class="run-controls" aria-label="Start an agent run">
+            <label for="runGoal">Goal</label>
+            <textarea id="runGoal" rows="2" maxlength="8000" placeholder="Describe the change the team should make…"></textarea>
+            <div class="run-sliders">
+              <label for="runBudget">Budget <output id="runBudgetValue">$5.00</output></label>
+              <input id="runBudget" type="range" min="0.25" max="25" step="0.25" value="5">
+              <label for="runConcurrency">Concurrency <output id="runConcurrencyValue">2</output></label>
+              <input id="runConcurrency" type="range" min="1" max="4" step="1" value="2">
+            </div>
+            <label for="runSandbox">Sandbox image</label>
+            <div class="run-sandbox-row">
+              <input id="runSandbox" type="text" spellcheck="false" placeholder="OCI image used for validation">
+              <button id="sandboxInit" class="button ghost compact" type="button">Generate image</button>
+            </div>
+            <div class="run-actions">
+              <label class="run-check"><input id="runTeam" type="checkbox" checked> Team DAG</label>
+              <button id="runStart" class="button primary compact" type="submit">Run</button>
+              <button id="runPause" class="button ghost compact" type="button" disabled>Pause</button>
+              <button id="runCancel" class="button ghost compact" type="button" disabled>Cancel</button>
+            </div>
+            <span id="runState" class="hint" role="status" aria-live="polite">No run started.</span>
+            <pre id="runLog" class="run-log hidden" aria-label="Agent run output"></pre>
+          </form>
+          <div class="mission-toolbar">
+            <label class="sr-only" for="missionLog">Mission Control event log</label>
+            <select id="missionLog" class="mission-select"></select>
+            <button id="missionRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="missionFocus" class="button ghost compact" type="button" disabled>Focus</button>
+          </div>
+          <div id="missionGraph" class="mission-graph">
+            <p class="hint">Run <code>ryoko run --event-log .ryoko/events/run.jsonl</code> to watch the task graph.</p>
+          </div>
+          <div id="missionDetail" class="mission-detail">
+            <p class="hint">Select a task to inspect its brief, validation and output.</p>
+          </div>
+        </section>
+        <details class="connectors" id="connectorsPanel" open>
+          <summary>CONNECTORS <span id="connectorCount" class="counter">not loaded</span></summary>
+          <div class="connectors-toolbar">
+            <span id="connectorPath" class="connector-path">Open a folder to configure connectors.</span>
+            <button id="connectorRefresh" class="button ghost compact" type="button">Refresh</button>
+          </div>
+          <p id="connectorNotice" class="connector-notice hidden" role="alert"></p>
+          <div id="connectorList" class="connector-list" aria-live="polite">
+            <p class="hint">Enabled connectors are mounted for the next agent run.</p>
+          </div>
+          <pre id="connectorInspect" class="connector-inspect hidden" aria-live="polite"></pre>
+        </details>
+        <details class="github-queue">
+          <summary>GITHUB PR / ISSUE QUEUE <span id="githubQueueCount" class="counter">not connected</span></summary>
+          <div class="github-pair">
+            <p class="hint">Sign in to the local GitHub App workbench, select “Pair native desktop”, then paste its single-use code here. OAuth secrets stay server-side.</p>
+            <label class="sr-only" for="githubPairCode">Single-use GitHub desktop code</label>
+            <input id="githubPairCode" type="password" autocomplete="off" spellcheck="false" placeholder="Single-use pairing code">
+            <button id="githubPair" class="button ghost compact" type="button">Pair read-only</button>
+          </div>
+          <div class="github-queue-toolbar">
+            <label class="sr-only" for="githubRepo">Authorized GitHub repository</label>
+            <select id="githubRepo" aria-label="Authorized GitHub repository"></select>
+            <button id="githubRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="githubUnpair" class="button ghost compact" type="button">Disconnect</button>
+          </div>
+          <div id="githubQueueList" class="github-queue-list">
+            <p class="hint">No repository queue loaded.</p>
+          </div>
+        </details>
+        <details class="hunk-review">
+          <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>
+          <div class="hunk-toolbar">
+            <button id="hunkRefresh" class="button ghost compact" type="button">Scan</button>
+            <button id="hunkStage" class="button primary compact" type="button" disabled>Stage selected…</button>
+          </div>
+          <div id="hunkList" class="hunk-list" aria-label="Selectable Git hunks">
+            <p class="hint">Open a Git repository to inspect unstaged text hunks.</p>
+          </div>
+          <pre id="hunkValidation" class="hunk-validation hidden" aria-live="polite"></pre>
+        </details>
+                <details class="changes" id="changesDetails">
+          <summary>CHANGES <span id="changesSummary" class="counter">no folder</span></summary>
+          <div class="hunk-toolbar">
+            <button id="changesRefresh" class="button ghost compact" type="button">Scan</button>
+          </div>
+          <div id="changesList" class="change-list" aria-label="Working tree changes">
+            <p class="hint">Open a Git repository to review every modified file.</p>
+          </div>
+        </details>
+<div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
+        <div id="problemList" class="problem-list">
+          <p class="hint">No diagnostics yet.</p>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="statusbar">
+      <span id="lspPills" class="lsp-pills"></span>
+      <span id="lspStatus" class="status-pill offline">ryoko-lsp offline</span>
+      <span id="editorStatus" class="status-message" role="status" aria-live="polite">Ready</span>
+      <span class="status-spacer"></span>
+      <span id="cursorPos">Ln 1, Col 1</span>
+      <span id="languageMode">plaintext</span>
+      <span>UTF-8</span>
+    </footer>
+  </div>
+  <div id="settingsDialog" class="settings-dialog hidden" role="dialog" aria-modal="false" aria-label="Settings">
+    <div class="settings-bar">
+      <span class="settings-title">Settings</span>
+      <span id="settingsPath" class="hint"></span>
+      <span class="status-spacer"></span>
+      <button id="settingsClose" class="button ghost compact" type="button">Close</button>
+    </div>
+    <div class="settings-body">
+      <section class="settings-section">
+        <h2>Provider catalog</h2>
+        <p class="hint">A validated <code>ryoko.providers</code>-style catalog. API keys stay in environment variables referenced by <code>api_key_env</code>.</p>
+        <textarea id="settingsProviders" rows="10" spellcheck="false" placeholder="{}"></textarea>
+        <button id="settingsSaveProviders" class="button primary compact" type="button">Validate &amp; save</button>
+      </section>
+      <section class="settings-section">
+        <h2>Language servers</h2>
+        <p class="hint">Each language gets one owner server (columns: id, command, languages, args). <code>ryoko-lsp</code> always runs beside them.</p>
+        <div id="settingsServerRows" class="settings-server-rows"></div>
+        <div class="settings-actions">
+          <button id="settingsAddServer" class="button ghost compact" type="button">Add server</button>
+          <button id="settingsSaveServers" class="button primary compact" type="button">Validate &amp; save</button>
+        </div>
+      </section>
+      <section class="settings-section">
+        <h2>Keybindings</h2>
+        <p class="hint">Chords like <code>Mod+Shift+F</code> (Mod = Cmd on macOS, Ctrl elsewhere), stored per machine.</p>
+        <div id="settingsKeybindings" class="settings-keybindings"></div>
+      </section>
+    </div>
+  </div>
+  <div id="inlineEditOverlay" class="inline-edit-overlay hidden">
+    <span id="inlineEditHint" class="hint"></span>
+    <input id="inlineEditInput" type="text" placeholder="Edit the selection with the agent… (Enter to run)" autocomplete="off" spellcheck="false">
+    <div class="inline-edit-actions">
+      <button id="inlineEditRun" class="button primary compact" type="button">Edit</button>
+      <button id="inlineEditAccept" class="button compact hidden" type="button">Accept</button>
+      <button id="inlineEditCancel" class="button ghost compact" type="button">Cancel</button>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
