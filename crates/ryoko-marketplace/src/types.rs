@@ -99,12 +99,23 @@ pub struct MarketplaceEntry {
 
 impl MarketplaceEntry {
     /// Returns the file to save the artifact as (includes extension based on type).
-    pub fn artifact_filename(&self) -> String {
+    pub fn artifact_filename(&self) -> Result<String, MarketplaceError> {
+        // Validate ID doesn't contain path traversal attempts
+        if self.id.contains("..") || self.id.contains('/') || self.id.contains('\\') {
+            return Err(MarketplaceError::InvalidManifest(
+                "artifact ID contains path traversal characters".into(),
+            ));
+        }
+        if self.id.is_empty() || self.id.len() > 128 {
+            return Err(MarketplaceError::InvalidManifest(
+                "artifact ID must be 1-128 characters".into(),
+            ));
+        }
         let extension = match self.kind {
             MarketplaceType::Extension => "json",
             MarketplaceType::Skill => "wasm",
         };
-        format!("{}.{}", self.id, extension)
+        Ok(format!("{}.{}", self.id, extension))
     }
 
     /// Returns true if this is compatible with the given version.

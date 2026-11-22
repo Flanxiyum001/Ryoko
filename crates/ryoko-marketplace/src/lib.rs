@@ -40,8 +40,8 @@ pub use client::{MarketplaceClient, UpdateInfo};
 pub use download::DownloadConfig;
 pub use errors::MarketplaceError;
 pub use types::{
-    ExtensionManifest, InstallationRecord, MarketplaceEntry, MarketplaceIndex, MarketplaceLock,
-    MarketplaceType, MarketplaceVersion, SkillKind, SkillManifest,
+    DownloadResult, ExtensionManifest, InstallationRecord, MarketplaceEntry, MarketplaceIndex,
+    MarketplaceLock, MarketplaceType, MarketplaceVersion, SkillKind, SkillManifest,
 };
 
 // Re-export from ryoko-core and ryoko-scripting

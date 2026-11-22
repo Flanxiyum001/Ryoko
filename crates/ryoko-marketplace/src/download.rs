@@ -49,6 +49,13 @@ pub struct DownloadResult {
     pub checksum: String,
 }
 
+/// Result wrapper that handles both extension and skill downloads.
+#[derive(Debug)]
+pub enum DownloadResultWrapper {
+    Extension(DownloadResult),
+    Skill(PathBuf),
+}
+
 /// Ensures the cache directory exists.
 pub async fn ensure_cache_dir(config: &DownloadConfig) -> Result<(), MarketplaceError> {
     tokio::fs::create_dir_all(&config.cache_dir)
@@ -95,11 +102,11 @@ pub async fn download_and_verify(
 
     // Write to temp file, then rename to final location
     let temp_path = config.cache_dir.join(format!("{}.tmp", entry.id));
+    let final_path = config.cache_dir.join(entry.artifact_filename()?);
     tokio::fs::write(&temp_path, &bytes)
         .await
         .map_err(|e| MarketplaceError::Io(format!("write to temp file: {}", e)))?;
 
-    let final_path = config.cache_dir.join(entry.artifact_filename());
     tokio::fs::rename(&temp_path, &final_path)
         .await
         .map_err(|e| MarketplaceError::Io(format!("rename to final path: {}", e)))?;
