@@ -6,6 +6,13 @@ non-sensitive files and back up anything important.
 
 ## Get the latest installers
 
+For public testers, open [Ryoko Releases](https://github.com/Flanxiyum001/Ryoko/releases),
+select a release explicitly labeled **Pre-release**, and download the installer
+for your operating system. You do not need GitHub Actions access for a public
+release. Check the release's `SHA256SUMS.txt` file to verify downloads.
+
+If a release has not been published yet or you are testing a branch snapshot:
+
 1. Open [Ryoko preview installer runs](https://github.com/Flanxiyum001/Ryoko/actions/workflows/desktop-preview.yml).
 2. Select the most recent **successful** run from the `preview/desktop-installers` branch.
 3. Under **Artifacts**, download the ZIP matching your platform.
@@ -54,6 +61,11 @@ to issue reports.
 
 ## Making an explicit GitHub prerelease
 
+After all Windows, Linux and macOS jobs pass on a `preview/desktop-installers`
+branch push, the workflow automatically publishes the tested commit as a
+public GitHub **prerelease** with SHA-256 checksums. On failure, it publishes
+nothing.
+
 The preview workflow also supports Git tags beginning with
 `desktop-preview-v`. Once a platform build run is green and you want a
 **public experimental prerelease**, create and push a uniquely named tag at the
@@ -68,8 +80,9 @@ git push origin desktop-preview-v0.1.0-alpha1
 
 The tag triggers all three installer builds. A release is published **only if
 they all succeed**, and is marked `prerelease` with SHA-256 checksums. It is
-not marked as the latest stable release. No tag or GitHub Release is created by
-ordinary preview branch pushes. Do not reuse an existing release tag.
+not marked as the latest stable release. Successful preview branch pushes also
+create a prerelease tagged with the workflow run number. Do not reuse an
+existing release tag.
 
 After this workflow is merged into the default branch, GitHub's
 `workflow_dispatch` option can also be used for artifact-only builds.
