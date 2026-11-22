@@ -9,6 +9,7 @@ members = [
     "crates/ryoko-vfs",
     "crates/ryoko-worktree",
     "crates/ryoko-cli",
+    "crates/ryoko-marketplace",
 ]
 exclude = ["apps/desktop/src-tauri"]
 

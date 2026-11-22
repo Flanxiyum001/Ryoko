@@ -9,6 +9,7 @@ chrono.workspace = true
 clap.workspace = true
 ignore.workspace = true
 ryoko-core = { path = "../ryoko-core" }
+ryoko-marketplace = { path = "../ryoko-marketplace" }
 ryoko-models = { path = "../ryoko-models" }
 ryoko-scripting = { path = "../ryoko-scripting" }
 ryoko-sandbox = { path = "../ryoko-sandbox" }
