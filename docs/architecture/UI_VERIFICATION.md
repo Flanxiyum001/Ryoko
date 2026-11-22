@@ -124,15 +124,22 @@ cannot be routed as design feedback.
 ## Where the captures come from
 
 The validator produces them, in the same worktree and sandbox that ran the tests.
-`--ui-command <cmd>` names the command that serves the app and `--ui-route
-<path>` names each route to render (repeatable, default `/`); without
-`--ui-command` no browser is ever started. When a staged change touches a
+`--ui-command <cmd>` names the command that serves the app, `--ui-route <path>`
+names each route to render (repeatable, default `/`) and `--ui-url <url>` names
+the origin the harness polls (default `http://127.0.0.1:4173`); without
+`--ui-command` no browser is ever started, and `--ui-route`/`--ui-url` on their
+own are an error rather than a silent no-op. `--ui-url` is validated before the
+sandbox starts: it must be a bare `http`/`https` loopback origin such as
+`http://127.0.0.1:3000`, `https://localhost:8443` or `http://[::1]:8080`, with an
+optional numeric port and no path, credentials, quotes or whitespace. The
+harness in the image polls loopback only, so a wider URL would fail later with
+nothing but a dead browser. When a staged change touches a
 renderable file type (`html`, `css`, `scss`, `sass`, `less`, `jsx`, `tsx`, `vue`,
 `svelte`, `astro`, `mdx`, `styl`) and the test command and security audit have
 already passed, `CommandValidator` runs
 
 ```sh
-node /opt/ryoko/verify-ui.mjs --dev-command '<cmd>' --url http://127.0.0.1:4173 \
+node /opt/ryoko/verify-ui.mjs --dev-command '<cmd>' --url '<origin>' \
   --routes '/,/pricing' --out /ryoko-artifacts --allow-issues
 ```
 
