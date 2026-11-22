@@ -43,7 +43,7 @@ pub fn compile_query(query: &str, case_sensitive: bool) -> Result<Regex, String>
 /// UTF-16 code-unit offsets within that line (for Monaco and DOM highlighting).
 pub fn hit_spans(regex: &Regex, text: &str, limit: usize) -> Vec<(u32, usize, usize)> {
     let mut spans = Vec::new();
-     for (number, line) in text.lines().enumerate().take(65_536) {
+    for (number, line) in text.lines().enumerate().take(65_536) {
         if spans.len() >= limit {
             break;
         }
@@ -57,7 +57,7 @@ pub fn hit_spans(regex: &Regex, text: &str, limit: usize) -> Vec<(u32, usize, us
                 break;
             }
         }
-     }
+    }
     spans
 }
 
@@ -86,8 +86,12 @@ pub fn replacement(text: &str, regex: &Regex, template: &str) -> Option<Replacem
     if count == 0 {
         return None;
     }
+    let new_text = regex.replace_all(text, template).into_owned();
+    if new_text.len() > 2 * 1024 * 1024 {
+        return None;
+    }
     Some(Replacement {
-        new_text: regex.replace_all(text, template).into_owned(),
+        new_text,
         match_count: count,
     })
 }
@@ -117,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn spans_carry_absolute_offsets_and_line_numbers() {
+    fn spans_carry_line_relative_offsets_and_line_numbers() {
         let regex = compile_query("needle", true).expect("compiles");
         let text = "first line\nneedle in line two\nnope\nneedle again";
         let spans = hit_spans(&regex, text, 10);
@@ -155,6 +159,12 @@ mod tests {
         let regex = compile_query("(\\w+)@(\\w+)", true).expect("compiles");
         let plan = replacement("user@host", &regex, "$2:$1").expect("plan");
         assert_eq!(plan.new_text, "host:user");
+    }
+
+    #[test]
+    fn rejects_replacements_that_expand_a_file_beyond_the_limit() {
+        let regex = compile_query("needle", true).unwrap();
+        assert!(replacement("needle", &regex, &"x".repeat(2 * 1024 * 1024 + 1)).is_none());
     }
 
     #[test]
