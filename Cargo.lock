@@ -1999,6 +1999,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryoko-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "ryoko-storage",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "ryoko-sandbox"
 version = "0.1.0"
 dependencies = [
