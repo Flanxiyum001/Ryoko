@@ -137,16 +137,20 @@ pub async fn download_and_verify(
         }
     }
 
-    if response.content_length().is_some_and(|size| size > config.max_size_bytes) {
-        return Err(MarketplaceError::download("response exceeds maximum download size".into()));
+    if response
+        .content_length()
+        .is_some_and(|size| size > config.max_size_bytes)
+    {
+        return Err(MarketplaceError::download(
+            "response exceeds maximum download size".into(),
+        ));
     }
 
     // Stream download with size limiting and hash computation
-    let temp_path = config.cache_dir.join(format!(
-        ".ryoko-{}-{}.tmp",
-        entry.id,
-        uuid::Uuid::new_v4()
-    ));
+    let temp_path =
+        config
+            .cache_dir
+            .join(format!(".ryoko-{}-{}.tmp", entry.id, uuid::Uuid::new_v4()));
 
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -165,7 +169,10 @@ pub async fn download_and_verify(
             Err(error) => {
                 drop(file);
                 let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(MarketplaceError::network(format!("stream error: {}", error)));
+                return Err(MarketplaceError::network(format!(
+                    "stream error: {}",
+                    error
+                )));
             }
         };
         let bytes = chunk.len() as u64;
@@ -182,7 +189,10 @@ pub async fn download_and_verify(
         if let Err(error) = file.write_all(&chunk).await {
             drop(file);
             let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(MarketplaceError::Io(format!("write to temp file: {}", error)));
+            return Err(MarketplaceError::Io(format!(
+                "write to temp file: {}",
+                error
+            )));
         }
 
         hasher.update(&chunk);
