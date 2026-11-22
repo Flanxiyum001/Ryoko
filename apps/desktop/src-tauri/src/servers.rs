@@ -306,7 +306,8 @@ mod tests {
 
     #[test]
     fn the_builtin_server_id_cannot_be_overridden() {
-        let registry = r#"{"servers":[{"id":"ryoko-lsp","command":"python3","languages":["rust"]}]}"#;
+        let registry =
+            r#"{"servers":[{"id":"ryoko-lsp","command":"python3","languages":["rust"]}]}"#;
         assert!(LspRegistry::parse(registry).is_err());
     }
 
