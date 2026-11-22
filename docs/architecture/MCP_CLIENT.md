@@ -256,3 +256,9 @@ Connectors panel shows readiness badges ("Ready", "Disabled", "Missing
 tools (write tools tagged) and start a configured stdio server to read its
 advertised tool names. Writes go through a dedicated command that refuses a
 symlinked `.ryoko` directory; `.ryoko` itself remains outside normal file editing.
+
+The shell does not define its own connector type: it reads and writes the same
+`ryoko_core::connectors` registry the CLI uses, so the schema, limits,
+transport and readiness rules and the built-in presets have exactly one
+implementation. The only desktop-specific pieces are the view model and the
+bounded stdio probe that asks a server which tools it advertises.
