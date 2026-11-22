@@ -6,6 +6,7 @@ mod github_queue;
 mod inline_edit;
 mod lsp;
 mod lsp_frame;
+mod marketplace;
 mod mission;
 mod model_runtime;
 mod paths;

@@ -1,0 +1,23 @@
+[package]
+name = "ryoko-index"
+description = "Incremental symbol and call index for Ryoko workspace understanding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+notify = "6.1"
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "sync", "time", "process"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

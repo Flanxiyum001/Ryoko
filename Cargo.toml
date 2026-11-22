@@ -1,14 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ryoko-cli",
     "crates/ryoko-core",
     "crates/ryoko-models",
     "crates/ryoko-native",
     "crates/ryoko-sandbox",
     "crates/ryoko-scripting",
+    "crates/ryoko-storage",
+    "crates/ryoko-events",
+    "crates/ryoko-orchestrator",
     "crates/ryoko-vfs",
     "crates/ryoko-worktree",
-    "crates/ryoko-cli",
+    "crates/ryoko-index",
+    "crates/ryoko-tools",
     "crates/ryoko-marketplace",
 ]
 exclude = ["apps/desktop/src-tauri"]

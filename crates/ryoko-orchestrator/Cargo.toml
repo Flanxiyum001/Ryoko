@@ -1,0 +1,29 @@
+[package]
+name = "ryoko-orchestrator"
+description = "Durable DAG, attempts, cancellation, and recovery for Ryoko tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+ryoko-core = { path = "../ryoko-core" }
+ryoko-models = { path = "../ryoko-models" }
+ryoko-storage = { path = "../ryoko-storage" }
+ryoko-index = { path = "../ryoko-index" }
+ryoko-worktree = { path = "../ryoko-worktree" }
+ryoko-events = { path = "../ryoko-events" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
