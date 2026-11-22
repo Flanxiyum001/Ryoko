@@ -195,6 +195,11 @@ pub struct ChatRequest {
     /// DAG task that owns this request, used for per-task budget accounting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Marks `system` as a stable prefix (static instructions, repository
+    /// map) that adapters may cache provider-side. Adapters without a cache
+    /// control ignore it; prefix-cached APIs benefit from the ordering alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache_system_prefix: bool,
 }
 
 impl ChatRequest {
@@ -208,11 +213,18 @@ impl ChatRequest {
             max_tokens: None,
             metadata: BTreeMap::new(),
             scope: None,
+            cache_system_prefix: false,
         }
     }
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
+        self
+    }
+
+    /// Requests provider-side caching of the `system` prefix.
+    pub fn with_cached_system_prefix(mut self) -> Self {
+        self.cache_system_prefix = true;
         self
     }
 
