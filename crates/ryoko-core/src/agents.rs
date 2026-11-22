@@ -516,7 +516,13 @@ mod tests {
             .with_metadata(CONTEXT_METADATA, untrusted);
         let request = agent.request(&task, "/tmp/project", "main", Vec::new());
         assert!(request.cache_system_prefix);
-        assert!(!request.system.as_deref().unwrap_or_default().contains(untrusted));
+        assert!(
+            !request
+                .system
+                .as_deref()
+                .unwrap_or_default()
+                .contains(untrusted)
+        );
         assert!(request.messages.iter().any(|message| {
             message.role == Role::User && message.text_content().contains(untrusted)
         }));
