@@ -142,7 +142,7 @@ pub async fn download_and_verify(
         .is_some_and(|size| size > config.max_size_bytes)
     {
         return Err(MarketplaceError::download(
-            "response exceeds maximum download size".into(),
+            "response exceeds maximum download size",
         ));
     }
 
