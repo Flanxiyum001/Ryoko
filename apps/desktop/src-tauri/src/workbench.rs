@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -146,6 +147,8 @@ pub struct ReplacePreview {
     /// The first match's preview line, so apply can refuse a file whose
     /// content drifted even when the count happens to be identical.
     pub first_preview: String,
+    /// Full original content fingerprint, not just the first matching line.
+    pub content_hash: String,
 }
 
 #[derive(Serialize)]
@@ -162,6 +165,13 @@ struct ReplacePlan {
     new_text: String,
     match_count: usize,
     first_preview: String,
+    content_hash: String,
+}
+
+fn fingerprint_text(text: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn replace_plans(root: &std::path::Path, regex: &regex::Regex, template: &str) -> Vec<ReplacePlan> {
@@ -196,6 +206,7 @@ fn replace_plans(root: &std::path::Path, regex: &regex::Regex, template: &str) -
                 new_text: plan.new_text,
                 match_count: plan.match_count,
                 first_preview,
+                content_hash: fingerprint_text(&text),
             });
         }
     }
@@ -218,6 +229,7 @@ pub fn workspace_replace_preview(
             path: relative_of(&root, &plan.path).unwrap_or_default(),
             match_count: plan.match_count,
             first_preview: plan.first_preview,
+            content_hash: plan.content_hash,
         })
         .collect();
     Ok(ReplaceReply {
@@ -273,13 +285,14 @@ pub fn workspace_replace_apply(
         };
         if expectation.match_count != plan.match_count
             || expectation.first_preview != plan.first_preview
+            || expectation.content_hash != plan.content_hash
         {
             result
                 .skipped
                 .push(format!("{relative}: changed since the preview"));
             continue;
         }
-        match write_file_content(&plan.path, &plan.new_text) {
+        match write_file_content(&plan.path, &plan.new_text, &plan.content_hash) {
             Ok(()) => {
                 result.applied_files += 1;
                 result.applied_matches += plan.match_count;
@@ -304,7 +317,19 @@ pub fn workspace_replace_apply(
     Ok(result)
 }
 
-fn write_file_content(target: &std::path::Path, content: &str) -> Result<(), String> {
+fn write_file_content(
+    target: &std::path::Path,
+    content: &str,
+    expected_hash: &str,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(target).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("replace target is not a regular file".to_owned());
+    }
+    let original = fs::read_to_string(target).map_err(|error| error.to_string())?;
+    if fingerprint_text(&original) != expected_hash {
+        return Err("file changed since the replacement preview".to_owned());
+    }
     let parent = target
         .parent()
         .ok_or_else(|| "file has no parent directory".to_owned())?;
@@ -328,11 +353,20 @@ fn write_file_content(target: &std::path::Path, content: &str) -> Result<(), Str
         }
         let mut file = options.open(&temp)?;
         file.write_all(content.as_bytes())?;
+        file.set_permissions(metadata.permissions())?;
         file.sync_all()
     })();
     if let Err(error) = write {
         let _ = fs::remove_file(&temp);
         return Err(error.to_string());
+    }
+    // Catch edits that landed during the temporary-file write as well.
+    let unchanged = fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_file())
+        && fs::read_to_string(target)
+            .is_ok_and(|latest| fingerprint_text(&latest) == expected_hash);
+    if !unchanged {
+        let _ = fs::remove_file(&temp);
+        return Err("file changed during replacement".to_owned());
     }
     fs::rename(&temp, target).map_err(|error| {
         let _ = fs::remove_file(&temp);
@@ -461,4 +495,16 @@ pub fn settings_save_lsp_servers(
 #[tauri::command]
 pub fn workbench_protocol_version() -> u32 {
     WORKBENCH_PROTOCOL_VERSION
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_content_hash_detects_edits_with_an_unchanged_preview() {
+        let original = "needle on first line\\nkeep this";
+        let changed = "needle on first line\\nchanged!!";
+        assert_ne!(fingerprint_text(original), fingerprint_text(changed));
+    }
 }
