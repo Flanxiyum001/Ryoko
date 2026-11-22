@@ -18,8 +18,8 @@ const MAX_LINE_CHARS: usize = 240;
 pub struct SearchHit {
     pub path: String,
     pub line: u32,
-    /// 0-based UTF-16-ish positions are the editor's currency; Monaco works in
-    /// UTF-16 offsets, so report the line and the byte offsets in the line.
+    /// 0-based UTF-16 code-unit offsets within the preview line, matching
+    /// JavaScript strings and Monaco's text coordinate system.
     pub start: usize,
     pub end: usize,
     pub preview: String,
@@ -39,27 +39,25 @@ pub fn compile_query(query: &str, case_sensitive: bool) -> Result<Regex, String>
         .map_err(|error| format!("invalid search query: {error}"))
 }
 
-/// Matches inside one file's text, as (line number, start, end) with 1-based
-/// line numbers and byte offsets relative to the whole document.
+/// Matches inside one file's text: a 1-based line number and 0-based
+/// UTF-16 code-unit offsets within that line (for Monaco and DOM highlighting).
 pub fn hit_spans(regex: &Regex, text: &str, limit: usize) -> Vec<(u32, usize, usize)> {
     let mut spans = Vec::new();
-    let mut offset = 0usize;
-    for (number, line) in text.lines().enumerate().take(65_536) {
+     for (number, line) in text.lines().enumerate().take(65_536) {
         if spans.len() >= limit {
             break;
         }
         for matched in regex.find_iter(line) {
             spans.push((
                 number as u32 + 1,
-                offset + matched.start(),
-                offset + matched.end(),
+                line[..matched.start()].encode_utf16().count(),
+                line[..matched.end()].encode_utf16().count(),
             ));
             if spans.len() >= limit {
                 break;
             }
         }
-        offset += line.len() + 1;
-    }
+     }
     spans
 }
 
@@ -126,8 +124,15 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].0, 2);
         let (start, end) = (spans[0].1, spans[0].2);
-        assert_eq!(start, 11);
-        assert_eq!(end, 17);
+        assert_eq!(start, 0);
+        assert_eq!(end, 6);
+    }
+
+    #[test]
+    fn preview_positions_use_utf16_offsets_with_multibyte_characters() {
+        let regex = compile_query("needle", true).unwrap();
+        let spans = hit_spans(&regex, "first line\n🦀 needle\nfinal", 10);
+        assert_eq!(spans, vec![(2, 3, 9)]);
     }
 
     #[test]
