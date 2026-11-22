@@ -1,15 +1,18 @@
 //! Operator-controlled MCP stdio transport for the CLI.
 //! External server processes never inherit the complete Ryoko environment.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ryoko_core::ConnectorConfig;
+use ryoko_core::connectors::{ConnectorTransport, resolve_required_env};
 use ryoko_core::mcp::{
-    McpApprovalAsker, McpApprovalScope, McpClient, McpError, McpToolPolicy, McpToolService,
-    McpToolbox, McpTransport, SessionApprovalGate,
+    McpApprovalAsker, McpApprovalGate, McpApprovalScope, McpClient, McpError, McpToolPolicy,
+    McpToolService, McpToolbox, McpTransport, NamespacedApprovalGate, SessionApprovalGate,
+    TOOL_NAMESPACE_SEPARATOR,
 };
 use ryoko_models::UsageLedger;
 use serde_json::Value;
@@ -39,6 +42,26 @@ impl StdioMcpTransport {
     ) -> Result<Self, McpError> {
         let mut command = Command::from(command_for(executable, args, pass_env)?);
         command.kill_on_drop(true);
+        Self::start(command).await
+    }
+
+    /// Spawns a connector child with exactly the values the registry resolved
+    /// for it, so an undeclared host variable has no way in.
+    pub async fn spawn_with_env(
+        executable: &Path,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Result<Self, McpError> {
+        let pairs = env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        let mut command = Command::from(command_for_env(executable, args, &pairs)?);
+        command.kill_on_drop(true);
+        Self::start(command).await
+    }
+
+    async fn start(mut command: Command) -> Result<Self, McpError> {
         let mut child = command
             .spawn()
             .map_err(|error| McpError::Transport(error.to_string()))?;
@@ -65,7 +88,24 @@ fn command_for(
     args: &[String],
     pass_env: &[String],
 ) -> Result<std::process::Command, McpError> {
-    if args.len() > 64 || pass_env.len() > 32 {
+    let mut resolved = Vec::with_capacity(pass_env.len());
+    for name in pass_env {
+        if !valid_env_name(name) {
+            return Err(McpError::Transport("invalid --allow-env name".into()));
+        }
+        let value = std::env::var(name)
+            .map_err(|_| McpError::Transport(format!("environment variable {name} not set")))?;
+        resolved.push((name.clone(), value));
+    }
+    command_for_env(executable, args, &resolved)
+}
+
+fn command_for_env(
+    executable: &Path,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<std::process::Command, McpError> {
+    if args.len() > 64 || env.len() > 32 {
         return Err(McpError::Transport(
             "server argument/environment limit exceeded".into(),
         ));
@@ -81,12 +121,12 @@ fn command_for(
             command.env(name, value);
         }
     }
-    for name in pass_env {
+    for (name, value) in env {
         if !valid_env_name(name) {
-            return Err(McpError::Transport("invalid --allow-env name".into()));
+            return Err(McpError::Transport(
+                "invalid connector environment name".into(),
+            ));
         }
-        let value = std::env::var_os(name)
-            .ok_or_else(|| McpError::Transport(format!("environment variable {name} not set")))?;
         command.env(name, value);
     }
     command
@@ -357,6 +397,105 @@ pub async fn connect_toolbox(
     )
     .await?;
     Ok(Arc::new(toolbox))
+}
+
+/// Splits pre-approvals into tools for the explicitly chosen `--mcp-server` and
+/// tools scoped to a configured connector (`github__list_issues`).
+///
+/// Scoping happens here so that an approval for one connector can never be read
+/// as consent for another connector or the legacy server.
+pub fn split_headless_approvals(
+    approvals: &[String],
+    connector_ids: &[String],
+) -> (Vec<String>, BTreeMap<String, Vec<String>>) {
+    let mut local = Vec::new();
+    let mut scoped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in approvals {
+        let owner = connector_ids.iter().find(|id| {
+            entry
+                .strip_prefix(id.as_str())
+                .and_then(|rest| rest.strip_prefix(TOOL_NAMESPACE_SEPARATOR))
+                .is_some_and(|tool| !tool.is_empty())
+        });
+        match owner {
+            Some(id) => scoped.entry(id.clone()).or_default().push(entry.clone()),
+            None => local.push(entry.clone()),
+        }
+    }
+    (local, scoped)
+}
+
+/// A headless pre-approval for a connector must name a tool that connector
+/// allows, otherwise the run fails before any server starts.
+fn validate_connector_approvals(
+    connector: &ConnectorConfig,
+    approvals: &[String],
+) -> Result<(), McpError> {
+    let prefix = format!("{}{TOOL_NAMESPACE_SEPARATOR}", connector.id);
+    for entry in approvals {
+        let tool = entry.strip_prefix(&prefix).unwrap_or(entry);
+        if !connector
+            .allowed_tools
+            .iter()
+            .any(|allowed| allowed == tool)
+        {
+            return Err(McpError::HeadlessApprovalNotAllowlisted(entry.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Connects every enabled connector as its own namespaced toolbox.
+///
+/// Each child receives only its declared credential variables, keeps its own
+/// allowlist and call budget, and asks through a gate that shows the connector
+/// name before anything runs.
+pub async fn connect_connectors(
+    connectors: &[ConnectorConfig],
+    scoped_approvals: &BTreeMap<String, Vec<String>>,
+    ledger: UsageLedger,
+) -> Result<Vec<(String, Arc<dyn McpToolService>)>, McpError> {
+    let mut mounts = Vec::with_capacity(connectors.len());
+    for connector in connectors {
+        let ConnectorTransport::Stdio { command, args } = &connector.transport else {
+            return Err(McpError::Transport(format!(
+                "connector `{}` uses the {} transport, which this build does not mount",
+                connector.id,
+                connector.transport.kind()
+            )));
+        };
+        let approved = scoped_approvals
+            .get(&connector.id)
+            .cloned()
+            .unwrap_or_default();
+        validate_connector_approvals(connector, &approved)?;
+        let env = resolve_required_env(&connector.id, &connector.required_env, |name| {
+            std::env::var(name).ok()
+        })
+        .map_err(|error| McpError::Transport(error.to_string()))?;
+        let transport = StdioMcpTransport::spawn_with_env(Path::new(command), args, &env).await?;
+        let gate: Arc<dyn McpApprovalGate> = Arc::new(NamespacedApprovalGate::new(
+            connector.id.clone(),
+            terminal_gate(&approved),
+        ));
+        let client = McpClient::new(transport, gate)
+            .with_allowed_tools(connector.allowed_tools.iter().cloned());
+        let toolbox = McpToolbox::connect(
+            client,
+            McpToolPolicy::new(
+                connector.allowed_tools.iter().cloned(),
+                connector.call_limit(),
+            ),
+            Some(ledger.clone()),
+            None,
+        )
+        .await?;
+        mounts.push((
+            connector.id.clone(),
+            Arc::new(toolbox) as Arc<dyn McpToolService>,
+        ));
+    }
+    Ok(mounts)
 }
 
 pub async fn tools(server: &Path, args: &[String], pass_env: &[String]) -> Result<(), McpError> {
@@ -637,6 +776,97 @@ const CALL: &str = r#"{"content":[{"type":"text","text":"ok"}]}"#;
             vec!["ok"]
         );
         assert!(headless_approvals_from(&[], None).is_empty());
+    }
+
+    fn connector(id: &str) -> ConnectorConfig {
+        let mut connector = ryoko_core::builtin_preset("github").unwrap();
+        connector.id = id.to_owned();
+        connector.allowed_tools = vec!["list_issues".to_string()];
+        connector.write_tools.clear();
+        connector
+    }
+
+    #[test]
+    fn headless_approvals_are_scoped_to_the_connector_that_owns_them() {
+        let approvals = vec![
+            "list_issues".to_string(),
+            "github__list_issues".to_string(),
+            "cloudflare__kv_get".to_string(),
+        ];
+        let (local, scoped) = split_headless_approvals(
+            &approvals,
+            &["github".to_string(), "cloudflare".to_string()],
+        );
+        assert_eq!(local, vec!["list_issues"]);
+        assert_eq!(scoped["github"], vec!["github__list_issues"]);
+        assert_eq!(scoped["cloudflare"], vec!["cloudflare__kv_get"]);
+        // A prefix that is not a configured connector stays with the local
+        // server, where the allowlist gate will refuse it.
+        let (local, scoped) =
+            split_headless_approvals(&["slack__post".to_string()], &["github".to_string()]);
+        assert_eq!(local, vec!["slack__post"]);
+        assert!(scoped.is_empty());
+    }
+
+    #[test]
+    fn a_connector_approval_must_be_on_that_connectors_allowlist() {
+        let github = connector("github");
+        assert!(
+            validate_connector_approvals(&github, &["github__list_issues".to_string()]).is_ok()
+        );
+        // An approval for another connector never widens this one.
+        let error = validate_connector_approvals(&github, &["cloudflare__kv_get".to_string()])
+            .expect_err("a foreign approval is not consent");
+        assert!(matches!(
+            error,
+            McpError::HeadlessApprovalNotAllowlisted(tool) if tool == "cloudflare__kv_get"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_connector_with_a_missing_credential_fails_before_spawning() {
+        let mut github = connector("github");
+        github.required_env = vec!["RYOKO_TEST_CONNECTOR_UNSET_VARIABLE".to_string()];
+        let error =
+            match connect_connectors(&[github], &BTreeMap::new(), UsageLedger::new(None)).await {
+                Ok(_) => panic!("a missing credential must stop the mount"),
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(
+            message.contains("RYOKO_TEST_CONNECTOR_UNSET_VARIABLE"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_connector_child_only_receives_its_declared_variables() {
+        let env = vec![
+            (
+                "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "value".to_string(),
+            ),
+            ("CLOUDFLARE_API_TOKEN".to_string(), "other".to_string()),
+        ];
+        let command = command_for_env(Path::new("server"), &[], &env).unwrap();
+        let names = command
+            .get_envs()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for expected in ["GITHUB_PERSONAL_ACCESS_TOKEN", "CLOUDFLARE_API_TOKEN"] {
+            assert!(names.iter().any(|name| name == expected), "{names:?}");
+        }
+        for denied in ["HOME", "USERPROFILE", "AWS_SECRET_ACCESS_KEY"] {
+            assert!(!names.iter().any(|name| name == denied), "{names:?}");
+        }
+        // Only the registry's declared values reach the child.
+        let value = command
+            .get_envs()
+            .find(|(name, _)| *name == "GITHUB_PERSONAL_ACCESS_TOKEN")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(value.as_deref(), Some("value"));
+        assert!(command_for_env(Path::new("server"), &[], &[("home".into(), "x".into())]).is_err());
     }
 
     #[test]

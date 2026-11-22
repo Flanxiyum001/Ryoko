@@ -1,5 +1,6 @@
 mod audit;
 mod check;
+mod connectors;
 mod context_window;
 mod experience;
 mod mcp;
@@ -87,6 +88,8 @@ enum Commands {
     Review(ReviewArgs),
     /// Operator-controlled MCP stdio discovery and tool invocation.
     Mcp(McpArgs),
+    /// Inspect, scaffold and toggle external MCP connectors.
+    Connectors(ConnectorsArgs),
     /// Load and run a policy-approved WASI plugin (agent, linter or context).
     Plugin(PluginArgs),
     /// Generate a safe provider configuration without writing credentials.
@@ -206,6 +209,79 @@ struct McpArgs {
     allow_env: Vec<String>,
     #[command(subcommand)]
     command: McpCommands,
+}
+
+#[derive(Debug, Args)]
+struct ConnectorsArgs {
+    /// Project root that owns .ryoko/connectors.json.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Use this registry instead of <repo>/.ryoko/connectors.json.
+    #[arg(long = "connectors-config", value_name = "PATH")]
+    config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: ConnectorCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConnectorCommands {
+    /// Show presets and configured connectors with offline readiness.
+    List {
+        /// Machine-readable output for tooling and the desktop catalog.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy a built-in preset into the workspace registry.
+    Add(Box<ConnectorAddArgs>),
+    /// Enable a configured connector for `ryoko run`.
+    Enable {
+        /// Connector id, shown by `ryoko connectors list`.
+        id: String,
+    },
+    /// Disable a configured connector.
+    Disable {
+        /// Connector id, shown by `ryoko connectors list`.
+        id: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct ConnectorAddArgs {
+    /// Built-in preset id (github, cloudflare, filesystem, fetch, custom).
+    preset: String,
+    /// Connector id, also the tool namespace prefix.
+    #[arg(long)]
+    id: Option<String>,
+    /// Display name shown by the CLI and desktop catalog.
+    #[arg(long = "display-name")]
+    display_name: Option<String>,
+    /// Display category such as "Database".
+    #[arg(long)]
+    category: Option<String>,
+    /// Replace the preset command with this reviewed executable.
+    #[arg(long)]
+    command: Option<String>,
+    /// Command argument. Repeat once per argument; requires --command.
+    #[arg(long = "arg")]
+    args: Vec<String>,
+    /// Replace the preset transport with an HTTPS MCP endpoint.
+    #[arg(long)]
+    url: Option<String>,
+    /// Endpoint transport: sse (default) or streamable-http.
+    #[arg(long)]
+    transport: Option<String>,
+    /// Credential environment variable name. Repeat per variable.
+    #[arg(long = "env")]
+    env: Vec<String>,
+    /// Allowed tool name. Repeat per tool; replaces the preset allowlist.
+    #[arg(long = "allow-tool")]
+    allow_tools: Vec<String>,
+    /// Per-connector tool-call cap for one run.
+    #[arg(long = "max-calls")]
+    max_calls: Option<u32>,
+    /// Overwrite an existing connector with the same id.
+    #[arg(long)]
+    replace: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -451,6 +527,12 @@ struct RunArgs {
     /// Hard cap on MCP tool calls for the whole run.
     #[arg(long = "mcp-max-calls", default_value_t = 50)]
     mcp_max_calls: u64,
+    /// Skip the enabled connectors in <repo>/.ryoko/connectors.json.
+    #[arg(long = "no-connectors")]
+    no_connectors: bool,
+    /// Mount connectors from this registry instead of the workspace one.
+    #[arg(long = "connectors-config", value_name = "PATH")]
+    connectors_config: Option<PathBuf>,
     /// Benchmark command run after the test command passes. It must print
     /// `<metric>=<number>` on stdout.
     #[arg(long = "perf-command", value_name = "COMMAND")]
@@ -775,6 +857,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Sandbox(args) => sandbox(args).await,
         Commands::Review(args) => review(args).await,
         Commands::Mcp(args) => mcp_command(args).await,
+        Commands::Connectors(args) => connectors_command(args).await,
         Commands::Plugin(args) => plugin_command(args).await,
         Commands::Init(args) => init(args).await,
         Commands::Doctor(args) => doctor(args).await,
@@ -1028,6 +1111,32 @@ async fn mcp_command(args: McpArgs) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+async fn connectors_command(args: ConnectorsArgs) -> Result<(), Box<dyn Error>> {
+    let location = connectors::RegistryLocation::resolve(&args.repo, args.config.as_deref())?;
+    match args.command {
+        ConnectorCommands::List { json } => connectors::list(&location, json),
+        ConnectorCommands::Add(add) => connectors::add(
+            &location,
+            &connectors::AddOptions {
+                preset: add.preset,
+                id: add.id,
+                display_name: add.display_name,
+                category: add.category,
+                command: add.command,
+                args: add.args,
+                url: add.url,
+                transport: add.transport,
+                env: add.env,
+                allow_tools: add.allow_tools,
+                max_calls: add.max_calls,
+                replace: add.replace,
+            },
+        ),
+        ConnectorCommands::Enable { id } => connectors::set_enabled(&location, &id, true),
+        ConnectorCommands::Disable { id } => connectors::set_enabled(&location, &id, false),
+    }
 }
 
 async fn plugin_command(args: PluginArgs) -> Result<(), Box<dyn Error>> {
@@ -2037,14 +2146,38 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     // run without one. This never widens the host allowlist; it only fills in
     // the approval that a human would otherwise give.
     let headless_approve = mcp::headless_approvals(&args.mcp_headless_approve);
-    let mcp = match &args.mcp_server {
+    // Enabled connectors mount automatically; `--mcp-server` stays available
+    // for a single explicitly chosen server and mounts beside them.
+    let connectors = if args.no_connectors {
+        Vec::new()
+    } else {
+        connectors::load_enabled(&root, args.connectors_config.as_deref())?
+    };
+    if !connectors.is_empty() {
+        eprintln!(
+            "Mounting {} connector(s): {}",
+            connectors.len(),
+            connectors
+                .iter()
+                .map(|connector| connector.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let connector_ids = connectors
+        .iter()
+        .map(|connector| connector.id.clone())
+        .collect::<Vec<_>>();
+    let (local_headless, scoped_headless) =
+        mcp::split_headless_approvals(&headless_approve, &connector_ids);
+    let legacy = match &args.mcp_server {
         Some(server) => Some(
             mcp::connect_toolbox(
                 server,
                 &args.mcp_server_args,
                 &args.mcp_allow_env,
                 &args.mcp_allow_tools,
-                &headless_approve,
+                &local_headless,
                 args.mcp_max_calls,
                 router.ledger().clone(),
             )
@@ -2054,14 +2187,28 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             if !args.mcp_allow_tools.is_empty()
                 || !args.mcp_server_args.is_empty()
                 || !args.mcp_allow_env.is_empty()
-                || !headless_approve.is_empty()
+                || !local_headless.is_empty()
             {
                 return Err(cli_error(
-                    "--mcp-allow-tool/--mcp-headless-approve/--mcp-server-arg/--mcp-allow-env require --mcp-server",
+                    "--mcp-allow-tool/--mcp-headless-approve/--mcp-server-arg/--mcp-allow-env require --mcp-server; connector tools are pre-approved as `<connector>__<tool>`",
                 ));
             }
             None
         }
+    };
+    let mounts =
+        mcp::connect_connectors(&connectors, &scoped_headless, router.ledger().clone()).await?;
+    let mcp: Option<Arc<dyn ryoko_core::mcp::McpToolService>> = if mounts.is_empty() {
+        legacy
+    } else {
+        let mut multi = ryoko_core::mcp::MultiMcpToolbox::new();
+        if let Some(service) = legacy {
+            multi.mount("", service)?;
+        }
+        for (id, service) in mounts {
+            multi.mount(&id, service)?;
+        }
+        Some(Arc::new(multi))
     };
     let orchestrator = Orchestrator::new(Arc::new(manager), validator, router.clone())
         .with_config(OrchestratorConfig {

@@ -449,3 +449,65 @@ pre.mission-detail-value {
   font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* Connector catalog: presets, active connectors and per-connector tool lists. */
+.connectors { border-top: 1px solid var(--border); }
+.connectors-toolbar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px 7px; border-bottom: 1px solid var(--border);
+}
+.connector-path {
+  flex: 1; min-width: 0; color: var(--muted); font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.connector-notice {
+  margin: 6px 10px 0; padding: 5px 7px; border-radius: 5px;
+  color: var(--text); background: rgb(120 40 40 / 35%);
+  border: 1px solid #7d3b3b; font-size: 10.5px; overflow-wrap: anywhere;
+}
+.connector-list { overflow: auto; min-height: 0; padding: 7px 10px 9px; }
+.connector-card {
+  margin: 0 0 7px; padding: 7px 8px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--bg);
+}
+.connector-card.active { border-color: var(--accent); }
+.connector-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 6px; font-size: 12px; color: var(--text);
+}
+.connector-head .counter { font-size: 10px; font-weight: 400; }
+.connector-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 3px; }
+.connector-badge {
+  padding: 1px 6px; border-radius: 999px; font-size: 9.5px;
+  letter-spacing: .03em; border: 1px solid var(--border);
+}
+.connector-badge.ok { color: #8fd6a3; border-color: #2f6242; background: rgb(47 98 66 / 22%); }
+.connector-badge.warn { color: #e4c07a; border-color: #6d5730; background: rgb(109 87 48 / 22%); }
+.connector-badge.danger { color: #ef9b9b; border-color: #6d3434; background: rgb(109 52 52 / 22%); }
+.connector-badge.muted { color: var(--muted); }
+.connector-meta {
+  margin: 3px 0 0; color: var(--muted); font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+.connector-meta.missing { color: #ef9b9b; }
+.connector-actions { display: flex; gap: 5px; margin-top: 6px; }
+.connector-tools { margin-top: 6px; }
+.connector-tools summary {
+  color: var(--muted); font-size: 10px; letter-spacing: .06em;
+  text-transform: uppercase; cursor: pointer;
+}
+.connector-tool-grid {
+  display: grid; grid-template-columns: 1fr; gap: 2px; margin-top: 4px;
+}
+.connector-tool {
+  display: flex; align-items: center; gap: 5px;
+  font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text); overflow-wrap: anywhere;
+}
+.connector-tool.write span { color: #e4c07a; }
+.connector-inspect {
+  margin: 0 10px 9px; padding: 6px 8px; max-height: 160px; overflow: auto;
+  color: var(--muted); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 5px; font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
