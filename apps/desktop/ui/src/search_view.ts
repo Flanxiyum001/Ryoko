@@ -15,6 +15,7 @@ export interface ReplacePreview {
   path: string;
   matchCount: number;
   firstPreview: string;
+  contentHash: string;
 }
 
 export interface ReplaceReply {
@@ -123,7 +124,16 @@ export function mountSearchPanel(deps: SearchPanelDeps): void {
       void run(false);
     }
   });
+  const invalidatePreview = (): void => {
+    if (lastPreviews.length > 0) {
+      lastPreviews = [];
+      results.replaceChildren(runRow('Search or replacement changed. Preview again before applying.'));
+    }
+  };
+  queryBox.addEventListener('input', invalidatePreview);
+  caseToggle?.addEventListener('change', invalidatePreview);
   replacementBox.addEventListener('input', () => {
+    invalidatePreview();
     applyButton.disabled = replacementBox.value.length === 0;
   });
 }
