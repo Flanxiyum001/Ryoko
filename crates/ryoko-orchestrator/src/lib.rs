@@ -127,7 +127,11 @@ impl DurablePlanner {
                 store.create_task(*id, &task.goal)?;
             }
         }
-        Ok(Self { graph, order, store })
+        Ok(Self {
+            graph,
+            order,
+            store,
+        })
     }
 
     /// The only runnable tasks are queued tasks whose dependencies are
@@ -183,11 +187,7 @@ impl DurablePlanner {
         Ok(self.store.transition(id, revision, next)?)
     }
 
-    pub fn pause_for_approval(
-        &mut self,
-        id: Uuid,
-        revision: u64,
-    ) -> Result<TaskRecord, PlanError> {
+    pub fn pause_for_approval(&mut self, id: Uuid, revision: u64) -> Result<TaskRecord, PlanError> {
         Ok(self
             .store
             .transition(id, revision, TaskState::AwaitingApproval)?)
@@ -297,6 +297,9 @@ mod tests {
         assert!(planner.finish(first, 2, true).is_err());
         assert!(planner.record_approval(first, 1, true).is_err());
         planner.record_approval(first, 2, false).unwrap();
-        assert_eq!(planner.task(first).unwrap().unwrap().state, TaskState::Cancelled);
+        assert_eq!(
+            planner.task(first).unwrap().unwrap().state,
+            TaskState::Cancelled
+        );
     }
 }
