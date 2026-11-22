@@ -3,9 +3,29 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use futures::StreamExt;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
+use url::Url;
 
 use crate::{MAX_DOWNLOAD_BYTES, MarketplaceEntry, MarketplaceError};
+
+/// Allow TLS for public artifacts; permit cleartext only for an exact loopback host.
+pub(crate) fn marketplace_url_allowed(url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    url.scheme() == "https"
+        || (url.scheme() == "http"
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")))
+}
+
+fn valid_checksum(checksum: &str) -> bool {
+    checksum.len() == 64
+        && checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 /// Configuration for downloads.
 #[derive(Debug, Clone)]
@@ -49,6 +69,13 @@ pub struct DownloadResult {
     pub checksum: String,
 }
 
+/// Result wrapper that handles both extension and skill downloads.
+#[derive(Debug)]
+pub enum DownloadResultWrapper {
+    Extension(DownloadResult),
+    Skill(PathBuf),
+}
+
 /// Ensures the cache directory exists.
 pub async fn ensure_cache_dir(config: &DownloadConfig) -> Result<(), MarketplaceError> {
     tokio::fs::create_dir_all(&config.cache_dir)
@@ -57,56 +84,140 @@ pub async fn ensure_cache_dir(config: &DownloadConfig) -> Result<(), Marketplace
     Ok(())
 }
 
-/// Downloads an artifact and verifies its checksum.
+/// Downloads an artifact and verifies its checksum using streaming to avoid buffering.
 pub async fn download_and_verify(
     client: &reqwest::Client,
     entry: &MarketplaceEntry,
     config: &DownloadConfig,
 ) -> Result<DownloadResult, MarketplaceError> {
-    // Create cache directory if needed
+    // Validate registry-controlled metadata before starting a network request or file write.
+    let artifact_name = entry.artifact_filename()?;
+    if !valid_checksum(&entry.checksum) {
+        return Err(MarketplaceError::InvalidManifest(
+            "artifact checksum must be 64 lowercase hexadecimal SHA-256 characters".into(),
+        ));
+    }
+    let url = Url::parse(&entry.asset_url)
+        .map_err(|e| MarketplaceError::InvalidUrl(format!("invalid asset URL: {}", e)))?;
+    if !marketplace_url_allowed(&url) {
+        return Err(MarketplaceError::InvalidUrl(
+            "artifact URL must use HTTPS, or HTTP with an exact loopback host".into(),
+        ));
+    }
     ensure_cache_dir(config).await?;
 
-    // Download the file to memory first
-    let bytes = client
+    // Download the file with streaming
+    let response = client
         .get(&entry.asset_url)
         .timeout(Duration::from_secs(config.timeout_secs))
         .send()
         .await
-        .map_err(|e| MarketplaceError::network(format!("request failed: {}", e)))?
-        .bytes()
-        .await
-        .map_err(|e| MarketplaceError::network(format!("reading response: {}", e)))?;
+        .map_err(|e| MarketplaceError::network(format!("request failed: {}", e)))?;
 
-    if bytes.len() as u64 > config.max_size_bytes {
+    if !response.status().is_success() {
         return Err(MarketplaceError::download(format!(
-            "exceeds max size of {} bytes (got {})",
-            config.max_size_bytes,
-            bytes.len()
+            "HTTP {}: {}",
+            response.status(),
+            response.status().canonical_reason().unwrap_or("unknown")
         )));
     }
 
-    // Compute SHA-256 hash
-    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    // The MarketplaceClient also rejects insecure redirects *before* following them.
+    // Repeat validation here for clients supplied directly to this helper.
+    let final_url = response.url();
+    if !marketplace_url_allowed(final_url)
+        || (url.scheme() == "https" && final_url.scheme() != "https")
+    {
+        return Err(MarketplaceError::InvalidUrl(
+            "artifact redirect downgraded transport security".into(),
+        ));
+    }
+
+    if response
+        .content_length()
+        .is_some_and(|size| size > config.max_size_bytes)
+    {
+        return Err(MarketplaceError::download(
+            "response exceeds maximum download size",
+        ));
+    }
+
+    // Stream download with size limiting and hash computation
+    let temp_path =
+        config
+            .cache_dir
+            .join(format!(".ryoko-{}-{}.tmp", entry.id, uuid::Uuid::new_v4()));
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .await
+        .map_err(|e| MarketplaceError::Io(format!("create temp file: {}", e)))?;
+
+    let mut hasher = Sha256::new();
+    let mut total_bytes: u64 = 0;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(value) => value,
+            Err(error) => {
+                drop(file);
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(MarketplaceError::network(format!(
+                    "stream error: {}",
+                    error
+                )));
+            }
+        };
+        let bytes = chunk.len() as u64;
+        total_bytes += bytes;
+
+        if total_bytes > config.max_size_bytes {
+            drop(file);
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(MarketplaceError::download(format!(
+                "exceeds max size of {} bytes (got {})",
+                config.max_size_bytes, total_bytes
+            )));
+        }
+
+        if let Err(error) = file.write_all(&chunk).await {
+            drop(file);
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(MarketplaceError::Io(format!(
+                "write to temp file: {}",
+                error
+            )));
+        }
+
+        hasher.update(&chunk);
+    }
+
+    drop(file);
+
+    // Compute and verify SHA-256 hash
+    let actual_hash = format!("{:x}", hasher.finalize());
     let expected_hash = entry.checksum.clone();
 
     if actual_hash != expected_hash {
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(MarketplaceError::checksum(expected_hash, actual_hash));
     }
 
-    // Write to temp file, then rename to final location
-    let temp_path = config.cache_dir.join(format!("{}.tmp", entry.id));
-    tokio::fs::write(&temp_path, &bytes)
-        .await
-        .map_err(|e| MarketplaceError::Io(format!("write to temp file: {}", e)))?;
-
-    let final_path = config.cache_dir.join(entry.artifact_filename());
-    tokio::fs::rename(&temp_path, &final_path)
-        .await
-        .map_err(|e| MarketplaceError::Io(format!("rename to final path: {}", e)))?;
+    let final_path = config.cache_dir.join(artifact_name);
+    if let Err(error) = tokio::fs::rename(&temp_path, &final_path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(MarketplaceError::Io(format!(
+            "rename to final path: {}",
+            error
+        )));
+    }
 
     Ok(DownloadResult {
         path: final_path,
-        size: bytes.len() as u64,
+        size: total_bytes,
         checksum: actual_hash,
     })
 }
@@ -165,6 +276,35 @@ mod tests {
         let result = verify_checksum(&path, &expected);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn url_security_rejects_fake_loopback_and_embedded_credentials() {
+        for raw in [
+            "http://127.0.0.1.evil.example/asset.wasm",
+            "http://localhost.evil.example/asset.wasm",
+            "http://10.0.0.1/asset.wasm",
+            "http://example.org/asset.wasm",
+            "https://user:password@example.org/asset.wasm",
+            "file:///tmp/asset.wasm",
+        ] {
+            assert!(!marketplace_url_allowed(&Url::parse(raw).unwrap()), "{raw}");
+        }
+        for raw in [
+            "https://example.org/asset.wasm",
+            "http://127.0.0.1/asset.wasm",
+            "http://localhost:8080/asset.wasm",
+        ] {
+            assert!(marketplace_url_allowed(&Url::parse(raw).unwrap()), "{raw}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_registry_checksums_before_download() {
+        assert!(valid_checksum(&"a".repeat(64)));
+        assert!(!valid_checksum(&"A".repeat(64)));
+        assert!(!valid_checksum(&"z".repeat(64)));
+        assert!(!valid_checksum(&"a".repeat(63)));
     }
 
     #[test]

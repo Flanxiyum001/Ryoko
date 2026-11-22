@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::MarketplaceError;
+
 // Re-export ConnectorConfig
 pub use crate::ConnectorConfig;
 
@@ -99,18 +101,82 @@ pub struct MarketplaceEntry {
 
 impl MarketplaceEntry {
     /// Returns the file to save the artifact as (includes extension based on type).
-    pub fn artifact_filename(&self) -> String {
+    pub fn artifact_filename(&self) -> Result<String, MarketplaceError> {
+        // Validate ID doesn't contain path traversal attempts
+        if !valid_artifact_id(&self.id) {
+            return Err(MarketplaceError::InvalidManifest(
+                "artifact ID must be a safe 1-128 character ASCII slug".into(),
+            ));
+        }
         let extension = match self.kind {
             MarketplaceType::Extension => "json",
             MarketplaceType::Skill => "wasm",
         };
-        format!("{}.{}", self.id, extension)
+        Ok(format!("{}.{}", self.id, extension))
     }
 
     /// Returns true if this is compatible with the given version.
     pub fn is_compatible_with(&self, version: &str) -> bool {
         self.compatible_with.is_empty()
             || self.compatible_with.iter().any(|v| version.starts_with(v))
+    }
+}
+
+/// Registry-controlled IDs must never be interpreted as filesystem paths.
+fn valid_artifact_id(id: &str) -> bool {
+    if id.is_empty()
+        || id.len() > 128
+        || id.starts_with('.')
+        || id.ends_with('.')
+        || id.contains("..")
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return false;
+    }
+    let stem = id
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return false;
+    }
+    if stem.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.as_bytes()[3].is_ascii_digit()
+        && stem.as_bytes()[3] != b'0'
+    {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod safe_id_tests {
+    use super::valid_artifact_id;
+
+    #[test]
+    fn rejects_unsafe_registry_artifact_ids() {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../secrets",
+            "a/b",
+            "a\\b",
+            "CON",
+            "nul",
+            "LPT1",
+            "a..b",
+            ".hidden",
+        ] {
+            assert!(!valid_artifact_id(id), "unsafe ID accepted: {id:?}");
+        }
+        for id in ["core-utils", "a_b", "vendor.tool", "skill42"] {
+            assert!(valid_artifact_id(id), "valid ID rejected: {id}");
+        }
     }
 }
 
@@ -333,10 +399,17 @@ impl MarketplaceLock {
 
     /// Get the installed version of an item.
     pub fn installed_version(&self, id: &str, kind: MarketplaceType) -> Option<&String> {
-        match kind {
+        let explicit = match kind {
             MarketplaceType::Extension => self.extensions.get(id),
             MarketplaceType::Skill => self.skills.get(id),
-        }
+        };
+        explicit.or_else(|| {
+            self.installed
+                .iter()
+                .rev()
+                .find(|item| item.id == id && item.kind == kind)
+                .map(|item| &item.version)
+        })
     }
 
     fn lock_file_path() -> std::path::PathBuf {

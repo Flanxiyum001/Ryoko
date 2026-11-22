@@ -26,7 +26,9 @@ use ryoko_core::{
     team::{application_plan, dynamic_plan, standard_team},
     validation::ValidationReport,
 };
-use ryoko_marketplace::{InstallationRecord, MarketplaceClient, MarketplaceLock, MarketplaceType};
+use ryoko_marketplace::{
+    DownloadResultWrapper, InstallationRecord, MarketplaceClient, MarketplaceLock, MarketplaceType,
+};
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
     ProviderProfile, UsageLedger, discover_local_models,
@@ -3856,6 +3858,35 @@ mod tests {
     }
 }
 
+fn record_marketplace_install(
+    entry: &ryoko_marketplace::MarketplaceEntry,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut lock = MarketplaceLock::load().map_err(|e| cli_error(e.to_string()))?;
+    lock.installed
+        .retain(|item| !(item.id == entry.id && item.kind == entry.kind));
+    lock.installed.push(InstallationRecord {
+        id: entry.id.clone(),
+        kind: entry.kind,
+        version: entry.version.clone(),
+        installed_at: chrono::Utc::now(),
+        source_url: entry.asset_url.clone(),
+        install_path: path.to_string_lossy().into_owned(),
+    });
+    match entry.kind {
+        MarketplaceType::Extension => {
+            lock.extensions
+                .insert(entry.id.clone(), entry.version.clone());
+        }
+        MarketplaceType::Skill => {
+            lock.skills.insert(entry.id.clone(), entry.version.clone());
+        }
+    }
+    lock.last_checked = chrono::Utc::now();
+    lock.save().map_err(|e| cli_error(e.to_string()))?;
+    Ok(())
+}
+
 async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>> {
     let client = MarketplaceClient::new().map_err(|e| cli_error(e.to_string()))?;
 
@@ -3908,28 +3939,42 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
                 .await?
                 .ok_or_else(|| cli_error(format!("item {} not found", id)))?;
 
-            let result = client
-                .install_extension(&id)
-                .await
-                .map_err(|e| cli_error(e.to_string()))?;
+            let result = match entry.kind {
+                MarketplaceType::Extension => {
+                    let result = client
+                        .install_extension(&id)
+                        .await
+                        .map_err(|e| cli_error(e.to_string()))?;
+                    DownloadResultWrapper::Extension(result)
+                }
+                MarketplaceType::Skill => {
+                    let path = client
+                        .install_skill(&id)
+                        .await
+                        .map_err(|e| cli_error(e.to_string()))?;
+                    DownloadResultWrapper::Skill(path)
+                }
+            };
 
-            // Load lock file
-            let mut lock = MarketplaceLock::load().map_err(|e| cli_error(e.to_string()))?;
-            lock.installed.push(InstallationRecord {
-                id: id.clone(),
-                kind: entry.kind,
-                version: entry.version,
-                installed_at: chrono::Utc::now(),
-                source_url: entry.asset_url,
-                install_path: result.path.to_string_lossy().to_string(),
-            });
+            record_marketplace_install(
+                &entry,
+                match &result {
+                    DownloadResultWrapper::Extension(r) => &r.path,
+                    DownloadResultWrapper::Skill(p) => p,
+                },
+            )?;
 
-            // Save lock file
-            lock.save().map_err(|e| cli_error(e.to_string()))?;
-
-            println!("✅ Installed {} to {}", id, result.path.display());
+            let (display_path, checksum) = match &result {
+                DownloadResultWrapper::Extension(r) => {
+                    (r.path.display().to_string(), r.checksum.clone())
+                }
+                DownloadResultWrapper::Skill(p) => (p.display().to_string(), String::new()),
+            };
+            println!("✅ Installed {} to {}", id, display_path);
             eprintln!("   Type: {}", entry.kind);
-            eprintln!("   SHA-256: {}", result.checksum);
+            if !checksum.is_empty() {
+                eprintln!("   SHA-256: {}", checksum);
+            }
 
             Ok(())
         }
@@ -3957,23 +4002,69 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
 
                 for update in updates {
                     eprintln!("\nUpdating {}...", update.entry.id);
-                    let result = client
-                        .install_extension(&update.entry.id)
-                        .await
-                        .map_err(cli_error)?;
-                    println!("✅ Updated to {}", result.path.display());
+                    let result = match update.entry.kind {
+                        MarketplaceType::Extension => {
+                            let result = client
+                                .install_extension(&update.entry.id)
+                                .await
+                                .map_err(|e| cli_error(e.to_string()))?;
+                            DownloadResultWrapper::Extension(result)
+                        }
+                        MarketplaceType::Skill => {
+                            let path = client
+                                .install_skill(&update.entry.id)
+                                .await
+                                .map_err(|e| cli_error(e.to_string()))?;
+                            DownloadResultWrapper::Skill(path)
+                        }
+                    };
+                    let display_path = match &result {
+                        DownloadResultWrapper::Extension(r) => r.path.display().to_string(),
+                        DownloadResultWrapper::Skill(p) => p.display().to_string(),
+                    };
+                    record_marketplace_install(
+                        &update.entry,
+                        match &result {
+                            DownloadResultWrapper::Extension(r) => &r.path,
+                            DownloadResultWrapper::Skill(p) => p,
+                        },
+                    )?;
+                    println!("✅ Updated to {}", display_path);
                 }
             } else if let Some(id) = id {
-                let _entry = client
+                let entry = client
                     .find_item(&id)
                     .await
                     .map_err(|e| cli_error(e.to_string()))?
                     .ok_or_else(|| cli_error(format!("{} not found", id)))?;
-                let result = client
-                    .install_extension(&id)
-                    .await
-                    .map_err(|e| cli_error(e.to_string()))?;
-                println!("✅ Updated {} to {}", id, result.path.display());
+                let result = match entry.kind {
+                    MarketplaceType::Extension => {
+                        let result = client
+                            .install_extension(&id)
+                            .await
+                            .map_err(|e| cli_error(e.to_string()))?;
+                        DownloadResultWrapper::Extension(result)
+                    }
+                    MarketplaceType::Skill => {
+                        let path = client
+                            .install_skill(&id)
+                            .await
+                            .map_err(|e| cli_error(e.to_string()))?;
+                        DownloadResultWrapper::Skill(path)
+                    }
+                };
+                let display_path = match &result {
+                    DownloadResultWrapper::Extension(r) => r.path.display().to_string(),
+                    DownloadResultWrapper::Skill(p) => p.display().to_string(),
+                };
+                record_marketplace_install(
+                    &entry,
+                    match &result {
+                        DownloadResultWrapper::Extension(r) => &r.path,
+                        DownloadResultWrapper::Skill(p) => p,
+                    },
+                )?;
+                println!("✅ Updated {} to {}", id, display_path);
             } else {
                 return Err(cli_error("--id is required when not using --all"));
             }
