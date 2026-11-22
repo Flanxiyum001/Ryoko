@@ -225,9 +225,11 @@ export class LspClient {
     params: unknown,
   ): Promise<JsonRpcMessage | null> {
     if (!this.active) return null;
-    const owner = this.registry.find((server) => server.languages.includes(language))?.id
+    const preferred = this.registry.find((server) => server.languages.includes(language))?.id
       ?? RYOKO_LSP_ID;
-    if (!runningServers(this.serverStates).includes(owner)) return null;
+    const ready = runningServers(this.serverStates);
+    const owner = ready.includes(preferred) ? preferred : RYOKO_LSP_ID;
+    if (!ready.includes(owner)) return null;
     return this.requestTo(owner, method, params, CAPABILITY_TIMEOUT_MS);
   }
 
@@ -275,7 +277,8 @@ export class LspClient {
       resolve?.(message);
       return;
     }
-    if (typeof message.id === 'number' && typeof message.method === 'string') {
+    if ((typeof message.id === 'number' || typeof message.id === 'string')
+      && typeof message.method === 'string') {
       this.respondToServerRequest(server, message.id, message.method, message.params);
       return;
     }
@@ -286,7 +289,7 @@ export class LspClient {
 
   private respondToServerRequest(
     server: string,
-    id: number,
+    id: number | string,
     method: string,
     params: unknown,
   ): void {
