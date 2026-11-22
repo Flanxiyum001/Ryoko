@@ -95,8 +95,8 @@ jobs:
           # Preview-only alignment avoids changing production dependencies or
           # regenerating the lockfile during this installer smoke test.
           npm install --no-save --package-lock=false \
-            @tauri-apps/api@2.11.6 @tauri-apps/plugin-dialog@2.7.3
-          node -e "for (const [name, ver] of [['@tauri-apps/api','2.11.6'], ['@tauri-apps/plugin-dialog','2.7.3']]) { const pkg=require('./node_modules/'+name+'/package.json'); if(pkg.version !== ver) process.exit(1); }"
+            @tauri-apps/api@2.11.1 @tauri-apps/plugin-dialog@2.7.3
+          node -e "for (const [name, ver] of [['@tauri-apps/api','2.11.1'], ['@tauri-apps/plugin-dialog','2.7.3']]) { const pkg=require('./node_modules/'+name+'/package.json'); if(pkg.version !== ver) process.exit(1); }"
 
       - name: Build unsigned desktop test installers
         working-directory: apps/desktop
