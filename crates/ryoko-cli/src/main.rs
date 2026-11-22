@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use ignore::WalkBuilder;
 use ryoko_core::{
     AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeType, ChangeValidator,
-    CodeReviewSummary, EventSink, FileContext, FileSummary, Language, ModelAgent, Orchestrator,
+    CodeReviewSummary, EventSink, FileSummary, Language, ModelAgent, Orchestrator,
     OrchestratorConfig, OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange,
     RETRY_FEEDBACK_METADATA, SharedMemory, SourceFile, StagedChanges, Task, TaskContext,
     WorkspaceIndex, extract_files, goal_terms, render_markdown_summary,
