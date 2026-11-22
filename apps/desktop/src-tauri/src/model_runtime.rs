@@ -133,7 +133,9 @@ mod tests {
             .to_string(),
         )
         .expect("valid catalog saves");
-        std::env::set_var("RYOKO_MUXCHECK_KEY", "test-token");
+        unsafe {
+            std::env::set_var("RYOKO_MUXCHECK_KEY", "test-token");
+        }
         let (model, _router) = load_router(&workspace.0, Some("qwen3-coder"))
             .expect("catalog covers a bare model id via default_provider");
         assert_eq!(model, "qwen3-coder");
