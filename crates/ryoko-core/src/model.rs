@@ -98,6 +98,9 @@ pub struct ProjectContext {
     pub shared_memory: HashMap<String, String>,
 }
 
+/// Task metadata key that marks a speculative read-only task.
+pub const SPECULATIVE_METADATA: &str = "ryoko.speculative";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
@@ -132,6 +135,20 @@ impl Task {
     pub fn depends_on(mut self, dependency: &Task) -> Self {
         self.dependencies.push(dependency.id);
         self
+    }
+
+    /// Marks the task as a speculative read-only check (static analysis,
+    /// dependency audit, test planning). The orchestrator starts it without
+    /// waiting for its dependencies, rejects any file change it proposes, and
+    /// discards its result as skipped if a dependency does not succeed.
+    pub fn speculative(self) -> Self {
+        self.with_metadata(SPECULATIVE_METADATA, "true")
+    }
+
+    pub fn is_speculative(&self) -> bool {
+        self.metadata
+            .get(SPECULATIVE_METADATA)
+            .is_some_and(|value| value == "true")
     }
 
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {

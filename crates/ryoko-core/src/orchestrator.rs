@@ -302,13 +302,16 @@ impl Orchestrator {
             join_set.spawn(async move {
                 let operation = async {
                     let task = task;
-                    if let Some(reason) = wait_for_dependencies(&dependencies).await {
-                        events.emit(OrchestratorEvent::TaskSkipped {
-                            task_id: task.id,
-                            role: task.assigned_to.clone(),
-                            reason: reason.clone(),
-                        });
-                        return (task, None, TaskOutcome::Skipped { reason });
+                    let speculative = task.is_speculative();
+                    if !speculative {
+                        if let Some(reason) = wait_for_dependencies(&dependencies).await {
+                            events.emit(OrchestratorEvent::TaskSkipped {
+                                task_id: task.id,
+                                role: task.assigned_to.clone(),
+                                reason: reason.clone(),
+                            });
+                            return (task, None, TaskOutcome::Skipped { reason });
+                        }
                     }
 
                     let permit = match semaphore.acquire_owned().await {
@@ -336,7 +339,23 @@ impl Orchestrator {
                         diagnostic_sink,
                     )
                     .await;
+                    // Released before a speculative task waits on its
+                    // dependencies, so it can never starve them of a permit.
                     drop(permit);
+
+                    if speculative {
+                        // The result only stands if the work it ran ahead of
+                        // actually succeeded.
+                        if let Some(reason) = wait_for_dependencies(&dependencies).await {
+                            let reason = format!("speculative result discarded: {reason}");
+                            events.emit(OrchestratorEvent::TaskSkipped {
+                                task_id: task.id,
+                                role: task.assigned_to.clone(),
+                                reason: reason.clone(),
+                            });
+                            return (task, None, TaskOutcome::Skipped { reason });
+                        }
+                    }
 
                     (task, success, outcome)
                 };
@@ -891,14 +910,40 @@ async fn execute_task(
             continue;
         }
 
+        if task.is_speculative() && !result.changes.is_empty() {
+            // Speculative tasks run before the code they review exists; a
+            // file change from one is a contract violation, not a retryable
+            // failure, and nothing it proposed is staged.
+            let reason = "speculative task proposed file changes; it must be read-only".to_owned();
+            let _ = agent.rollback(ctx.clone(), task, &reason).await;
+            let _ = lease.discard().await;
+            events.emit(OrchestratorEvent::TaskFailed {
+                task_id: task.id,
+                role: task.assigned_to.clone(),
+                error: reason.clone(),
+                attempts: attempt,
+                retrying: false,
+                stage: TaskFailureStage::Agent,
+            });
+            return (
+                TaskOutcome::Failed {
+                    reason,
+                    attempts: attempt,
+                    visual_feedback: None,
+                },
+                None,
+            );
+        }
+
         // A visual review verdicts; it proposes nothing. There is nothing to
         // stage, and the spec policy that requires tests for a change does not
         // apply, so the verdict is recorded without a branch.
         if result.success
             && result.changes.is_empty()
-            && task
-                .metadata
-                .contains_key(crate::vision::VISUAL_REVIEW_METADATA)
+            && (task.is_speculative()
+                || task
+                    .metadata
+                    .contains_key(crate::vision::VISUAL_REVIEW_METADATA))
         {
             let _ = lease.discard().await;
             context.memory.insert(
@@ -2405,5 +2450,160 @@ mod tests {
         assert_eq!(report.failed.len(), 1);
         assert!(report.repairs.is_empty());
         assert!(report.needs_human_review.is_empty());
+    }
+
+    /// Read-only reviewer that sleeps, then reports without proposing files.
+    struct ReadOnlyAgent {
+        identity: AgentIdentity,
+        delay: Duration,
+        started: Arc<StdMutex<Option<Instant>>>,
+        propose: bool,
+        calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for ReadOnlyAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started
+                .lock()
+                .unwrap()
+                .get_or_insert_with(Instant::now);
+            tokio::time::sleep(self.delay).await;
+            let result = TaskResult::success(task.id, "audit clean");
+            Ok(if self.propose {
+                result.with_changes(change())
+            } else {
+                result
+            })
+        }
+    }
+
+    fn security(delay: Duration, propose: bool) -> (Arc<ReadOnlyAgent>, Arc<AtomicU32>) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let agent = Arc::new(ReadOnlyAgent {
+            identity: AgentIdentity::new(
+                AgentRole::Custom("security".to_owned()),
+                "sec-01",
+                "security",
+            ),
+            delay,
+            started: Arc::new(StdMutex::new(None)),
+            propose,
+            calls: calls.clone(),
+        });
+        (agent, calls)
+    }
+
+    fn concurrent(max_attempts: u32) -> Orchestrator {
+        Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router()).with_config(
+            OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts,
+                max_repair_cycles: 0,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn speculative_tasks_overlap_the_work_they_depend_on() {
+        let producer = Task::new("implement", AgentRole::SeniorDeveloper);
+        let audit = Task::new(
+            "audit dependencies",
+            AgentRole::Custom("security".to_owned()),
+        )
+        .depends_on(&producer)
+        .speculative();
+        let (sec, _) = security(Duration::from_millis(200), false);
+        let started = sec.started.clone();
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(SleepAgent {
+                identity: dev(),
+                delay: Duration::from_millis(200),
+            }),
+            sec,
+        ];
+
+        let run_start = Instant::now();
+        let report = concurrent(1)
+            .run(
+                vec![producer, audit.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+        let audit_started = started.lock().unwrap().expect("audit ran");
+        assert!(
+            audit_started.duration_since(run_start) < Duration::from_millis(150),
+            "the audit must not wait for the producer"
+        );
+        assert!(run_start.elapsed() < Duration::from_millis(390));
+        assert!(report.succeeded.iter().any(|s| s.task_id == audit.id));
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+    }
+
+    #[tokio::test]
+    async fn speculative_results_are_discarded_when_a_dependency_fails() {
+        let producer = Task::new("broken", AgentRole::ProjectManager);
+        let audit = Task::new("audit", AgentRole::Custom("security".to_owned()))
+            .depends_on(&producer)
+            .speculative();
+        let (sec, calls) = security(Duration::ZERO, false);
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(FailingAgent {
+                identity: AgentIdentity::new(AgentRole::ProjectManager, "pm-01", "planner"),
+                rolled_back: Arc::new(AtomicBool::new(false)),
+            }),
+            sec,
+        ];
+
+        let report = concurrent(1)
+            .run(
+                vec![producer, audit.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "it ran speculatively");
+        assert!(report.succeeded.iter().all(|s| s.task_id != audit.id));
+        let skipped = report
+            .skipped
+            .iter()
+            .find(|s| s.task_id == audit.id)
+            .expect("discarded result is reported as skipped");
+        assert!(skipped.reason.starts_with("speculative result discarded"));
+    }
+
+    #[tokio::test]
+    async fn speculative_tasks_may_not_propose_file_changes() {
+        let audit = Task::new("audit", AgentRole::Custom("security".to_owned())).speculative();
+        let (sec, calls) = security(Duration::ZERO, true);
+        let workspace = workspace();
+        let orchestrator =
+            Orchestrator::new(workspace.clone(), Arc::new(AllowAllValidator), router())
+                .with_config(OrchestratorConfig {
+                    max_concurrency: 1,
+                    max_attempts: 3,
+                    max_repair_cycles: 0,
+                });
+
+        let report = orchestrator
+            .run(vec![audit], vec![sec], ProjectContext::default())
+            .await
+            .unwrap();
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].error.contains("must be read-only"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a contract violation is not retried"
+        );
+        assert!(report.succeeded.is_empty());
     }
 }
