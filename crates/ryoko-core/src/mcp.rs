@@ -591,6 +591,194 @@ impl<T: McpTransport> McpToolService for McpToolbox<T> {
     }
 }
 
+/// Separator between a connector namespace and the server's own tool name.
+pub const TOOL_NAMESPACE_SEPARATOR: &str = "__";
+/// Upper bound on the tools one run may mount across every connector.
+pub const MAX_MULTI_TOOLS: usize = 512;
+
+/// Validates a connector namespace: empty means "no prefix" and is reserved for
+/// a single explicitly chosen server; otherwise it must look like a connector id.
+pub fn valid_namespace(namespace: &str) -> bool {
+    namespace.len() <= 64
+        && !namespace.contains(TOOL_NAMESPACE_SEPARATOR)
+        && namespace
+            .bytes()
+            .next()
+            .is_none_or(|byte| byte.is_ascii_lowercase())
+        && namespace.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+/// `github` + `list_issues` becomes `github__list_issues`.
+pub fn namespaced_tool_name(namespace: &str, tool: &str) -> Result<String, McpError> {
+    if tool.is_empty()
+        || tool.len() > 128
+        || tool.chars().any(char::is_control)
+        || !valid_namespace(namespace)
+    {
+        return Err(McpError::InvalidResponse(
+            "invalid connector namespace or tool name".into(),
+        ));
+    }
+    if namespace.is_empty() {
+        return Ok(tool.to_owned());
+    }
+    Ok(format!("{namespace}{TOOL_NAMESPACE_SEPARATOR}{tool}"))
+}
+
+/// Prefixes the tool name a human is asked about, so an approval dialog for
+/// `list_issues` says which connector it belongs to.
+pub struct NamespacedApprovalGate {
+    namespace: String,
+    inner: Arc<dyn McpApprovalGate>,
+}
+
+impl NamespacedApprovalGate {
+    pub fn new(namespace: impl Into<String>, inner: Arc<dyn McpApprovalGate>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            inner,
+        }
+    }
+}
+
+#[async_trait]
+impl McpApprovalGate for NamespacedApprovalGate {
+    async fn approve(&self, tool: &str, arguments: &Value) -> bool {
+        let display = namespaced_tool_name(&self.namespace, tool)
+            .unwrap_or_else(|_| tool.chars().take(128).collect());
+        self.inner.approve(&display, arguments).await
+    }
+}
+
+struct MountedService {
+    namespace: String,
+    service: Arc<dyn McpToolService>,
+    tools: BTreeSet<String>,
+}
+
+/// Mounts several connector toolboxes in one run.
+///
+/// Each connector keeps its own allowlist, call budget, argument limits and
+/// approval gate inside its [`McpToolbox`]; this type only routes a namespaced
+/// tool name to the connector that owns it and refuses everything else.
+#[derive(Default)]
+pub struct MultiMcpToolbox {
+    definitions: Vec<ToolDefinition>,
+    mounts: Vec<MountedService>,
+}
+
+impl MultiMcpToolbox {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mounts one connected service. A tool-name collision is an error instead
+    /// of letting one connector shadow another.
+    pub fn mount(
+        &mut self,
+        namespace: &str,
+        service: Arc<dyn McpToolService>,
+    ) -> Result<(), McpError> {
+        if !valid_namespace(namespace) {
+            return Err(McpError::InvalidResponse(
+                "invalid connector namespace".into(),
+            ));
+        }
+        if self.mounts.iter().any(|mount| mount.namespace == namespace) {
+            return Err(McpError::InvalidResponse(format!(
+                "connector namespace `{namespace}` is mounted twice"
+            )));
+        }
+        let definitions = service.definitions();
+        if definitions.is_empty() {
+            return Err(McpError::ToolNotAllowed(format!(
+                "connector `{namespace}` exposes no allowed tools"
+            )));
+        }
+        if self.definitions.len().saturating_add(definitions.len()) > MAX_MULTI_TOOLS {
+            return Err(McpError::InvalidResponse(
+                "mounted tool catalogue exceeds the limit".into(),
+            ));
+        }
+        let mut tools = BTreeSet::new();
+        let mut mounted = Vec::with_capacity(definitions.len());
+        for mut definition in definitions {
+            // An unprefixed server is only unambiguous while none of its tool
+            // names can be read as `connector__tool`.
+            if namespace.is_empty() && definition.name.contains(TOOL_NAMESPACE_SEPARATOR) {
+                return Err(McpError::InvalidResponse(format!(
+                    "unprefixed server tool `{}` contains the connector separator",
+                    definition.name
+                )));
+            }
+            let name = namespaced_tool_name(namespace, &definition.name)?;
+            if self
+                .definitions
+                .iter()
+                .any(|existing| existing.name == name)
+            {
+                return Err(McpError::InvalidResponse(format!(
+                    "tool name collision: `{name}`"
+                )));
+            }
+            definition.name = name;
+            tools.insert(definition.name.clone());
+            mounted.push(definition);
+        }
+        self.definitions.extend(mounted);
+        self.mounts.push(MountedService {
+            namespace: namespace.to_owned(),
+            service,
+            tools,
+        });
+        Ok(())
+    }
+
+    /// Mounted namespaces in mount order. `""` is the unprefixed server.
+    pub fn namespaces(&self) -> Vec<&str> {
+        self.mounts
+            .iter()
+            .map(|mount| mount.namespace.as_str())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl McpToolService for MultiMcpToolbox {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        self.definitions.clone()
+    }
+
+    async fn call(
+        &self,
+        tool: &str,
+        arguments: Value,
+        scope: Option<&str>,
+    ) -> Result<Value, McpError> {
+        if let Some((namespace, inner)) = tool.split_once(TOOL_NAMESPACE_SEPARATOR)
+            && let Some(mount) = self
+                .mounts
+                .iter()
+                .find(|mount| mount.namespace == namespace && !namespace.is_empty())
+        {
+            if inner.is_empty() {
+                return Err(McpError::ToolNotAllowed(tool.chars().take(128).collect()));
+            }
+            return mount.service.call(inner, arguments, scope).await;
+        }
+        if let Some(mount) = self
+            .mounts
+            .iter()
+            .find(|mount| mount.namespace.is_empty() && mount.tools.contains(tool))
+        {
+            return mount.service.call(tool, arguments, scope).await;
+        }
+        Err(McpError::ToolNotAllowed(tool.chars().take(128).collect()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,6 +1117,218 @@ mod tests {
         let gate = SessionApprovalGate::new(asker.clone());
         assert!(!gate.approve("   ", &json!({})).await);
         assert!(asker.asked().is_empty());
+    }
+
+    /// Minimal tool service that records which namespace handled a call.
+    struct FakeService {
+        prefix: &'static str,
+        tools: Vec<&'static str>,
+        calls: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl FakeService {
+        fn build(
+            prefix: &'static str,
+            tools: Vec<&'static str>,
+            calls: Arc<Mutex<Vec<(String, String)>>>,
+        ) -> Arc<dyn McpToolService> {
+            Arc::new(Self {
+                prefix,
+                tools,
+                calls,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl McpToolService for FakeService {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            self.tools
+                .iter()
+                .map(|name| ToolDefinition::new(*name, "fake", json!({"type": "object"})))
+                .collect()
+        }
+
+        async fn call(
+            &self,
+            tool: &str,
+            _arguments: Value,
+            _scope: Option<&str>,
+        ) -> Result<Value, McpError> {
+            if !self.tools.contains(&tool) {
+                return Err(McpError::ToolNotAllowed(tool.into()));
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push((self.prefix.to_owned(), tool.to_owned()));
+            Ok(json!({"handled_by": self.prefix, "tool": tool}))
+        }
+    }
+
+    #[test]
+    fn namespacing_keeps_names_unique_and_parseable() {
+        assert_eq!(
+            namespaced_tool_name("github", "list_issues").unwrap(),
+            "github__list_issues"
+        );
+        assert_eq!(
+            namespaced_tool_name("", "list_issues").unwrap(),
+            "list_issues"
+        );
+        for tool in ["", "bad\nname"] {
+            assert!(namespaced_tool_name("github", tool).is_err());
+        }
+        for namespace in ["GitHub", "github__tools", "1github", "git hub"] {
+            assert!(namespaced_tool_name(namespace, "list_issues").is_err());
+        }
+        assert!(valid_namespace(""));
+        assert!(valid_namespace("my-connector_2"));
+    }
+
+    #[tokio::test]
+    async fn two_connectors_mount_side_by_side_without_collisions() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut multi = MultiMcpToolbox::new();
+        multi
+            .mount(
+                "github",
+                FakeService::build("github", vec!["list_issues", "get_issue"], calls.clone()),
+            )
+            .unwrap();
+        multi
+            .mount(
+                "cloudflare",
+                FakeService::build("cloudflare", vec!["list_issues", "kv_get"], calls.clone()),
+            )
+            .unwrap();
+        assert_eq!(multi.namespaces(), vec!["github", "cloudflare"]);
+
+        let names = multi
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "github__list_issues",
+                "github__get_issue",
+                "cloudflare__list_issues",
+                "cloudflare__kv_get"
+            ]
+        );
+
+        let result = multi
+            .call("cloudflare__list_issues", json!({}), None)
+            .await
+            .unwrap();
+        assert_eq!(result["handled_by"], "cloudflare");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[("cloudflare".to_owned(), "list_issues".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_namespaces_and_bare_tools_are_refused() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut multi = MultiMcpToolbox::new();
+        multi
+            .mount(
+                "github",
+                FakeService::build("github", vec!["list_issues"], calls.clone()),
+            )
+            .unwrap();
+        for tool in [
+            "list_issues",
+            "slack__list_issues",
+            "github__",
+            "__list_issues",
+        ] {
+            assert!(
+                matches!(
+                    multi.call(tool, json!({}), None).await,
+                    Err(McpError::ToolNotAllowed(_))
+                ),
+                "{tool} must be refused"
+            );
+        }
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_collision_or_duplicate_namespace_stops_the_mount() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut multi = MultiMcpToolbox::new();
+        multi
+            .mount(
+                "github",
+                FakeService::build("a", vec!["list_issues"], calls.clone()),
+            )
+            .unwrap();
+        assert!(matches!(
+            multi.mount(
+                "github",
+                FakeService::build("b", vec!["kv_get"], calls.clone())
+            ),
+            Err(McpError::InvalidResponse(_))
+        ));
+        // The same tool under a different namespace is fine.
+        multi
+            .mount(
+                "cloudflare",
+                FakeService::build("b", vec!["list_issues"], calls),
+            )
+            .unwrap();
+        assert_eq!(multi.definitions().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unprefixed_server_still_serves_its_own_tools() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut multi = MultiMcpToolbox::new();
+        multi
+            .mount(
+                "",
+                FakeService::build("local", vec!["read_issue"], calls.clone()),
+            )
+            .unwrap();
+        let result = multi.call("read_issue", json!({}), None).await.unwrap();
+        assert_eq!(result["handled_by"], "local");
+        assert!(
+            multi
+                .mount("", FakeService::build("other", vec!["x"], calls))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_connector_cannot_be_mounted() {
+        let mut multi = MultiMcpToolbox::new();
+        let empty: Arc<dyn McpToolService> =
+            FakeService::build("empty", Vec::new(), Arc::new(Mutex::new(Vec::new())));
+        assert!(matches!(
+            multi.mount("custom", empty),
+            Err(McpError::ToolNotAllowed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_prompts_name_the_connector() {
+        struct RecordingAsker(Mutex<Vec<String>>);
+        #[async_trait]
+        impl McpApprovalAsker for RecordingAsker {
+            async fn ask(&self, tool: &str, _arguments: &Value) -> McpApprovalScope {
+                self.0.lock().unwrap().push(tool.to_owned());
+                McpApprovalScope::Deny
+            }
+        }
+        let asker = Arc::new(RecordingAsker(Mutex::new(Vec::new())));
+        let gate = Arc::new(SessionApprovalGate::new(asker.clone()));
+        let namespaced = NamespacedApprovalGate::new("github", gate);
+        assert!(!namespaced.approve("list_issues", &json!({})).await);
+        assert_eq!(asker.0.lock().unwrap().as_slice(), &["github__list_issues"]);
     }
 
     #[tokio::test]

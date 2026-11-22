@@ -160,3 +160,105 @@ Next: surface `SessionApprovalGate` through Tauri IPC so the dialog can offer
 "allow once", "allow for this run" and "deny", and extend the same scoped gate
 to agent shell and network actions. Never permit an agent to fabricate an
 approval gate or execute MCP calls without that trusted host implementation.
+
+## Connectors: several reviewed servers in one run
+
+A connector is a declarative, secret-free description of one external MCP
+server. The registry lives at `<project>/.ryoko/connectors.json` (that directory
+is git-ignored) and is shared by the CLI and the desktop shell. It stores
+environment variable **names**, never values; credentials still come from the
+host environment or the OS credential store.
+
+```json
+{
+  "version": 1,
+  "connectors": [
+    {
+      "id": "github",
+      "name": "GitHub",
+      "category": "Source Control",
+      "transport": {"kind": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]},
+      "required_env": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+      "allowed_tools": ["list_issues", "get_issue"],
+      "write_tools": ["create_issue", "create_pull_request"],
+      "enabled": true,
+      "max_calls_per_run": 20
+    }
+  ]
+}
+```
+
+`configs/connectors.example.json` is the built-in catalogue: GitHub,
+Cloudflare, Filesystem, Fetch and a generic custom template. Every preset ships
+`enabled: false` with read-only tools allowed; `write_tools` names the tools that
+mutate remote state so a UI can tag them, and a write tool runs only after it is
+moved into `allowed_tools` and then passes the usual approval gate.
+
+`transport` is either `stdio` (`command` + `args`) or a network endpoint
+(`sse` / `streamable_http` with `url`). Network URLs follow the provider rule:
+HTTPS outside loopback, no credentials, query or fragment. The current CLI
+mounts stdio connectors only; an enabled network connector fails the run with an
+actionable message instead of being silently skipped.
+
+### Manage connectors
+
+```sh
+ryoko connectors list                 # presets, configured connectors, offline readiness
+ryoko connectors list --json          # machine-readable snapshot
+ryoko connectors add github           # copy a preset into the workspace registry
+ryoko connectors add custom --id internal --command node --arg server.mjs \
+  --env INTERNAL_TOKEN --allow-tool lookup
+ryoko connectors enable github
+ryoko connectors disable github
+```
+
+`list` mirrors `ryoko doctor`: it reads whether each declared variable is set and
+never contacts the server. A connector with no allowed tools cannot be enabled.
+
+### What a run mounts
+
+`ryoko run` loads every enabled connector automatically and still accepts
+`--mcp-server` for one explicitly chosen server, which is mounted beside them.
+`--no-connectors` opts out; `--connectors-config <PATH>` loads a different
+registry.
+
+Each connector is its own `McpToolbox`, so it keeps its own allowlist,
+`max_calls_per_run` (default 25), argument limit and `SessionApprovalGate`. The
+`MultiMcpToolbox` in `ryoko-core` routes a namespaced name to its owner:
+
+| Connector | Server tool | Model-visible name |
+| --- | --- | --- |
+| `github` | `list_issues` | `github__list_issues` |
+| `cloudflare` | `kv_get` | `cloudflare__kv_get` |
+
+A tool-name collision between connectors, or between a connector and the
+unprefixed `--mcp-server`, fails before the run starts. Approval prompts show the
+namespaced name, so a human always sees which service is asking.
+
+### Credential isolation
+
+A connector child process is spawned with a cleared environment. Only `PATH`,
+`TMPDIR` and `TEMP` are forwarded for the interpreter itself, plus exactly the
+variables listed in that connector's `required_env`. `HOME` and `USERPROFILE`
+are never forwarded. A declared variable that is unset or blank fails the run
+with its name, rather than starting a server that silently cannot authenticate.
+
+In a headless run, `--mcp-headless-approve` entries for connectors are written
+`<connector>__<tool>` and must name a tool that connector allows. An approval
+for one connector cannot approve another connector or the unprefixed server.
+
+### Desktop catalog
+
+The Tauri shell exposes `list_connectors`, `add_connector`,
+`set_connector_enabled`, `set_connector_tools` and `inspect_connector`. The
+Connectors panel shows readiness badges ("Ready", "Disabled", "Missing
+`CLOUDFLARE_API_TOKEN`"), lets a user add a preset, toggle a connector, pick
+tools (write tools tagged) and start a configured stdio server to read its
+advertised tool names. Writes go through a dedicated command that refuses a
+symlinked `.ryoko` directory; `.ryoko` itself remains outside normal file editing.
+
+The shell does not define its own connector type: it reads and writes the same
+`ryoko_core::connectors` registry the CLI uses, so the schema, limits,
+transport and readiness rules and the built-in presets have exactly one
+implementation. The only desktop-specific pieces are the view model and the
+bounded stdio probe that asks a server which tools it advertises.

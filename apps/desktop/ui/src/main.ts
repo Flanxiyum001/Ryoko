@@ -8,6 +8,7 @@ import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
 import { LspClient, type LspState } from './lsp';
+import { mountConnectors } from './connectors_panel';
 import { mountGithubQueue } from './github_queue';
 import {
   focusMissionTasks,
@@ -1770,3 +1771,4 @@ window.addEventListener('beforeunload', () => {
 setLspState('offline');
 renderMissionOptions();
 mountGithubQueue(setStatus);
+mountConnectors(setStatus);
