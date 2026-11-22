@@ -1,16 +1,23 @@
 mod completion;
 mod connectors;
 mod debug_adapter;
+mod git_status;
 mod github_queue;
+mod inline_edit;
 mod lsp;
 mod lsp_frame;
 mod mission;
+mod model_runtime;
 mod paths;
 mod review;
 mod run;
+mod search;
+mod servers;
 mod sessions;
 mod sessions_projection;
+mod settings;
 mod terminal;
+mod workbench;
 mod workspace;
 
 use tauri::Manager;
@@ -30,8 +37,18 @@ pub fn run() {
             workspace::list_files,
             workspace::read_file,
             workspace::write_file,
+            workbench::git_changes,
+            workbench::workspace_search,
+            workbench::workspace_replace_preview,
+            workbench::workspace_replace_apply,
+            workbench::inline_edit,
+            workbench::settings_read,
+            workbench::settings_save_providers,
+            workbench::settings_save_lsp_servers,
+            workbench::workbench_protocol_version,
             lsp::lsp_start,
             lsp::lsp_send,
+            lsp::lsp_registry,
             lsp::lsp_stop,
             mission::list_mission_logs,
             mission::read_mission_log,

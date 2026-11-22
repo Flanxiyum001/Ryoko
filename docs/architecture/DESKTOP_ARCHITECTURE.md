@@ -35,9 +35,18 @@ open_workspace(path)            canonicalises and stores the workspace root
 list_files()                    bounded, gitignore-aware file list
 read_file(path)                 UTF-8, max 2 MiB, canonical path inside the root
 write_file(path, content)       atomic save, max 2 MiB, refuses symlink escapes
-lsp_start(root)                 spawns ryoko-lsp with piped stdio
-lsp_send(message)               validates JSON, writes one Content-Length frame
-lsp_stop()                      terminates the language server
+lsp_start(root)                 spawns ryoko-lsp plus registered language servers
+lsp_send(server, message)       validates JSON, writes one Content-Length frame
+lsp_stop(server?)               terminates one or all language servers
+lsp_registry()                  validated registry for the webview multiplexer
+git_changes()                   bounded NUL-separated Git working-tree changes
+workspace_search(...)           bounded regex search over the open workspace
+workspace_replace_preview(...)  dry-run replace plans with drift markers
+workspace_replace_apply(...)    applies only what the preview showed
+inline_edit(args)               one targeted model edit for the active selection
+settings_read() / settings_save_providers(json)        visual settings surface
+settings_save_lsp_servers(json) validated language-server registry
+workbench_protocol_version()    lets the webview feature-detect the surface
 list_mission_logs()             bounded event-log names
 read_mission_log(name)          bounded JSONL contents
 list_review_hunks()             unstaged Git text hunks
@@ -61,10 +70,13 @@ dap_send(message)              validate JSON and write one framed DAP request
 dap_status() / dap_stop()      inspect or terminate the adapter
 ```
 
-`lsp_start` resolves the server from `RYOKO_LSP_BIN`, then a sibling
-`ryoko-lsp` binary (the bundled Tauri sidecar), then `PATH`. Output frames are
-parsed in Rust and emitted as `ryoko-lsp-message` events; stderr lines become
-`ryoko-lsp-log`; process exit emits `ryoko-lsp-closed`.
+`lsp_start` resolves `ryoko-lsp` from `RYOKO_LSP_BIN`, then a sibling
+`ryoko-lsp` binary (the bundled Tauri sidecar), then `PATH`; registered servers
+resolve as bare names through `PATH` under the open workspace. Output frames
+are parsed in Rust and emitted per server as `lsp-frame` events with an
+explicit `{ server, message }` payload; stderr lines become `lsp-log`; process
+exit emits `lsp-exit`. The routing rules live in
+[`../protocols/DESKTOP_LSP_MULTIPLEX.md`](../protocols/DESKTOP_LSP_MULTIPLEX.md).
 
 The frontend sends `initialize` / `initialized`, `didOpen`, `didChange` and
 `didClose`, and turns `textDocument/publishDiagnostics` into Monaco markers and
@@ -79,6 +91,19 @@ process, not in the browser.
 - The capability manifest grants only `core:default` and `dialog:allow-open`;
   there is no shell plugin and no filesystem plugin scope.
 - The CSP allows only local scripts/styles, local workers and Tauri IPC.
+
+## Editor workbench
+
+The explorer renders the bounded file list as a collapsible tree with Git
+working-tree badges (`.ryoko`-private status kept out of `target` and
+`node_modules`), the bottom panel gained a SEARCH tab with regex search and a
+two-phase preview/apply replace flow, a CHANGES drawer lists every working-tree
+change and opens it in the shared diff editor, the settings dialog edits the
+provider catalog, the language-server registry and keybinding overrides
+without touching JSON files by hand, and `Mod+K` runs one bounded inline model
+edit against the active selection with a drift-checking apply. The IPC
+contracts are documented in
+[`../protocols/DESKTOP_WORKBENCH.md`](../protocols/DESKTOP_WORKBENCH.md).
 
 ## Editor speed and symbol context
 
@@ -114,7 +139,8 @@ or synthesize stack/variable state.
 ## Verification
 
 - `npm test` — protocol helpers (URI encoding, language mapping, severities,
-  JSON-RPC guards).
+  JSON-RPC guards), workbench logic (tree, search grouping, inline-edit
+  context, keybindings, multiplexer routing).
 - `npm run build` — TypeScript check plus Vite production build.
 - `rustc --test src-tauri/src/paths.rs` and `rustc --test
   src-tauri/src/lsp_frame.rs` — path confinement and framing tests, runnable
