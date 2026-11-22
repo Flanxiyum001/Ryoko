@@ -1,0 +1,198 @@
+name: Ryoko preview installers (unsigned)
+
+on:
+  push:
+    branches:
+      - preview/desktop-installers
+    tags:
+      - 'desktop-preview-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ryoko-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64 (MSI, NSIS)
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - label: Linux x64 (AppImage, DEB)
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - label: macOS Apple Silicon (DMG)
+            os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Linux Tauri build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf rpm libssl-dev build-essential curl wget file
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Run frontend unit tests
+        working-directory: apps/desktop
+        run: npm test
+
+      - name: Build Ryoko CLI and language-server sidecars
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p ryoko-native --bin ryoko-lsp --target "$TARGET"
+          cargo build --locked --release -p ryoko-cli --bin ryoko --target "$TARGET"
+          mkdir -p apps/desktop/src-tauri/binaries
+          SUFFIX=""
+          if [ "$RUNNER_OS" = "Windows" ]; then SUFFIX=".exe"; fi
+          for BINARY in ryoko-lsp ryoko; do
+            SOURCE="target/$TARGET/release/$BINARY$SUFFIX"
+            test -f "$SOURCE"
+            cp "$SOURCE" "apps/desktop/src-tauri/binaries/$BINARY-$TARGET$SUFFIX"
+          done
+
+      - name: Align preview JavaScript bindings with locked Rust Tauri versions
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The checked-in npm lock currently resolves a newer frontend minor
+          # than the Rust crates. Tauri CLI blocks bundling mismatched minors.
+          # Preview-only alignment avoids changing production dependencies or
+          # regenerating the lockfile during this installer smoke test.
+          npm install --no-save --package-lock=false \
+            @tauri-apps/api@2.11.1 @tauri-apps/plugin-dialog@2.7.3
+          node -e "for (const [name, ver] of [['@tauri-apps/api','2.11.1'], ['@tauri-apps/plugin-dialog','2.7.3']]) { const pkg=require('./node_modules/'+name+'/package.json'); if(pkg.version !== ver) process.exit(1); }"
+
+      - name: Build unsigned desktop test installers
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # The override includes the CLI engine; production signing settings
+          # are deliberately not changed by this testing workflow.
+          npm run tauri build -- --target "$TARGET" \
+            --config src-tauri/preview-bundle.json
+
+      - name: Verify expected installers exist
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          DIR="apps/desktop/src-tauri/target/$TARGET/release/bundle"
+          case "$RUNNER_OS" in
+            Windows)
+              compgen -G "$DIR/msi/*.msi" > /dev/null
+              compgen -G "$DIR/nsis/*.exe" > /dev/null
+              ;;
+            macOS)
+              compgen -G "$DIR/dmg/*.dmg" > /dev/null
+              ;;
+            Linux)
+              compgen -G "$DIR/deb/*.deb" > /dev/null
+              compgen -G "$DIR/appimage/*.AppImage" > /dev/null
+              ;;
+          esac
+
+      - name: Upload unsigned preview installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ryoko-preview-${{ matrix.target }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+
+  preview-release:
+    name: Publish explicit preview tag as prerelease
+    if: github.ref == 'refs/heads/preview/desktop-installers' || startsWith(github.ref, 'refs/tags/desktop-preview-v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ryoko-preview-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -type f ! -name 'SHA256SUMS.txt' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          test -s SHA256SUMS.txt
+
+      - name: Publish strictly prerelease assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' INSTALLERS < <(find dist -type f \
+            \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \
+               -o -name '*.deb' -o -name '*.AppImage' \) -print0)
+          if [ "${#INSTALLERS[@]}" -lt 3 ]; then
+            echo "::error::Missing platform installers, refusing to publish."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/desktop-preview-v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+            TAG_FLAGS=(--verify-tag)
+          else
+            # A successful preview-branch build automatically creates a public
+            # GitHub prerelease. Nothing is published if any OS build fails.
+            TAG="desktop-preview-v0.1.0-alpha.${GITHUB_RUN_NUMBER}"
+            TAG_FLAGS=(--target "$GITHUB_SHA")
+          fi
+          gh release create "$TAG" \
+            "${TAG_FLAGS[@]}" \
+            --prerelease \
+            --latest=false \
+            --title "Ryoko Preview $TAG" \
+            --notes "UNSIGNED experimental test builds for Windows x64, Linux x64 and Apple Silicon macOS. These are pre-alpha builds, not production releases. No Windows Authenticode signature or Apple notarization is provided. Test only with non-sensitive projects. Source commit: $GITHUB_SHA." \
+            "${INSTALLERS[@]}" dist/SHA256SUMS.txt
