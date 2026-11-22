@@ -9,7 +9,7 @@ The product and engineering plan for the desktop IDE, agent runtime and release 
 ## Prerequisites
 
 - Rust 1.85+ with Cargo
-- An OpenAI **chat-completions compatible** server, e.g. an Ollama /v1 endpoint, an OpenAI API endpoint, or another compatible model server, or an Anthropic Messages-compatible endpoint
+- An OpenAI **chat-completions compatible** server (such as Ollama or OpenAI), an Anthropic Messages-compatible endpoint, or a native Google Gemini `generateContent` endpoint
 - An API key in an environment variable for authenticated providers
 
 A custom endpoint is not a universal protocol translator. Anthropic Messages is supported natively; other provider-native wire APIs still need separate adapters, and tools, streaming and token accounting differ by model.
@@ -240,7 +240,7 @@ ryoko run --repo . --config ryoko.providers.json --model local/qwen2.5-coder \
   "Improve parser latency"
 ```
 
-The benchmark command must print a line such as `latency_ms=12.5`. Record a baseline separately before using a pass/fail regression gate. These features do not establish current benchmark results; see [spec and performance gates](docs/architecture/SPEC_AND_PERF_GATES.md).
+Replace the illustrative `my-benchmark` command and model ID with your real benchmark and configured model. The benchmark command must print a line such as `latency_ms=12.5`. Record a baseline separately before using a pass/fail regression gate. These features do not establish current benchmark results; see [spec and performance gates](docs/architecture/SPEC_AND_PERF_GATES.md).
 
 ### Prompt caching and speculative scheduling
 
@@ -324,5 +324,5 @@ Requirements: Node.js 22+, Git for server-side clones. After configuring environ
 
     node services/github-app/src/index.mjs
 
-Open http://127.0.0.1:4173 and connect your GitHub App installation. The initial UX is a browser shell, **not yet a packaged native desktop app or a Monaco/LSP editor**. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
+Open http://127.0.0.1:4173 and connect your GitHub App installation. **This separate GitHub App workbench** is a browser shell, not the Tauri/Monaco desktop IDE described above. The packaged desktop has an experimental, read-only GitHub queue bridge to the local broker; the broker is not embedded in the installer. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
 
