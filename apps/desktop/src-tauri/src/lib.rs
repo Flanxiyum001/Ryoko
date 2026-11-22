@@ -1,4 +1,5 @@
 mod completion;
+mod connectors;
 mod debug_adapter;
 mod github_queue;
 mod lsp;
@@ -57,6 +58,11 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_status,
             terminal::terminal_stop,
+            connectors::list_connectors,
+            connectors::add_connector,
+            connectors::set_connector_enabled,
+            connectors::set_connector_tools,
+            connectors::inspect_connector,
             debug_adapter::dap_start,
             debug_adapter::dap_send,
             debug_adapter::dap_status,
