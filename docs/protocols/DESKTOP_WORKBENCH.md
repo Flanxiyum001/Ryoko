@@ -17,8 +17,8 @@ than itself instead of misinterpreting field shapes.
 | --- | --- | --- | --- |
 | `git_changes` | – | `ChangesSnapshot` | NUL-separated `git status --porcelain=v1 --untracked-files=all --no-renames -z`; output bounded to 512 KiB and 2 000 entries; `isRepository: false` outside a repo |
 | `workspace_search` | `query`, `caseSensitive` | `SearchReply` | Bounded regex over UTF-8 files ≤ 2 MiB; ≤ 1 000 hits total, ≤ 200 per file; ignores `.git`, `.ryoko`, `target`, `node_modules` |
-| `workspace_replace_preview` | `query`, `replacement`, `caseSensitive` | `ReplaceReply` | Dry run only; `previews[].firstPreview` doubles as a drift marker |
-| `workspace_replace_apply` | `query`, `replacement`, `caseSensitive`, `expected` | `ReplaceResult` | Recomputes every plan at apply time; any drift against the preview skips the file; private 0600 temp file + rename |
+| `workspace_replace_preview` | `query`, `replacement`, `caseSensitive` | `ReplaceReply` | Dry run only; previews include a full-file `contentHash` for drift detection |
+| `workspace_replace_apply` | `query`, `replacement`, `caseSensitive`, `expected` | `ReplaceResult` | Recomputes every plan at apply time; any drift against the preview skips the file; private temp file + rename, preserving existing file permissions |
 | `inline_edit` | `args { path, language, instructions, before, selected, after, model? }` | `InlineEditReply` | One targeted model call; context bounded to 12 000 chars per component; the answer is fence-stripped and validated ≤ 512 KiB before it reaches the buffer |
 | `settings_read` | – | `SettingsSnapshot` | Returns raw settings JSON plus the settings directory |
 | `settings_save_providers` | `json` | canonical JSON | Validated as a `ryoko-models` provider catalog before any write |
@@ -27,7 +27,7 @@ than itself instead of misinterpreting field shapes.
 
 Search parsing and validation lives in pure modules (`search.rs`, `git_status.rs`,
 `inline_edit.rs`, `servers.rs`, `settings.rs`) that carry their own unit tests
-and never touch the Tauri runtime; the `workbench.rs` commands stay thin and
+and do not require the Tauri runtime; the `workbench.rs` commands stay thin and
 add only workspace confinement (`WorkspaceState`) plus bounded writes.
 
 ## Settings files
