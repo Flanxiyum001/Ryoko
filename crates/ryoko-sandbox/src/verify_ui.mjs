@@ -167,13 +167,46 @@ function isLocal(url, base) {
   }
 }
 
+/**
+ * Whether any process in a group is still around. A group cannot be given a
+ * new leader while a member lives, so a live group with this id is always the
+ * one this harness started. EPERM means it exists but is not ours.
+ */
+function groupAlive(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+/**
+ * Waits for a group to drain. Signal delivery and reaping are asynchronous, so
+ * a single liveness check right after a kill races the scheduler; polling is
+ * what makes "the group is gone" a fact rather than a hope.
+ */
+async function waitForGroupDrain(pgid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!groupAlive(pgid)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 async function stopServer(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child || !child.pid) return;
+  const pgid = child.pid;
+  const leaderExited = child.exitCode !== null || child.signalCode !== null;
+  // A leader that exited cleanly can still leave a backgrounded grandchild
+  // holding the port, so cleanup looks at the group, not just the leader.
+  if (leaderExited && !groupAlive(pgid)) return;
   const signalGroup = (signal) => {
     try {
       // Negative pid targets the whole process group: `npm run preview` leaves
       // grandchildren behind that a plain child.kill() would orphan.
-      process.kill(-child.pid, signal);
+      process.kill(-pgid, signal);
     } catch {
       try {
         child.kill(signal);
@@ -182,15 +215,22 @@ async function stopServer(child) {
       }
     }
   };
-  const exited = new Promise((resolve) => child.once("exit", resolve));
+  const exited = leaderExited
+    ? Promise.resolve()
+    : new Promise((resolve) => child.once("exit", resolve));
   signalGroup("SIGTERM");
   const timer = setTimeout(() => signalGroup("SIGKILL"), 5_000);
   try {
-    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 6_000))]);
+    await Promise.race([exited, waitForGroupDrain(pgid, 6_000)]);
   } finally {
     clearTimeout(timer);
   }
+  // The leader exiting is not the group exiting: escalate, then wait for the
+  // group itself so the caller resumes with the port already free instead of
+  // racing a kill that the kernel has not delivered yet.
   signalGroup("SIGKILL");
+  await Promise.race([exited, waitForGroupDrain(pgid, 5_000)]);
+  await waitForGroupDrain(pgid, 5_000);
 }
 
 async function waitForServer(url, timeoutMs) {
