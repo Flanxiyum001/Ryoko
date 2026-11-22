@@ -2,14 +2,23 @@
 
 **Ryoko** is an experimental Rust foundation for a provider-neutral, multi-agent AI IDE. The target experience is a full engineering team—project manager, architect, senior UI/UX, backend, full-stack, security, QA and DevOps—collaborating on a user-defined application, with isolated worktrees and human-reviewed changes.
 
-> **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, a Tauri desktop shell with a Monaco editor wired to `ryoko-lsp`, WASI test execution and structural context extraction. It includes local FIM ghost text, a SQLite cross-file symbol index, an integrated PTY terminal and a DAP bridge, an interactive Mission Control task DAG, local diff-editor hunk review with sandboxed pre-flight validation, hardened container-backed project checks, but not signed installers or deployment. Do not use its previews as proof of successful implementation.
+
+## Download Ryoko Desktop (alpha testing)
+
+**[Get the Windows, macOS and Linux installers on GitHub Releases](https://github.com/Flanxiyum001/Ryoko/releases).** Choose a version labeled **Pre-release**, expand **Assets**, and download the installer for your OS (Windows x64, macOS Apple Silicon, or Linux x64).
+
+These experimental installers are **unsigned** and not intended for production. Test with a disposable project. The separate [testing and installation guide](docs/DESKTOP_PREVIEW_TESTING.md) includes the smoke-test checklist.
+
+For headless Linux x64 use, the optional **Ryoko CLI-only** GitHub Packages image is published at `ghcr.io/flanxiyum001/ryoko-cli:preview` when the package workflow succeeds and visibility is set to public; **it is not the desktop application**.
+
+> **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, a Tauri desktop shell with a Monaco editor wired to `ryoko-lsp` plus customer language servers through a multiplexer (registry, search/replace, changes drawer, inline model edits, visual settings), WASI test execution and structural context extraction. It includes local FIM ghost text, a SQLite cross-file symbol index, an integrated PTY terminal and a DAP bridge, an interactive Mission Control task DAG, local diff-editor hunk review with sandboxed pre-flight validation, hardened container-backed project checks, and unsigned cross-platform preview installers, but not production-signed installers, automatic updates or deployment. Do not use its previews as proof of successful implementation.
 
 The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. Contribution rules are in [`AGENTS.md`](AGENTS.md).
 
 ## Prerequisites
 
 - Rust 1.85+ with Cargo
-- An OpenAI **chat-completions compatible** server, e.g. an Ollama /v1 endpoint, an OpenAI API endpoint, or another compatible model server, or an Anthropic Messages-compatible endpoint
+- An OpenAI **chat-completions compatible** server (such as Ollama or OpenAI), an Anthropic Messages-compatible endpoint, or a native Google Gemini `generateContent` endpoint
 - An API key in an environment variable for authenticated providers
 
 A custom endpoint is not a universal protocol translator. Anthropic Messages is supported natively; other provider-native wire APIs still need separate adapters, and tools, streaming and token accounting differ by model.
@@ -182,7 +191,8 @@ changes are not silently copied into that worktree.
   "providers": [
     { "id": "local", "base_url": "http://127.0.0.1:11434/v1" },
     { "id": "hosted", "base_url": "https://provider.example.com/v1", "api_key_env": "MY_PROVIDER_API_KEY" },
-    { "id": "anthropic", "base_url": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY", "wire": "anthropic" }
+    { "id": "anthropic", "base_url": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY", "wire": "anthropic" },
+    { "id": "gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta", "api_key_env": "GEMINI_API_KEY", "wire": "gemini" }
   ]
 }
 ```
@@ -192,8 +202,66 @@ Models use the `provider/model-name` syntax. Model names can contain slashes aft
 - HTTPS is required for hosted providers using API keys. Keyless, non-loopback HTTP needs explicit `allow_insecure_http: true` and should only be used on trusted networks.
 - Loopback HTTP is allowed for local development. Requests do not follow redirects. Explicitly validate that any URL you add is one you trust; model content must not be allowed to set it.
 - Provider profiles are strict JSON and support an optional `chat_path` (default `/chat/completions`). Keys are loaded at runtime from the named environment variables.
-- Set `"wire": "anthropic"` for the native Anthropic Messages adapter. Omitting `wire` keeps OpenAI-compatible chat completions. Direct Anthropic URLs work through the adapter; Bedrock/Vertex request signing and cloud identity are not implemented yet.
+- Set `"wire": "anthropic"` for the native Anthropic Messages adapter, or `"wire": "gemini"` for the native Google Gemini `generateContent` adapter. Omitting `wire` keeps OpenAI-compatible chat completions. Gemini currently uses a bounded non-streaming request and has no multimodal payload support. Bedrock/Vertex request signing and cloud identity are not implemented yet. See [model ecosystem](docs/architecture/MODEL_ECOSYSTEM.md).
 - The low-level `OpenAiCompatConfig` and `AnthropicConfig` remain available to Rust callers. Those callers are responsible for trusting and validating their own endpoints.
+
+## Recently added capabilities (experimental, November 2026)
+
+These are implemented foundations, not a statement that every integration is production-ready.
+
+### Workspace MCP connectors
+
+A workspace registry at `.ryoko/connectors.json` stores reviewed connector descriptions, credential **environment variable names** (not values), and explicit per-connector tool allowlists and budgets. Built-in presets include GitHub, Cloudflare, filesystem, fetch and custom. Enabled connectors are mounted for `ryoko run` unless `--no-connectors` is specified.
+
+```sh
+ryoko connectors list
+ryoko connectors add github
+ryoko connectors enable github
+ryoko connectors list --json
+```
+
+Configure the required environment variables separately. Inspect every server executable, URL and tool permission before enabling it. See [connector examples](configs/connectors.example.json) and [MCP policy](docs/architecture/MCP_CLIENT.md).
+
+### Extension and skill marketplace (CLI foundation)
+
+The `ryoko-marketplace` crate and `ryoko marketplace` commands support registry lookup, listing, information, downloads, SHA-256 checks and a local installation lock file. The registry is external; Ryoko does **not** ship a curated, publisher-verified public extension store or a complete graphical marketplace.
+
+```sh
+ryoko marketplace list extension
+ryoko marketplace list skill
+ryoko marketplace search security skill
+ryoko marketplace info <item-id>
+```
+
+`marketplace install` and `marketplace update` are experimental and **not recommended for untrusted registries** until artifact trust, path handling and skill-install correctness receive further review. A matching checksum from the same registry does not establish publisher authenticity. Downloading a package also does not automatically enable its capabilities.
+
+### Living specs and performance-regression gates
+
+`ryoko spec` records relationships between Markdown specifications and implementation files, then reports drift when either changes. The optional `--perf-*` flags add benchmark gates to isolated validation, using operator-owned baselines.
+
+```sh
+ryoko spec --record
+ryoko spec
+ryoko run --repo . --config ryoko.providers.json --model local/qwen2.5-coder \
+  --sandbox-image reviewed-offline-toolchain:latest \
+  --perf-command "cargo run --release --bin my-benchmark" \
+  --perf-metric latency_ms --perf-max-regression-pct 5 \
+  "Improve parser latency"
+```
+
+Replace the illustrative `my-benchmark` command and model ID with your real benchmark and configured model. The benchmark command must print a line such as `latency_ms=12.5`. Record a baseline separately before using a pass/fail regression gate. These features do not establish current benchmark results; see [spec and performance gates](docs/architecture/SPEC_AND_PERF_GATES.md).
+
+### Prompt caching and speculative scheduling
+
+Model-agent prompts keep trusted shared instructions in a stable system prefix. Anthropic can use an ephemeral cache breakpoint; other adapters retain compatible ordering. Repository context remains lower trust, and tree-sitter outlines include compact function signatures without full bodies.
+
+`Task::speculative()` allows **opt-in read-only** tasks in custom DAGs to overlap with producers. Built-in team plans do not automatically schedule speculative tasks, and any proposed file mutation is rejected. See [agent runtime](docs/architecture/AGENT_RUNTIME.md) and [context engine](docs/architecture/CONTEXT_ENGINE.md).
+
+### Unsigned desktop preview installers
+
+Test installers for Windows x64, Linux x64 and Apple Silicon macOS are available through the [GitHub prereleases](https://github.com/Flanxiyum001/Ryoko/releases). A preview release includes Windows `.exe`/`.msi`, Linux `.AppImage`/`.deb` and Apple Silicon `.dmg`, plus SHA-256 checksums; review the individual release's source commit.
+
+These are **unsigned pre-alpha test builds** for disposable, non-sensitive projects. They are separate from the production-signing workflow, and do not prove signed release readiness, platform smoke-test success or updater support. Follow the [desktop preview testing guide](docs/DESKTOP_PREVIEW_TESTING.md).
 
 ## Architecture
 
@@ -209,6 +277,7 @@ The root workspace is organized as follows:
 | `ryoko-native` | `tower-lsp` language server and agent diagnostic publisher |
 | `ryoko-vfs` | Incremental virtual document store used by the language server |
 | `ryoko-scripting` | WASI-sandboxed plugin manifest, ABI, host and agent adapter |
+| `ryoko-marketplace` | Experimental registry client and CLI for MCP extensions and WASI skills; not a trusted public plugin store |
 
 External tools use the [MCP client](docs/architecture/MCP_CLIENT.md): attach an explicitly chosen stdio server to a run with `--mcp-server`, a mandatory `--mcp-allow-tool` list, and `--mcp-max-calls`. Every call still requires a fresh terminal `YES`; the run's model budget and the separate call cap are checked first. Extensions use the [WASI plugin API](docs/architecture/PLUGINS.md): a JSON manifest declares `agent`, `linter` or `context`, a host-owned policy must allow its id and kind, and every invocation gets no filesystem, no environment, no arguments and no network, bounded by fuel, time, memory and output limits.
 
@@ -216,7 +285,7 @@ See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) a
 
 ## Desktop app
 
-`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` over a stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server. Writes to sensitive paths (`.env*`, CI workflows, credential files) additionally require an OS-native, one-time confirmation before any filesystem mutation; cancellation denies the write. This does not yet gate arbitrary agent shell/network actions, which are not exposed through the current desktop IPC.
+`apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` and registered standard language servers through a multiplexed stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server. Writes to sensitive paths (`.env*`, CI workflows, credential files) additionally require an OS-native, one-time confirmation before any filesystem mutation; cancellation denies the write. This does not yet gate arbitrary agent shell/network actions, which are not exposed through the current desktop IPC.
 
     cargo build -p ryoko-native --bin ryoko-lsp
     cd apps/desktop
@@ -225,7 +294,7 @@ See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) a
     npm run build
     RYOKO_LSP_BIN="$PWD/../../target/debug/ryoko-lsp" npm run tauri dev
 
-Without `RYOKO_LSP_BIN`, the shell looks for a `ryoko-lsp` binary next to the app executable (the bundled sidecar); it never resolves the language server from `PATH`. Installers are built by the `Desktop installers` workflow on macOS, Windows and Linux runners; macOS and Windows jobs refuse to run without Developer ID and Authenticode signing secrets and verify the signatures before uploading; Linux packages are not signed, and there is no auto-updater yet. The browser GitHub workbench at `http://127.0.0.1:4173` is unchanged and still served from the files at the desktop root.
+Without `RYOKO_LSP_BIN`, the shell looks for a `ryoko-lsp` binary next to the app executable (the bundled sidecar); it never resolves the language server from `PATH`. Production installers are built by the `Desktop installers` workflow on macOS, Windows and Linux runners; macOS and Windows jobs refuse to run without Developer ID and Authenticode signing secrets and verify the signatures before uploading; Linux packages are not signed, and there is no auto-updater yet. The browser GitHub workbench at `http://127.0.0.1:4173` is unchanged and still served from the files at the desktop root.
 
 ## Editor integration
 
@@ -264,5 +333,5 @@ Requirements: Node.js 22+, Git for server-side clones. After configuring environ
 
     node services/github-app/src/index.mjs
 
-Open http://127.0.0.1:4173 and connect your GitHub App installation. The initial UX is a browser shell, **not yet a packaged native desktop app or a Monaco/LSP editor**. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
+Open http://127.0.0.1:4173 and connect your GitHub App installation. **This separate GitHub App workbench** is a browser shell, not the Tauri/Monaco desktop IDE described above. The packaged desktop has an experimental, read-only GitHub queue bridge to the local broker; the broker is not embedded in the installer. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
 

@@ -174,7 +174,20 @@ pub fn anthropic_wire_body(request: &ChatRequest, stream: bool) -> Value {
         "max_tokens": request.max_tokens.unwrap_or(4096),
         "stream": stream,
     });
-    if !system.is_empty() {
+    if request.cache_system_prefix && request.system.as_deref().is_some_and(|s| !s.is_empty()) {
+        // The first block is the stable prefix; a cache breakpoint after it
+        // lets later requests that share it skip re-processing. Per-request
+        // system messages follow the breakpoint and are never cached.
+        let mut blocks = Vec::with_capacity(system.len());
+        for (index, text) in system.iter().enumerate() {
+            let mut block = json!({"type": "text", "text": text});
+            if index == 0 {
+                block["cache_control"] = json!({"type": "ephemeral"});
+            }
+            blocks.push(block);
+        }
+        body["system"] = Value::Array(blocks);
+    } else if !system.is_empty() {
         body["system"] = json!(system.join("\n"));
     }
     if let Some(temperature) = request.temperature {
@@ -527,6 +540,25 @@ mod tests {
         assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(body["tools"][0]["name"], "read_file");
         assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn cached_system_prefix_gets_a_single_breakpoint() {
+        let request = ChatRequest::new("claude")
+            .with_system("static repo map")
+            .with_message(Message::system("role: qa"))
+            .with_user("hi")
+            .with_cached_system_prefix();
+        let body = anthropic_wire_body(&request, false);
+        let system = body["system"].as_array().expect("block array");
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["text"], "static repo map");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[1]["text"], "role: qa");
+        assert!(system[1].get("cache_control").is_none());
+
+        let uncached = anthropic_wire_body(&ChatRequest::new("claude").with_system("x"), false);
+        assert_eq!(uncached["system"], "x");
     }
 
     #[test]

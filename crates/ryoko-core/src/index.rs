@@ -6,38 +6,13 @@
 //! worktree lease state at `.ryoko/state/symbols.sqlite3`.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 
 use crate::context::FileContext;
 
 const MAX_SIGNATURE_CHARS: usize = 500;
-
-/// Computes a fast, stable content hash for change detection (FNV-1a, 64-bit).
-/// Not cryptographic; used only for local index invalidation.
-pub fn content_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// Current schema version for migrations.
-const SCHEMA_VERSION: u32 = 3;
-
-/// Status of a file in the index relative to the working tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileIndexStatus {
-    Unchanged,
-    Modified,
-    Added,
-    Deleted,
-    Renamed,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -81,131 +56,46 @@ impl WorkspaceIndex {
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        let mut index = Self { connection };
+        let index = Self { connection };
         index.initialize()?;
         Ok(index)
     }
 
     #[cfg(test)]
     fn in_memory() -> Result<Self, IndexError> {
-        let connection = Connection::open_in_memory()?;
-        let mut index = Self { connection };
+        let index = Self {
+            connection: Connection::open_in_memory()?,
+        };
         index.initialize()?;
         Ok(index)
     }
 
-    fn initialize(&mut self) -> Result<(), IndexError> {
-        // Check if this is a new database (no tables yet) or needs migration
-        let needs_migration = self
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='files'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0)
-            == 0;
-
-        if needs_migration {
-            // New database - create all tables at current schema
-            self.connection.execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 CREATE TABLE IF NOT EXISTS files (
-                     path TEXT PRIMARY KEY,
-                     language TEXT NOT NULL,
-                     content_hash UNSIGNED BIG INT NOT NULL DEFAULT 0,
-                     updated_at UNSIGNED BIG INT NOT NULL DEFAULT 0
-                 );
-                 CREATE TABLE IF NOT EXISTS symbols (
-                     path TEXT NOT NULL,
-                     name TEXT NOT NULL,
-                     kind TEXT NOT NULL,
-                     signature TEXT NOT NULL,
-                     start_line INTEGER NOT NULL,
-                     end_line INTEGER NOT NULL,
-                     PRIMARY KEY (path, name, start_line)
-                 );
-                 CREATE INDEX IF NOT EXISTS symbols_by_name ON symbols(name);
-                 CREATE TABLE IF NOT EXISTS calls (
-                     caller_path TEXT NOT NULL,
-                     caller TEXT NOT NULL,
-                     callee TEXT NOT NULL,
-                     line INTEGER NOT NULL
-                 );
-                 CREATE INDEX IF NOT EXISTS calls_by_callee ON calls(callee);
-                 CREATE INDEX IF NOT EXISTS calls_by_caller ON calls(caller_path, caller);
-                 CREATE TABLE IF NOT EXISTS imports (
-                     path TEXT NOT NULL,
-                     imported_symbol TEXT NOT NULL,
-                     source_path TEXT,
-                     PRIMARY KEY (path, imported_symbol)
-                 );
-                 CREATE INDEX IF NOT EXISTS imports_by_source ON imports(source_path);
-                 CREATE TABLE IF NOT EXISTS test_files (
-                     path TEXT PRIMARY KEY,
-                     test_framework TEXT NOT NULL
-                 );",
-            )?;
-        }
-        // Always check for migrations after schema creation
-        let version: u32 = self
-            .connection
-            .query_row(
-                "SELECT COALESCE(MAX(value), 0) FROM pragma_user_version",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if version < SCHEMA_VERSION {
-            self.migrate(version)?;
-        }
-        Ok(())
-    }
-
-    fn migrate(&mut self, current_version: u32) -> Result<(), IndexError> {
-        if current_version >= SCHEMA_VERSION {
-            return Ok(());
-        }
-
-        let transaction = self.connection.transaction()?;
-
-        if current_version < 2 {
-            // Version 2: Add content_hash, updated_at, imports, test_files tables
-            transaction.execute(
-                "ALTER TABLE files ADD COLUMN content_hash UNSIGNED BIG INT NOT NULL DEFAULT 0",
-                [],
-            )?;
-            transaction.execute(
-                "ALTER TABLE files ADD COLUMN updated_at UNSIGNED BIG INT NOT NULL DEFAULT 0",
-                [],
-            )?;
-            // Add imports table
-            transaction.execute(
-                "CREATE TABLE IF NOT EXISTS imports (
-                    path TEXT NOT NULL,
-                    imported_symbol TEXT NOT NULL,
-                    source_path TEXT,
-                    PRIMARY KEY (path, imported_symbol)
-                )",
-                [],
-            )?;
-            transaction.execute(
-                "CREATE INDEX IF NOT EXISTS imports_by_source ON imports(source_path)",
-                [],
-            )?;
-            // Add test_files table
-            transaction.execute(
-                "CREATE TABLE IF NOT EXISTS test_files (
-                    path TEXT PRIMARY KEY,
-                    test_framework TEXT NOT NULL
-                )",
-                [],
-            )?;
-        }
-
-        transaction.commit()?;
-        // PRAGMA user_version uses a statement; execute directly on connection
-        self.connection.execute("PRAGMA user_version = 3", [])?;
+    fn initialize(&self) -> Result<(), IndexError> {
+        self.connection.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE IF NOT EXISTS files (
+                 path TEXT PRIMARY KEY,
+                 language TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS symbols (
+                 path TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 signature TEXT NOT NULL,
+                 start_line INTEGER NOT NULL,
+                 end_line INTEGER NOT NULL,
+                 PRIMARY KEY (path, name, start_line)
+             );
+             CREATE INDEX IF NOT EXISTS symbols_by_name ON symbols(name);
+             CREATE TABLE IF NOT EXISTS calls (
+                 caller_path TEXT NOT NULL,
+                 caller TEXT NOT NULL,
+                 callee TEXT NOT NULL,
+                 line INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS calls_by_callee ON calls(callee);
+             CREATE INDEX IF NOT EXISTS calls_by_caller ON calls(caller_path, caller);",
+        )?;
         Ok(())
     }
 
@@ -218,15 +108,11 @@ impl WorkspaceIndex {
         transaction.execute("DELETE FROM files", [])?;
         transaction.execute("DELETE FROM symbols", [])?;
         transaction.execute("DELETE FROM calls", [])?;
-        transaction.execute("DELETE FROM imports", [])?;
-        transaction.execute("DELETE FROM test_files", [])?;
         let mut count = 0;
-        let now = current_timestamp();
         for file in files {
-            let hash = content_hash(file.path.as_bytes()); // Use path as fallback, real hash computed externally
             transaction.execute(
-                "INSERT OR REPLACE INTO files(path, language, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![file.path, file.language, hash as i64, now as i64],
+                "INSERT OR REPLACE INTO files(path, language) VALUES (?1, ?2)",
+                params![file.path, file.language],
             )?;
             for symbol in &file.symbols {
                 transaction.execute(
@@ -248,202 +134,11 @@ impl WorkspaceIndex {
                     "INSERT INTO calls(caller_path, caller, callee, line)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![file.path, call.caller, call.callee, call.line as i64],
-                )?;
-            }
-            // Store imports
-            for import in &file.imports {
-                transaction.execute(
-                    "INSERT OR REPLACE INTO imports(path, imported_symbol, source_path) VALUES (?1, ?2, ?3)",
-                    params![file.path, import, ""], // source_path unknown at this level
                 )?;
             }
             count += 1;
         }
         transaction.commit()?;
-        Ok(count)
-    }
-
-    /// Updates or inserts a single file in the index transactionally.
-    /// Returns the file's status: Added, Modified, or Unchanged.
-    pub fn upsert_file(
-        &mut self,
-        file: &FileContext,
-        content_hash: u64,
-    ) -> Result<FileIndexStatus, IndexError> {
-        let transaction = self.connection.transaction()?;
-        let now = current_timestamp();
-
-        // Check if file exists and get its current hash
-        let existing_hash: Option<u64> = transaction
-            .query_row(
-                "SELECT content_hash FROM files WHERE path = ?1",
-                params![file.path],
-                |row| row.get::<_, i64>(0).map(|v| v as u64),
-            )
-            .optional()?;
-
-        let status = match existing_hash {
-            Some(h) if h == content_hash => FileIndexStatus::Unchanged,
-            Some(_) => FileIndexStatus::Modified,
-            None => FileIndexStatus::Added,
-        };
-
-        if status != FileIndexStatus::Unchanged {
-            // Delete old data for this file
-            transaction.execute("DELETE FROM symbols WHERE path = ?1", params![file.path])?;
-            transaction.execute(
-                "DELETE FROM calls WHERE caller_path = ?1",
-                params![file.path],
-            )?;
-            transaction.execute("DELETE FROM imports WHERE path = ?1", params![file.path])?;
-
-            // Insert new file record
-            transaction.execute(
-                "INSERT OR REPLACE INTO files(path, language, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![file.path, file.language, content_hash as i64, now as i64],
-            )?;
-
-            // Insert symbols
-            for symbol in &file.symbols {
-                transaction.execute(
-                    "INSERT OR REPLACE INTO symbols
-                     (path, name, kind, signature, start_line, end_line)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        file.path,
-                        symbol.name,
-                        symbol.kind,
-                        bound(&symbol.signature, MAX_SIGNATURE_CHARS),
-                        symbol.start_line as i64,
-                        symbol.end_line as i64,
-                    ],
-                )?;
-            }
-
-            // Insert calls
-            for call in &file.calls {
-                transaction.execute(
-                    "INSERT INTO calls(caller_path, caller, callee, line)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![file.path, call.caller, call.callee, call.line as i64],
-                )?;
-            }
-
-            // Insert imports
-            for import in &file.imports {
-                transaction.execute(
-                    "INSERT OR REPLACE INTO imports(path, imported_symbol, source_path) VALUES (?1, ?2, ?3)",
-                    params![file.path, import, ""],
-                )?;
-            }
-        }
-
-        transaction.commit()?;
-        Ok(status)
-    }
-
-    /// Deletes a file from the index.
-    pub fn delete_file(&mut self, path: &str) -> Result<bool, IndexError> {
-        let transaction = self.connection.transaction()?;
-        let deleted = transaction.execute("DELETE FROM files WHERE path = ?1", params![path])? > 0;
-        transaction.execute("DELETE FROM symbols WHERE path = ?1", params![path])?;
-        transaction.execute("DELETE FROM calls WHERE caller_path = ?1", params![path])?;
-        transaction.execute("DELETE FROM imports WHERE path = ?1", params![path])?;
-        transaction.commit()?;
-        Ok(deleted)
-    }
-
-    /// Gets the content hash and update time for a file in the index.
-    pub fn file_info(&self, path: &str) -> Result<Option<(u64, u64)>, IndexError> {
-        let row = self
-            .connection
-            .query_row(
-                "SELECT content_hash, updated_at FROM files WHERE path = ?1",
-                params![path],
-                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
-            )
-            .optional()?;
-        Ok(row)
-    }
-
-    /// Lists all indexed files with their content hashes and update times.
-    pub fn list_files(&self) -> Result<Vec<(String, String, u64, u64)>, IndexError> {
-        let mut stmt = self
-            .connection
-            .prepare("SELECT path, language, content_hash, updated_at FROM files ORDER BY path")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get::<_, i64>(2)? as u64,
-                row.get::<_, i64>(3)? as u64,
-            ))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// Finds files that import a given symbol.
-    pub fn find_importers(&self, symbol: &str, limit: usize) -> Result<Vec<String>, IndexError> {
-        let limit = limit.clamp(1, 100) as i64;
-        let mut stmt = self
-            .connection
-            .prepare("SELECT DISTINCT path FROM imports WHERE imported_symbol = ?1 LIMIT ?2")?;
-        let rows = stmt.query_map(params![symbol, limit], |row| row.get(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
-
-    /// Marks a file as a test file with its framework.
-    pub fn mark_test_file(&mut self, path: &str, framework: &str) -> Result<(), IndexError> {
-        self.connection.execute(
-            "INSERT OR REPLACE INTO test_files(path, test_framework) VALUES (?1, ?2)",
-            params![path, framework],
-        )?;
-        Ok(())
-    }
-
-    /// Gets test files for a given framework.
-    pub fn test_files(&self, framework: Option<&str>) -> Result<Vec<(String, String)>, IndexError> {
-        match framework {
-            Some(fw) => {
-                let mut stmt = self.connection.prepare(
-                    "SELECT path, test_framework FROM test_files WHERE test_framework = ?1",
-                )?;
-                let rows = stmt.query_map(params![fw], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-            }
-            None => {
-                let mut stmt = self
-                    .connection
-                    .prepare("SELECT path, test_framework FROM test_files")?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-            }
-        }
-    }
-
-    /// Detects test files from symbols and imports heuristically.
-    pub fn detect_test_files(&mut self, files: &[FileContext]) -> Result<usize, IndexError> {
-        let mut count = 0;
-        for file in files {
-            let is_test = file.symbols.iter().any(|s| {
-                s.name.starts_with("test_")
-                    || s.name.ends_with("_test")
-                    || s.kind == "test"
-                    || file.path.contains("/test")
-                    || file.path.contains("/tests/")
-            }) || file.imports.iter().any(|imp| {
-                imp.contains("test")
-                    || imp.contains("testing")
-                    || imp.contains("assert")
-                    || imp.contains("#[test]")
-            });
-
-            if is_test {
-                let framework = detect_test_framework(&file.language, &file.imports, &file.symbols);
-                self.mark_test_file(&file.path, &framework)?;
-                count += 1;
-            }
-        }
         Ok(count)
     }
 
@@ -605,82 +300,6 @@ fn push_term(terms: &mut Vec<String>, word: &str, stop: &[&str]) {
         && !terms.iter().any(|term| term == word)
     {
         terms.push(word.to_owned());
-    }
-}
-
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn detect_test_framework(
-    language: &str,
-    imports: &[String],
-    _symbols: &[crate::context::Symbol],
-) -> String {
-    match language {
-        "rust" => {
-            if imports.iter().any(|i| i.contains("proptest")) {
-                "proptest".to_string()
-            } else if imports.iter().any(|i| i.contains("quickcheck")) {
-                "quickcheck".to_string()
-            } else {
-                "builtin".to_string()
-            }
-        }
-        "typescript" | "tsx" | "javascript" => {
-            if imports.iter().any(|i| i.contains("vitest")) {
-                "vitest".to_string()
-            } else if imports.iter().any(|i| i.contains("jest")) {
-                "jest".to_string()
-            } else if imports.iter().any(|i| i.contains("mocha")) {
-                "mocha".to_string()
-            } else {
-                "unknown".to_string()
-            }
-        }
-        "python" => {
-            if imports.iter().any(|i| i.contains("pytest")) {
-                "pytest".to_string()
-            } else if imports.iter().any(|i| i.contains("unittest")) {
-                "unittest".to_string()
-            } else {
-                "unknown".to_string()
-            }
-        }
-        "go" => "builtin".to_string(),
-        "java" => {
-            if imports.iter().any(|i| i.contains("junit")) {
-                "junit".to_string()
-            } else if imports.iter().any(|i| i.contains("testng")) {
-                "testng".to_string()
-            } else {
-                "unknown".to_string()
-            }
-        }
-        "kotlin" => {
-            if imports.iter().any(|i| i.contains("junit")) {
-                "junit".to_string()
-            } else if imports.iter().any(|i| i.contains("kotest")) {
-                "kotest".to_string()
-            } else {
-                "unknown".to_string()
-            }
-        }
-        "csharp" => {
-            if imports.iter().any(|i| i.contains("xunit")) {
-                "xunit".to_string()
-            } else if imports.iter().any(|i| i.contains("nunit")) {
-                "nunit".to_string()
-            } else if imports.iter().any(|i| i.contains("mstest")) {
-                "mstest".to_string()
-            } else {
-                "unknown".to_string()
-            }
-        }
-        _ => "unknown".to_string(),
     }
 }
 
