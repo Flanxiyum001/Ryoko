@@ -107,6 +107,7 @@ pub fn lsp_start(
     state: State<'_, LspState>,
     workspace: State<'_, WorkspaceState>,
     root: String,
+    allow_external_servers: bool,
 ) -> Result<LspStartResult, String> {
     stop_all(&state);
     let root = PathBuf::from(&root)
@@ -131,7 +132,9 @@ pub fn lsp_start(
         resolve_binary(RYOKO_LSP_ID)?,
         Vec::new(),
     )];
-    for server in &registry.servers {
+    // Opening an untrusted repository must not execute its configured
+    // language-server commands without an explicit operator approval.
+    for server in registry.servers.iter().filter(|_| allow_external_servers) {
         targets.push((
             server.id.clone(),
             resolve_binary(&server.command)
