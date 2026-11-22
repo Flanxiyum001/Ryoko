@@ -3,9 +3,13 @@ name: Ryoko preview installers (unsigned)
 on:
   push:
     branches:
-      - preview/desktop-installers
+      - main
     tags:
       - 'desktop-preview-v*'
+    paths:
+      - '.github/workflows/desktop-preview.yml'
+      - 'packaging/cli/**'
+      - 'docs/DESKTOP_PREVIEW_TESTING.md'
   workflow_dispatch:
 
 permissions:
@@ -131,6 +135,15 @@ jobs:
               ;;
           esac
 
+      - name: Upload Linux CLI for GitHub Packages
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ryoko-cli-linux-x64
+          retention-days: 14
+          if-no-files-found: error
+          path: target/x86_64-unknown-linux-gnu/release/ryoko
+
       - name: Upload unsigned preview installers
         uses: actions/upload-artifact@v4
         with:
@@ -145,8 +158,10 @@ jobs:
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
 
   preview-release:
-    name: Publish explicit preview tag as prerelease
-    if: github.ref == 'refs/heads/preview/desktop-installers' || startsWith(github.ref, 'refs/tags/desktop-preview-v')
+    name: Publish desktop prerelease and checksums
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/desktop-preview-v')
+    outputs:
+      release_tag: ${{ steps.publish.outputs.release_tag }}
     needs: build
     runs-on: ubuntu-22.04
     permissions:
@@ -167,6 +182,7 @@ jobs:
           test -s SHA256SUMS.txt
 
       - name: Publish strictly prerelease assets
+        id: publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -189,10 +205,78 @@ jobs:
             TAG="desktop-preview-v0.1.0-alpha.${GITHUB_RUN_NUMBER}"
             TAG_FLAGS=(--target "$GITHUB_SHA")
           fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          ## Ryoko Desktop — Pre-alpha test release
+
+          Installers for external testers. This is experimental software:
+          use a disposable project and back up important work.
+
+          | Platform | Installer | Notes |
+          | --- | --- | --- |
+          | Windows x64 | `.exe` (NSIS) or `.msi` | Unsigned; Windows may warn |
+          | macOS Apple Silicon | `.dmg` | Unsigned and not notarized; no Intel build |
+          | Linux x64 | `.AppImage` or `.deb` | Install dependencies as needed |
+
+          Download a file from **Assets**, then use `SHA256SUMS.txt` to
+          verify the download. Both the `ryoko-lsp` server and `ryoko` CLI
+          are bundled with the desktop app. The container package is a
+          separate **CLI-only** distribution (not a graphical IDE).
+
+          [Installation and tester checklist](https://github.com/Flanxiyum001/Ryoko/blob/main/docs/DESKTOP_PREVIEW_TESTING.md)
+
+          GitHub Packages (CLI-only): `ghcr.io/flanxiyum001/ryoko-cli:preview`
+
+          No automatic updater, paid model credits, or signing certificates
+          are included. These previews are not production releases.
+          NOTES
+          printf '\nBuilt from commit: `%s`\n' "$GITHUB_SHA" >> "$RUNNER_TEMP/release-notes.md"
           gh release create "$TAG" \
             "${TAG_FLAGS[@]}" \
             --prerelease \
             --latest=false \
-            --title "Ryoko Preview $TAG" \
-            --notes "UNSIGNED experimental test builds for Windows x64, Linux x64 and Apple Silicon macOS. These are pre-alpha builds, not production releases. No Windows Authenticode signature or Apple notarization is provided. Test only with non-sensitive projects. Source commit: $GITHUB_SHA." \
+            --title "Ryoko Desktop $TAG (Alpha Testing)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             "${INSTALLERS[@]}" dist/SHA256SUMS.txt
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  publish-cli-package:
+    name: Publish Ryoko CLI to GitHub Packages (GHCR)
+    needs: preview-release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download the tested Linux CLI binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ryoko-cli-linux-x64
+          path: packaging/cli
+
+      - name: Verify artifact
+        shell: bash
+        run: |
+          test -s packaging/cli/ryoko
+          file packaging/cli/ryoko
+          chmod 0755 packaging/cli/ryoko
+
+      - name: Build, smoke-test, and publish CLI container package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preview-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/ryoko-cli"
+          test -n "$VERSION"
+          docker build --file packaging/cli/Dockerfile --tag "$IMAGE:$VERSION" packaging/cli
+          # No secrets or network are required for this basic execution check.
+          docker run --rm --network none "$IMAGE:$VERSION" --help >/dev/null
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$VERSION"
+          docker tag "$IMAGE:$VERSION" "$IMAGE:preview"
+          docker push "$IMAGE:preview"
+          echo "Published GitHub Packages container: $IMAGE:$VERSION"
+          echo "Note: The package owner may need to set package visibility to Public."
