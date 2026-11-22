@@ -5,6 +5,7 @@
 //! other files without reading every body again. The database lives beside the
 //! worktree lease state at `.ryoko/state/symbols.sqlite3`.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, params};
@@ -75,7 +76,8 @@ impl WorkspaceIndex {
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS files (
                  path TEXT PRIMARY KEY,
-                 language TEXT NOT NULL
+                 language TEXT NOT NULL,
+                 content_hash TEXT NOT NULL DEFAULT ''
              );
              CREATE TABLE IF NOT EXISTS symbols (
                  path TEXT NOT NULL,
@@ -96,6 +98,22 @@ impl WorkspaceIndex {
              CREATE INDEX IF NOT EXISTS calls_by_callee ON calls(callee);
              CREATE INDEX IF NOT EXISTS calls_by_caller ON calls(caller_path, caller);",
         )?;
+
+        // Existing databases predate content hashing. SQLite ADD COLUMN with a
+        // default is compatible with their existing rows and is safe to repeat.
+        let has_hash = {
+            let mut statement = self.connection.prepare("PRAGMA table_info(files)")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|name| name == "content_hash")
+        };
+        if !has_hash {
+            self.connection.execute(
+                "ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -140,6 +158,85 @@ impl WorkspaceIndex {
         }
         transaction.commit()?;
         Ok(count)
+    }
+
+    /// A stored content hash, or None when the file has not been indexed.
+    /// A blank hash identifies a record written by the older full-rebuild index.
+    pub fn content_hash(&self, path: &str) -> Result<Option<String>, IndexError> {
+        use rusqlite::OptionalExtension;
+
+        let value = self
+            .connection
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    /// Applies only changed, already-parsed files and removes disappeared paths.
+    /// The caller must calculate each hash from source bytes before parsing,
+    /// so unchanged files do not need to enter the tree-sitter pipeline.
+    pub fn sync_files(
+        &mut self,
+        changed: &[(FileContext, String)],
+        present: &BTreeSet<String>,
+    ) -> Result<usize, IndexError> {
+        let transaction = self.connection.transaction()?;
+        let old_paths = {
+            let mut statement = transaction.prepare("SELECT path FROM files")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for path in old_paths {
+            if !present.contains(&path) {
+                transaction.execute("DELETE FROM symbols WHERE path = ?1", params![path])?;
+                transaction.execute("DELETE FROM calls WHERE caller_path = ?1", params![path])?;
+                transaction.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+            }
+        }
+
+        for (file, hash) in changed {
+            if !present.contains(&file.path) {
+                continue;
+            }
+            transaction.execute("DELETE FROM symbols WHERE path = ?1", params![file.path])?;
+            transaction.execute(
+                "DELETE FROM calls WHERE caller_path = ?1",
+                params![file.path],
+            )?;
+            transaction.execute(
+                "INSERT OR REPLACE INTO files(path, language, content_hash) VALUES (?1, ?2, ?3)",
+                params![file.path, file.language, hash],
+            )?;
+            for symbol in &file.symbols {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO symbols
+                     (path, name, kind, signature, start_line, end_line)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        file.path,
+                        symbol.name,
+                        symbol.kind,
+                        bound(&symbol.signature, MAX_SIGNATURE_CHARS),
+                        symbol.start_line as i64,
+                        symbol.end_line as i64,
+                    ],
+                )?;
+            }
+            for call in &file.calls {
+                transaction.execute(
+                    "INSERT INTO calls(caller_path, caller, callee, line)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![file.path, call.caller, call.callee, call.line as i64],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(changed.len())
     }
 
     pub fn symbol(&self, name: &str, limit: usize) -> Result<Vec<SymbolHit>, IndexError> {
@@ -367,6 +464,68 @@ mod tests {
         assert!(context.contains("`run`"));
         assert!(context.contains("caller: main"));
         assert!(context.chars().count() <= 160);
+    }
+
+    #[test]
+    fn incrementally_updates_changed_files_and_removes_deleted_paths() {
+        let mut index = WorkspaceIndex::in_memory().unwrap();
+        let old = context("src/lib.rs", &["before"], &[]);
+        let present = BTreeSet::from(["src/lib.rs".to_owned()]);
+        assert_eq!(
+            index
+                .sync_files(&[(old, "hash-one".to_owned())], &present)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            index.content_hash("src/lib.rs").unwrap(),
+            Some("hash-one".to_owned())
+        );
+        assert_eq!(index.symbol("before", 5).unwrap().len(), 1);
+
+        // Caller can skip an unchanged file without deleting its symbols.
+        assert_eq!(index.sync_files(&[], &present).unwrap(), 0);
+        assert_eq!(index.symbol("before", 5).unwrap().len(), 1);
+
+        let new = context("src/lib.rs", &["after"], &[]);
+        assert_eq!(
+            index
+                .sync_files(&[(new, "hash-two".to_owned())], &present)
+                .unwrap(),
+            1
+        );
+        assert!(index.symbol("before", 5).unwrap().is_empty());
+        assert_eq!(index.symbol("after", 5).unwrap().len(), 1);
+
+        assert_eq!(index.sync_files(&[], &BTreeSet::new()).unwrap(), 0);
+        assert!(index.symbol("after", 5).unwrap().is_empty());
+        assert_eq!(index.content_hash("src/lib.rs").unwrap(), None);
+    }
+
+    #[test]
+    fn legacy_index_schema_migrates_without_losing_file_records() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("symbols.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE files(path TEXT PRIMARY KEY, language TEXT NOT NULL);
+                 INSERT INTO files(path, language) VALUES ('src/lib.rs', 'rust');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let index = WorkspaceIndex::open(&path).unwrap();
+        assert_eq!(
+            index.content_hash("src/lib.rs").unwrap(),
+            Some(String::new())
+        );
+        drop(index);
+        let index = WorkspaceIndex::open(&path).unwrap();
+        assert_eq!(
+            index.content_hash("src/lib.rs").unwrap(),
+            Some(String::new())
+        );
     }
 
     #[cfg(unix)]
