@@ -205,8 +205,8 @@ impl ReadOnlyTools {
 
 fn supported_source(path: &Path) -> bool {
     const EXTENSIONS: &[&str] = &[
-        "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "c", "cpp",
-        "h", "hpp", "md", "toml", "json", "yaml", "yml", "html", "css",
+        "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "c", "cpp", "h", "hpp", "md", "toml",
+        "json", "yaml", "yml", "html", "css",
     ];
     path.extension()
         .and_then(|extension| extension.to_str())
