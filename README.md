@@ -2,6 +2,15 @@
 
 **Ryoko** is an experimental Rust foundation for a provider-neutral, multi-agent AI IDE. The target experience is a full engineering team—project manager, architect, senior UI/UX, backend, full-stack, security, QA and DevOps—collaborating on a user-defined application, with isolated worktrees and human-reviewed changes.
 
+
+## Download Ryoko Desktop (alpha testing)
+
+**[Get the Windows, macOS and Linux installers on GitHub Releases](https://github.com/Flanxiyum001/Ryoko/releases).** Choose a version labeled **Pre-release**, expand **Assets**, and download the installer for your OS (Windows x64, macOS Apple Silicon, or Linux x64).
+
+These experimental installers are **unsigned** and not intended for production. Test with a disposable project. The separate [testing and installation guide](docs/DESKTOP_PREVIEW_TESTING.md) includes the smoke-test checklist.
+
+For headless Linux x64 use, the optional **Ryoko CLI-only** GitHub Packages image is published at `ghcr.io/flanxiyum001/ryoko-cli:preview` when the package workflow succeeds and visibility is set to public; **it is not the desktop application**.
+
 > **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, a Tauri desktop shell with a Monaco editor wired to `ryoko-lsp` plus customer language servers through a multiplexer (registry, search/replace, changes drawer, inline model edits, visual settings), WASI test execution and structural context extraction. It includes local FIM ghost text, a SQLite cross-file symbol index, an integrated PTY terminal and a DAP bridge, an interactive Mission Control task DAG, local diff-editor hunk review with sandboxed pre-flight validation, hardened container-backed project checks, and unsigned cross-platform preview installers, but not production-signed installers, automatic updates or deployment. Do not use its previews as proof of successful implementation.
 
 The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. Contribution rules are in [`AGENTS.md`](AGENTS.md).
