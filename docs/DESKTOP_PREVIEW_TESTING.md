@@ -11,10 +11,10 @@ select a release explicitly labeled **Pre-release**, and download the installer
 for your operating system. You do not need GitHub Actions access for a public
 release. Check the release's `SHA256SUMS.txt` file to verify downloads.
 
-If a release has not been published yet or you are testing a branch snapshot:
+For a test build that has not yet been published as a Release:
 
 1. Open [Ryoko preview installer runs](https://github.com/Flanxiyum001/Ryoko/actions/workflows/desktop-preview.yml).
-2. Select the most recent **successful** run from the `preview/desktop-installers` branch.
+2. Select a **successful** run from `main` or a `desktop-preview-v*` tag.
 3. Under **Artifacts**, download the ZIP matching your platform.
 4. Extract the ZIP, then install or launch the installer inside:
    - **Windows 10/11 x64:** `.exe` (NSIS) or `.msi` (Windows Installer).
@@ -59,31 +59,50 @@ the exact actions, expected versus actual result, and a screenshot or
 redacted error log. **Never upload API keys, private code, or personal files**
 to issue reports.
 
-## Making an explicit GitHub prerelease
+## Releases versus Packages
 
-After all Windows, Linux and macOS jobs pass on a `preview/desktop-installers`
-branch push, the workflow automatically publishes the tested commit as a
-public GitHub **prerelease** with SHA-256 checksums. On failure, it publishes
-nothing.
+- **Releases** contains the GUI installers (`.exe`, `.msi`, `.dmg`,
+  `.AppImage`, and `.deb`). This is the normal download option for testers.
+- **GitHub Packages** contains an optional **Linux x64, CLI-only** OCI
+  container image (`ghcr.io/flanxiyum001/ryoko-cli`). It does not include
+  the graphical IDE, and Docker/Podman sandboxing of agent runs is not
+  configured inside the image. Use it for basic CLI tests and CI, not as
+  a replacement for the desktop installer.
 
-The preview workflow also supports Git tags beginning with
-`desktop-preview-v`. Once a platform build run is green and you want a
-**public experimental prerelease**, create and push a uniquely named tag at the
-verified commit, for example:
+For Docker users, after the container package has actually been published
+and made public:
 
 ```bash
-git fetch origin preview/desktop-installers
-git checkout --detach origin/preview/desktop-installers
-git tag desktop-preview-v0.1.0-alpha1
-git push origin desktop-preview-v0.1.0-alpha1
+docker pull ghcr.io/flanxiyum001/ryoko-cli:preview
+docker run --rm --network none ghcr.io/flanxiyum001/ryoko-cli:preview --help
 ```
 
-The tag triggers all three installer builds. A release is published **only if
-they all succeed**, and is marked `prerelease` with SHA-256 checksums. It is
-not marked as the latest stable release. Successful preview branch pushes also
-create a prerelease tagged with the workflow run number. Do not reuse an
-existing release tag.
+GitHub Container Registry packages may be **private when first created**.
+If external testers cannot pull, the package owner must use GitHub's
+**Packages → ryoko-cli → Package settings → Change visibility → Public**
+control. Publishing a package and making it public are two different checks.
 
-After this workflow is merged into the default branch, GitHub's
-`workflow_dispatch` option can also be used for artifact-only builds.
-No auto-updater is provided yet.
+## Publishing the next GitHub prerelease
+
+On the default `main` branch, the **Ryoko preview installers (unsigned)**
+GitHub Actions workflow can be started manually using **Actions → Run workflow**.
+It also runs on a push to `main` that changes the release workflow, the
+CLI container packaging files, or this tester guide.
+
+It builds native desktop installers on three operating systems, then publishes
+a real **GitHub pre-release** with the five installers and SHA-256 checksums
+**only after every OS build succeeds**. The CLI container package is built
+and published separately in the same workflow after the desktop release
+succeeds. If any OS build fails, the release and package jobs do not start.
+
+A run from `main` creates a unique versioned tag, e.g.
+`desktop-preview-v0.1.0-alpha.7`. Existing releases are never overwritten.
+A tag matching `desktop-preview-v*` can also be pushed explicitly to build
+and publish that tag.
+
+GitHub's **Latest** badge intentionally doesn't apply to pre-alpha versions;
+the correct public share link is
+[github.com/Flanxiyum001/Ryoko/releases](https://github.com/Flanxiyum001/Ryoko/releases).
+
+The signed-production `Desktop installers` workflow is separate and requires
+Apple and Windows signing credentials. No auto-updater is provided yet.
