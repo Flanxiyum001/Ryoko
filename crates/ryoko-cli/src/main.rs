@@ -3946,7 +3946,9 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
             lock.save().map_err(|e| cli_error(e.to_string()))?;
 
             let (display_path, checksum) = match &result {
-                DownloadResultWrapper::Extension(r) => (r.path.display().to_string(), r.checksum.clone()),
+                DownloadResultWrapper::Extension(r) => {
+                    (r.path.display().to_string(), r.checksum.clone())
+                }
                 DownloadResultWrapper::Skill(p) => (p.display().to_string(), String::new()),
             };
             println!("✅ Installed {} to {}", id, display_path);

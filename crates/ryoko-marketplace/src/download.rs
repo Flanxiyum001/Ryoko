@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use futures::StreamExt;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
+use url::Url;
 
 use crate::{MAX_DOWNLOAD_BYTES, MarketplaceEntry, MarketplaceError};
 
@@ -64,7 +67,7 @@ pub async fn ensure_cache_dir(config: &DownloadConfig) -> Result<(), Marketplace
     Ok(())
 }
 
-/// Downloads an artifact and verifies its checksum.
+/// Downloads an artifact and verifies its checksum using streaming to avoid buffering.
 pub async fn download_and_verify(
     client: &reqwest::Client,
     entry: &MarketplaceEntry,
@@ -73,47 +76,116 @@ pub async fn download_and_verify(
     // Create cache directory if needed
     ensure_cache_dir(config).await?;
 
-    // Download the file to memory first
-    let bytes = client
+    // Validate URL before requesting
+    let url = Url::parse(&entry.asset_url)
+        .map_err(|e| MarketplaceError::InvalidUrl(format!("invalid asset URL: {}", e)))?;
+    let scheme = url.scheme();
+    if scheme != "https" && scheme != "http" {
+        return Err(MarketplaceError::InvalidUrl(format!(
+            "asset URL must use HTTPS or HTTP: {}",
+            scheme
+        )));
+    }
+    if scheme == "http"
+        && !url
+            .host_str()
+            .map(|h| h.starts_with("127.0.0.1") || h == "localhost")
+            .unwrap_or(false)
+    {
+        return Err(MarketplaceError::InvalidUrl(
+            "HTTP URLs only allowed for localhost".into(),
+        ));
+    }
+
+    // Download the file with streaming
+    let response = client
         .get(&entry.asset_url)
         .timeout(Duration::from_secs(config.timeout_secs))
         .send()
         .await
-        .map_err(|e| MarketplaceError::network(format!("request failed: {}", e)))?
-        .bytes()
-        .await
-        .map_err(|e| MarketplaceError::network(format!("reading response: {}", e)))?;
+        .map_err(|e| MarketplaceError::network(format!("request failed: {}", e)))?;
 
-    if bytes.len() as u64 > config.max_size_bytes {
+    if !response.status().is_success() {
         return Err(MarketplaceError::download(format!(
-            "exceeds max size of {} bytes (got {})",
-            config.max_size_bytes,
-            bytes.len()
+            "HTTP {}: {}",
+            response.status(),
+            response.status().canonical_reason().unwrap_or("unknown")
         )));
     }
 
-    // Compute SHA-256 hash
-    let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+    // Check for redirects (reqwest follows them by default, so we need to check)
+    let final_url = response.url().clone();
+    if final_url != url {
+        // Verify the redirect didn't go to an unsafe location
+        let final_scheme = final_url.scheme();
+        if final_scheme != "https" && final_scheme != "http" {
+            return Err(MarketplaceError::InvalidUrl(format!(
+                "redirect to unsafe URL scheme: {}",
+                final_scheme
+            )));
+        }
+        if final_scheme == "http"
+            && !final_url
+                .host_str()
+                .map(|h| h.starts_with("127.0.0.1") || h == "localhost")
+                .unwrap_or(false)
+        {
+            return Err(MarketplaceError::InvalidUrl(
+                "redirect to non-localhost HTTP URL".into(),
+            ));
+        }
+    }
+
+    // Stream download with size limiting and hash computation
+    let temp_path = config.cache_dir.join(format!("{}.tmp", entry.id));
+
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .map_err(|e| MarketplaceError::Io(format!("create temp file: {}", e)))?;
+
+    let mut hasher = Sha256::new();
+    let mut total_bytes: u64 = 0;
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| MarketplaceError::network(format!("stream error: {}", e)))?;
+        let bytes = chunk.len() as u64;
+        total_bytes += bytes;
+
+        if total_bytes > config.max_size_bytes {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(MarketplaceError::download(format!(
+                "exceeds max size of {} bytes (got {})",
+                config.max_size_bytes, total_bytes
+            )));
+        }
+
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| MarketplaceError::Io(format!("write to temp file: {}", e)))?;
+
+        hasher.update(&chunk);
+    }
+
+    drop(file);
+
+    // Compute and verify SHA-256 hash
+    let actual_hash = format!("{:x}", hasher.finalize());
     let expected_hash = entry.checksum.clone();
 
     if actual_hash != expected_hash {
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(MarketplaceError::checksum(expected_hash, actual_hash));
     }
 
-    // Write to temp file, then rename to final location
-    let temp_path = config.cache_dir.join(format!("{}.tmp", entry.id));
     let final_path = config.cache_dir.join(entry.artifact_filename()?);
-    tokio::fs::write(&temp_path, &bytes)
-        .await
-        .map_err(|e| MarketplaceError::Io(format!("write to temp file: {}", e)))?;
-
     tokio::fs::rename(&temp_path, &final_path)
         .await
         .map_err(|e| MarketplaceError::Io(format!("rename to final path: {}", e)))?;
 
     Ok(DownloadResult {
         path: final_path,
-        size: bytes.len() as u64,
+        size: total_bytes,
         checksum: actual_hash,
     })
 }

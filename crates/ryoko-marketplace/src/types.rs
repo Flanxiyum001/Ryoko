@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::errors::MarketplaceError;
+
 // Re-export ConnectorConfig
 pub use crate::ConnectorConfig;
 
