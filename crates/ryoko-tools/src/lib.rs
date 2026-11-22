@@ -2,6 +2,7 @@
 //!
 //! These tools cannot execute commands, write to disk or access the network.
 
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use ignore::WalkBuilder;
@@ -46,9 +47,18 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResponse {
-    File { path: String, content: String },
-    Files { paths: Vec<String>, truncated: bool },
-    Matches { matches: Vec<SearchHit>, truncated: bool },
+    File {
+        path: String,
+        content: String,
+    },
+    Files {
+        paths: Vec<String>,
+        truncated: bool,
+    },
+    Matches {
+        matches: Vec<SearchHit>,
+        truncated: bool,
+    },
 }
 
 pub struct ReadOnlyTools {
@@ -100,11 +110,7 @@ impl ReadOnlyTools {
         if std::fs::metadata(&resolved)?.len() > MAX_READ_BYTES {
             return Err(ToolError::UnsupportedFile);
         }
-        let data = std::fs::read(&resolved)?;
-        if data.len() as u64 > MAX_READ_BYTES {
-            return Err(ToolError::UnsupportedFile);
-        }
-        let content = String::from_utf8(data).map_err(|_| ToolError::InvalidUtf8)?;
+        let content = bounded_text(&resolved)?;
         Ok(ToolResponse::File {
             path: path.to_owned(),
             content,
@@ -175,7 +181,7 @@ impl ReadOnlyTools {
             if metadata.len() > MAX_READ_BYTES {
                 continue;
             }
-            let Ok(data) = std::fs::read_to_string(&resolved) else {
+            let Ok(data) = bounded_text(&resolved) else {
                 continue;
             };
             for (index, line) in data.lines().enumerate() {
@@ -198,14 +204,24 @@ impl ReadOnlyTools {
 }
 
 fn supported_source(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some(
-            "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "java" | "c"
-                | "cpp" | "h" | "hpp" | "md" | "toml" | "json" | "yaml" | "yml"
-                | "html" | "css"
-        )
-    )
+    const EXTENSIONS: &[&str] = &[
+        "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "c", "cpp",
+        "h", "hpp", "md", "toml", "json", "yaml", "yml", "html", "css",
+    ];
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| EXTENSIONS.contains(&extension))
+}
+
+/// Read bounded data even when the file grows after the metadata check.
+fn bounded_text(path: &Path) -> Result<String, ToolError> {
+    let mut reader = std::fs::File::open(path)?.take(MAX_READ_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_READ_BYTES {
+        return Err(ToolError::UnsupportedFile);
+    }
+    String::from_utf8(bytes).map_err(|_| ToolError::InvalidUtf8)
 }
 
 #[cfg(test)]
