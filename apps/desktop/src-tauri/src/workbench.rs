@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -213,7 +212,7 @@ pub fn workspace_replace_preview(
 ) -> Result<ReplaceReply, String> {
     let root = current_root(&state)?;
     let regex = search::compile_query(&query, case_sensitive)?;
-    let previews = replace_plans(&root, &regex, &replacement)
+    let previews: Vec<ReplacePreview> = replace_plans(&root, &regex, &replacement)
         .into_iter()
         .map(|plan| ReplacePreview {
             path: relative_of(&root, &plan.path).unwrap_or_default(),
@@ -251,8 +250,8 @@ pub fn workspace_replace_apply(
     let root = current_root(&state)?;
     let regex = search::compile_query(&query, case_sensitive)?;
     let expected_counts = expected
-        .iter()
-        .cloned()
+        .clone()
+        .into_iter()
         .map(|preview| (preview.path, preview))
         .collect::<BTreeMap<_, _>>();
     let mut result = ReplaceResult {
