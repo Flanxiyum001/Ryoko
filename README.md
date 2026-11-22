@@ -48,7 +48,7 @@ cargo run -p ryoko-cli -- team-preview \
   --output team-report.md --format markdown
 ```
 
-You must edit model names to match your installed local models or hosted provider configuration. Team configurations support a default_model and role_models keyed by role names. A --model CLI value overrides only the default, not explicit per-role selections. Use --format json for machine-readable reports. Reports can contain proprietary context and never overwrite existing paths. If a provider fails, completed turns are retained in the exported partial report; a failure still returns a nonzero exit status.
+You must edit model names to match your installed local models or hosted provider configuration. Team configurations support a default_model and role_models keyed by role names. A `tiers` map names models (for example `fast` for a local model and `frontier` for a hosted one), and any `default_model` or `role_models` value may be `tier:<name>` instead of a model ID; unknown tiers are rejected before any provider call. A --model CLI value overrides only the default, not explicit per-role selections. Use --format json for machine-readable reports. Reports can contain proprietary context and never overwrite existing paths. If a provider fails, completed turns are retained in the exported partial report; a failure still returns a nonzero exit status.
 
 Other useful commands include:
 
