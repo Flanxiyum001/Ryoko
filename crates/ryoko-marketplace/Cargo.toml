@@ -19,4 +19,4 @@ sha2 = { version = "0.10", features = ["std"] }
 url = { version = "2", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 tempfile = { workspace = true }
-futures = "0.3"
+futures = { workspace = true }
