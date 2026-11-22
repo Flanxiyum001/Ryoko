@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -147,7 +147,7 @@ impl DurableStore {
                  task_id TEXT,
                  kind TEXT NOT NULL,
                  payload TEXT NOT NULL,
-                 created_ms INTEGER NOT NULL
+                 created_at TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS events_by_task ON events(task_id, sequence);",
         )?;
@@ -286,14 +286,14 @@ impl DurableStore {
         let existing = self
             .connection
             .query_row(
-                "SELECT task_id, kind, payload, created_ms FROM events WHERE event_id = ?1",
+                "SELECT task_id, kind, payload, created_at FROM events WHERE event_id = ?1",
                 params![event.id.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -302,21 +302,21 @@ impl DurableStore {
             if prior_task == task_id
                 && prior_kind == event.kind
                 && prior_payload == payload
-                && prior_created == event.created_at.timestamp_millis()
+                && prior_created == event.created_at.to_rfc3339_opts(SecondsFormat::Nanos, true)
             {
                 return Ok(false);
             }
             return Err(StorageError::Conflict);
         }
         self.connection.execute(
-            "INSERT INTO events(event_id, task_id, kind, payload, created_ms)
+            "INSERT INTO events(event_id, task_id, kind, payload, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 event.id.to_string(),
                 task_id,
                 event.kind,
                 payload,
-                event.created_at.timestamp_millis(),
+                event.created_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
             ],
         )?;
         Ok(true)
@@ -329,7 +329,7 @@ impl DurableStore {
         limit: usize,
     ) -> Result<Vec<(i64, JournalEvent)>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT sequence, event_id, task_id, kind, payload, created_ms
+            "SELECT sequence, event_id, task_id, kind, payload, created_at
              FROM events WHERE sequence > ?1 ORDER BY sequence ASC LIMIT ?2",
         )?;
         let rows = statement.query_map(
@@ -341,13 +341,13 @@ impl DurableStore {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )?;
         let mut events = Vec::new();
         for row in rows {
-            let (sequence, id, task_id, kind, payload, ms) = row?;
+            let (sequence, id, task_id, kind, payload, created_at) = row?;
             events.push((
                 sequence,
                 JournalEvent {
@@ -359,9 +359,9 @@ impl DurableStore {
                         .map_err(|error| StorageError::InvalidData(error.to_string()))?,
                     kind,
                     payload: serde_json::from_str(&payload)?,
-                    created_at: DateTime::from_timestamp_millis(ms).ok_or_else(|| {
-                        StorageError::InvalidData("invalid event timestamp".into())
-                    })?,
+                    created_at: DateTime::parse_from_rfc3339(&created_at)
+                        .map_err(|error| StorageError::InvalidData(error.to_string()))?
+                        .with_timezone(&Utc),
                 },
             ));
         }
