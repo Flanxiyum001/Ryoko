@@ -13,7 +13,8 @@ mod process;
 mod spec;
 
 pub use init::{
-    Ecosystem, FrontendProfile, InitError, SandboxPlan, VERIFY_UI_CONTAINER_PATH, verify_ui_script,
+    Ecosystem, Freshness, FrontendProfile, ImageState, InitError, SandboxPlan,
+    VERIFY_UI_CONTAINER_PATH, verify_ui_script,
 };
 pub use process::{ARTIFACT_MOUNT, BuildBackend, BuildSandbox, BuildSandboxError};
 
