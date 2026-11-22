@@ -4134,3 +4134,30 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
         }
     }
 }
+
+#[cfg(test)]
+mod marketplace_browser_cli_tests {
+    use super::*;
+
+    #[test]
+    fn supports_machine_readable_catalog_for_both_item_kinds() {
+        for item_kind in ["extension", "skill"] {
+            let cli = Cli::try_parse_from([
+                "ryoko",
+                "marketplace",
+                "list",
+                item_kind,
+                "--json",
+            ])
+            .expect("marketplace list must accept --json");
+
+            let Commands::Marketplace(args) = cli.command else {
+                panic!("marketplace subcommand expected");
+            };
+            assert!(matches!(
+                args.command,
+                MarketplaceCmds::List { json: true, .. }
+            ));
+        }
+    }
+}
