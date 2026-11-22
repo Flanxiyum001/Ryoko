@@ -20,7 +20,15 @@
     </header>
 
     <div class="layout">
-      <aside class="explorer" aria-label="Workspace explorer">
+      <nav class="activity-rail" aria-label="Workbench views">
+        <button class="rail-button active" type="button" data-view="explorer" aria-label="Show explorer" aria-pressed="true" title="Explorer">▤<span>Files</span></button>
+        <button class="rail-button" type="button" data-view="editor" aria-label="Show editor" aria-pressed="false" title="Editor">⌘<span>Editor</span></button>
+        <button class="rail-button" type="button" data-view="mission" aria-label="Show Mission Control" aria-pressed="false" title="Mission Control">◇<span>Mission</span></button>
+        <button class="rail-button" type="button" data-view="changes" aria-label="Show changes" aria-pressed="false" title="Changes">⑂<span>Changes</span></button>
+        <button class="rail-button" type="button" data-view="problems" aria-label="Show problems" aria-pressed="false" title="Problems">◉<span>Issues</span></button>
+        <button class="rail-button rail-bottom" type="button" data-view="settings" aria-label="Open settings" title="Settings">⚙<span>Setup</span></button>
+      </nav>
+      <aside class="explorer" id="explorerPane" aria-label="Workspace explorer">
         <div class="panel-head"><span>EXPLORER</span><span id="fileCount" class="counter">0 files</span></div>
         <label class="sr-only" for="fileFilter">Filter files</label>
         <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
@@ -47,9 +55,11 @@
           <div id="diffEditor" class="diff-editor"></div>
         </div>
         <div id="emptyEditor" class="empty-editor">
-          <div class="empty-mark" aria-hidden="true">⌘</div>
-          <h1>Ryoko Desktop</h1>
-          <p>Open a folder, edit files with Monaco, and see findings published by <code>ryoko-lsp</code>.</p>
+          <div class="empty-mark" aria-hidden="true">R</div>
+          <span class="empty-eyebrow">THE ENGINEERING WORKBENCH</span>
+          <h1>Build with clarity.</h1>
+          <p>Open a workspace to edit code, review changes and follow your agents from one place.</p>
+          <button id="emptyOpenFolder" class="button primary" type="button">Open a workspace</button>
         </div>
         <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
           <div class="bottom-tabs">
@@ -104,7 +114,7 @@
         </section>
       </main>
 
-      <aside class="problems" aria-label="Mission Control and diagnostics">
+      <aside class="problems" id="inspectorPane" aria-label="Mission Control and diagnostics">
         <section class="agent-sessions" aria-label="Agent sessions">
           <div class="panel-head"><span>AGENT SESSIONS</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
           <div class="agent-session-toolbar">
