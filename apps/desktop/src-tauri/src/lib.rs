@@ -85,6 +85,13 @@ pub fn run() {
             debug_adapter::dap_send,
             debug_adapter::dap_status,
             debug_adapter::dap_stop,
+            marketplace::marketplace_list,
+            marketplace::marketplace_search,
+            marketplace::marketplace_install,
+            marketplace::marketplace_check_updates,
+            marketplace::marketplace_update,
+            marketplace::marketplace_info,
+            marketplace::marketplace_installed,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Ryoko desktop shell");
