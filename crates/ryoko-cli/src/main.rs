@@ -3197,6 +3197,68 @@ mod tests {
         assert_eq!(budget.task_limit_seconds, Some(45));
     }
 
+    /// `--ui-url` parsed from the command line reaches the harness invocation for
+    /// both capture-capable subcommands, and is an error rather than a no-op when
+    /// no dev command is configured.
+    #[test]
+    fn ui_url_reaches_the_capture_harness_on_run_and_review() {
+        for base in [
+            vec![
+                "ryoko",
+                "run",
+                "ship the change",
+                "--ui-command",
+                "npm run dev",
+            ],
+            vec!["ryoko", "review", "--ui-command", "npm run dev"],
+        ] {
+            let mut arguments = base.clone();
+            arguments.extend([
+                "--ui-url",
+                "http://localhost:3000",
+                "--ui-route",
+                "/pricing",
+            ]);
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            let (command, routes, url) = match cli.command {
+                Commands::Run(args) => (args.ui_command, args.ui_routes, args.ui_url),
+                Commands::Review(args) => (args.ui_command, args.ui_routes, args.ui_url),
+                other => panic!("{base:?} parsed as {other:?}"),
+            };
+            let capture = configured_ui_capture(command.as_deref(), &routes, url.as_deref())
+                .unwrap()
+                .expect("a configured capture");
+            let invocation = capture.command().unwrap();
+            assert!(
+                invocation.contains("--url 'http://localhost:3000'"),
+                "{invocation}"
+            );
+            assert!(!invocation.contains("4173"), "{invocation}");
+        }
+
+        let cli = Cli::try_parse_from([
+            "ryoko",
+            "run",
+            "ship the change",
+            "--ui-url",
+            "http://localhost:3000",
+        ])
+        .unwrap();
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        let error = configured_ui_capture(
+            args.ui_command.as_deref(),
+            &args.ui_routes,
+            args.ui_url.as_deref(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("--ui-url requires --ui-command"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn no_budget_flags_disable_limits() {
         assert!(
