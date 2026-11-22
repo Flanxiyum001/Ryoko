@@ -10,6 +10,23 @@ use url::Url;
 
 use crate::{MAX_DOWNLOAD_BYTES, MarketplaceEntry, MarketplaceError};
 
+/// Allow TLS for public artifacts; permit cleartext only for an exact loopback host.
+pub(crate) fn marketplace_url_allowed(url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    url.scheme() == "https"
+        || (url.scheme() == "http"
+            && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")))
+}
+
+fn valid_checksum(checksum: &str) -> bool {
+    checksum.len() == 64
+        && checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Configuration for downloads.
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
@@ -73,30 +90,21 @@ pub async fn download_and_verify(
     entry: &MarketplaceEntry,
     config: &DownloadConfig,
 ) -> Result<DownloadResult, MarketplaceError> {
-    // Reject registry-supplied unsafe paths before any filesystem operations.
+    // Validate registry-controlled metadata before starting a network request or file write.
     let artifact_name = entry.artifact_filename()?;
-    ensure_cache_dir(config).await?;
-
-    // Validate URL before requesting
-    let url = Url::parse(&entry.asset_url)
-        .map_err(|e| MarketplaceError::InvalidUrl(format!("invalid asset URL: {}", e)))?;
-    let scheme = url.scheme();
-    if scheme != "https" && scheme != "http" {
-        return Err(MarketplaceError::InvalidUrl(format!(
-            "asset URL must use HTTPS or HTTP: {}",
-            scheme
-        )));
-    }
-    if scheme == "http"
-        && !url
-            .host_str()
-            .map(|h| h.starts_with("127.0.0.1") || h == "localhost")
-            .unwrap_or(false)
-    {
-        return Err(MarketplaceError::InvalidUrl(
-            "HTTP URLs only allowed for localhost".into(),
+    if !valid_checksum(&entry.checksum) {
+        return Err(MarketplaceError::InvalidManifest(
+            "artifact checksum must be 64 lowercase hexadecimal SHA-256 characters".into(),
         ));
     }
+    let url = Url::parse(&entry.asset_url)
+        .map_err(|e| MarketplaceError::InvalidUrl(format!("invalid asset URL: {}", e)))?;
+    if !marketplace_url_allowed(&url) {
+        return Err(MarketplaceError::InvalidUrl(
+            "artifact URL must use HTTPS, or HTTP with an exact loopback host".into(),
+        ));
+    }
+    ensure_cache_dir(config).await?;
 
     // Download the file with streaming
     let response = client
@@ -114,27 +122,15 @@ pub async fn download_and_verify(
         )));
     }
 
-    // Check for redirects (reqwest follows them by default, so we need to check)
-    let final_url = response.url().clone();
-    if final_url != url {
-        // Verify the redirect didn't go to an unsafe location
-        let final_scheme = final_url.scheme();
-        if final_scheme != "https" && final_scheme != "http" {
-            return Err(MarketplaceError::InvalidUrl(format!(
-                "redirect to unsafe URL scheme: {}",
-                final_scheme
-            )));
-        }
-        if final_scheme == "http"
-            && !final_url
-                .host_str()
-                .map(|h| h.starts_with("127.0.0.1") || h == "localhost")
-                .unwrap_or(false)
-        {
-            return Err(MarketplaceError::InvalidUrl(
-                "redirect to non-localhost HTTP URL".into(),
-            ));
-        }
+    // The MarketplaceClient also rejects insecure redirects *before* following them.
+    // Repeat validation here for clients supplied directly to this helper.
+    let final_url = response.url();
+    if !marketplace_url_allowed(final_url)
+        || (url.scheme() == "https" && final_url.scheme() != "https")
+    {
+        return Err(MarketplaceError::InvalidUrl(
+            "artifact redirect downgraded transport security".into(),
+        ));
     }
 
     if response
@@ -179,6 +175,7 @@ pub async fn download_and_verify(
         total_bytes += bytes;
 
         if total_bytes > config.max_size_bytes {
+            drop(file);
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(MarketplaceError::download(format!(
                 "exceeds max size of {} bytes (got {})",
@@ -210,9 +207,13 @@ pub async fn download_and_verify(
     }
 
     let final_path = config.cache_dir.join(artifact_name);
-    tokio::fs::rename(&temp_path, &final_path)
-        .await
-        .map_err(|e| MarketplaceError::Io(format!("rename to final path: {}", e)))?;
+    if let Err(error) = tokio::fs::rename(&temp_path, &final_path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(MarketplaceError::Io(format!(
+            "rename to final path: {}",
+            error
+        )));
+    }
 
     Ok(DownloadResult {
         path: final_path,
@@ -275,6 +276,35 @@ mod tests {
         let result = verify_checksum(&path, &expected);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn url_security_rejects_fake_loopback_and_embedded_credentials() {
+        for raw in [
+            "http://127.0.0.1.evil.example/asset.wasm",
+            "http://localhost.evil.example/asset.wasm",
+            "http://10.0.0.1/asset.wasm",
+            "http://example.org/asset.wasm",
+            "https://user:password@example.org/asset.wasm",
+            "file:///tmp/asset.wasm",
+        ] {
+            assert!(!marketplace_url_allowed(&Url::parse(raw).unwrap()), "{raw}");
+        }
+        for raw in [
+            "https://example.org/asset.wasm",
+            "http://127.0.0.1/asset.wasm",
+            "http://localhost:8080/asset.wasm",
+        ] {
+            assert!(marketplace_url_allowed(&Url::parse(raw).unwrap()), "{raw}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_registry_checksums_before_download() {
+        assert!(valid_checksum(&"a".repeat(64)));
+        assert!(!valid_checksum(&"A".repeat(64)));
+        assert!(!valid_checksum(&"z".repeat(64)));
+        assert!(!valid_checksum(&"a".repeat(63)));
     }
 
     #[test]
