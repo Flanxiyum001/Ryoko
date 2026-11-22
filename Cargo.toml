@@ -6,6 +6,7 @@ members = [
     "crates/ryoko-native",
     "crates/ryoko-sandbox",
     "crates/ryoko-scripting",
+    "crates/ryoko-storage",
     "crates/ryoko-vfs",
     "crates/ryoko-worktree",
     "crates/ryoko-cli",
