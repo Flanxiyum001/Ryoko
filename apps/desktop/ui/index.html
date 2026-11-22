@@ -138,6 +138,18 @@
             <p class="hint">Select a task to inspect its brief, validation and output.</p>
           </div>
         </section>
+        <details class="connectors" id="connectorsPanel" open>
+          <summary>CONNECTORS <span id="connectorCount" class="counter">not loaded</span></summary>
+          <div class="connectors-toolbar">
+            <span id="connectorPath" class="connector-path">Open a folder to configure connectors.</span>
+            <button id="connectorRefresh" class="button ghost compact" type="button">Refresh</button>
+          </div>
+          <p id="connectorNotice" class="connector-notice hidden" role="alert"></p>
+          <div id="connectorList" class="connector-list" aria-live="polite">
+            <p class="hint">Enabled connectors are mounted for the next agent run.</p>
+          </div>
+          <pre id="connectorInspect" class="connector-inspect hidden" aria-live="polite"></pre>
+        </details>
         <details class="github-queue">
           <summary>GITHUB PR / ISSUE QUEUE <span id="githubQueueCount" class="counter">not connected</span></summary>
           <div class="github-pair">

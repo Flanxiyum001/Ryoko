@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod agents;
+pub mod connectors;
 pub mod context;
 pub mod diagnostic;
 pub mod encoding;
@@ -33,6 +34,11 @@ pub use agents::{
     CODEGEN_SYSTEM_PROMPT, CONTEXT_METADATA, ModelAgent, RETRY_FEEDBACK_METADATA,
     StructuredProposal, parse_structured_proposal, task_branch_key, task_summary_key,
 };
+pub use connectors::{
+    ConnectorConfig, ConnectorError, ConnectorReadiness, ConnectorRegistry, ConnectorStatus,
+    ConnectorTool, ConnectorTransport, builtin_preset, builtin_presets,
+    readiness as connector_readiness, resolve_required_env,
+};
 pub use context::{
     CallEdge, ContextError, ContextExtractor, ContextSnippet, FileContext, Language, SourceFile,
     Symbol, extract_files,
@@ -47,7 +53,8 @@ pub use iacp::{
 pub use index::{CallerHit, IndexError, SymbolHit, WorkspaceIndex, goal_terms};
 pub use mcp::{
     McpApprovalAsker, McpApprovalDecision, McpApprovalGate, McpApprovalScope, McpClient, McpError,
-    McpTool, McpToolPolicy, McpToolService, McpToolbox, McpTransport, SessionApprovalGate,
+    McpTool, McpToolPolicy, McpToolService, McpToolbox, McpTransport, MultiMcpToolbox,
+    NamespacedApprovalGate, SessionApprovalGate, namespaced_tool_name,
 };
 pub use memory::SharedMemory;
 pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
