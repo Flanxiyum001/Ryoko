@@ -92,6 +92,9 @@ impl Language {
     }
 }
 
+/// Longest signature rendered per outline entry.
+const MAX_OUTLINE_SIGNATURE_BYTES: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
@@ -160,10 +163,25 @@ impl FileContext {
             rendered.push('\n');
         }
         for symbol in &self.symbols {
-            rendered.push_str(&format!(
-                "- {} {} (L{}-L{})\n",
-                symbol.kind, symbol.name, symbol.start_line, symbol.end_line
-            ));
+            // Signatures carry parameter and return types, which is what an
+            // agent needs from an unrelated file; bodies are never included.
+            let signature = symbol
+                .signature
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if signature.is_empty() || signature == symbol.name {
+                rendered.push_str(&format!(
+                    "- {} {} (L{}-L{})\n",
+                    symbol.kind, symbol.name, symbol.start_line, symbol.end_line
+                ));
+            } else {
+                let (signature, _) = truncate(&signature, MAX_OUTLINE_SIGNATURE_BYTES);
+                rendered.push_str(&format!(
+                    "- {} {}: `{}` (L{}-L{})\n",
+                    symbol.kind, symbol.name, signature, symbol.start_line, symbol.end_line
+                ));
+            }
         }
         if !self.calls.is_empty() {
             let mut by_caller: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -1013,6 +1031,21 @@ int load() {
             .calls
             .iter()
             .any(|call| call.caller == caller && call.callee == callee)
+    }
+
+    #[test]
+    fn outline_renders_signatures_without_bodies() {
+        let source = "pub fn add(left: u32, right: u32) -> u32 {\n    let secret_body = left;\n    secret_body + right\n}\n";
+        let context = ContextExtractor::new()
+            .unwrap()
+            .extract("src/math.rs", source)
+            .unwrap();
+        let outline = context.render_outline();
+        assert!(
+            outline.contains("`pub fn add(left: u32, right: u32) -> u32`"),
+            "{outline}"
+        );
+        assert!(!outline.contains("secret_body"), "{outline}");
     }
 
     #[test]
