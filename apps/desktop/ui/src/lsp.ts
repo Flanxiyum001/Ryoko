@@ -28,7 +28,7 @@ export interface LspStartReport {
 
 export interface LspRegistryReply {
   registry: {
-    servers: LspServerDescriptor[];
+    servers: Array<LspServerDescriptor & { command: string; args: string[] }>;
   };
   registryPath: string | null;
 }
@@ -118,20 +118,27 @@ export class LspClient {
         this.emitServers();
       }),
     ];
-    const report = await invoke<LspStartReport>('lsp_start', { root });
-    this.setState(RYOKO_LSP_ID, 'starting');
-    for (const id of report.started) {
-      if (id !== RYOKO_LSP_ID) this.setState(id, 'starting');
-    }
     try {
       const reply = await invoke<LspRegistryReply>('lsp_registry');
       this.registry = reply.registry.servers;
+      const allowExternalServers = reply.registry.servers.length === 0 || window.confirm(
+        'This workspace requests permission to launch these external language servers:\\n\\n'
+          + reply.registry.servers.map((server) =>
+            `${server.id}: ${server.command} ${server.args.join(' ')}`
+          ).join('\\n')
+          + '\\n\\nOnly approve if you trust this workspace and these commands.',
+      );
+      const report = await invoke<LspStartReport>('lsp_start', { root, allowExternalServers });
+      this.setState(RYOKO_LSP_ID, 'starting');
+      for (const id of report.started) {
+        if (id !== RYOKO_LSP_ID) this.setState(id, 'starting');
+      }
       for (const id of report.started) {
         const detail = await this.initializeServer(id, root);
-        this.setReady(id, detail);
+        if (detail) this.handlers.onLog?.(id, detail);
       }
-      if (!this.serverStates.get(RYOKO_LSP_ID)) {
-        throw new Error('ryoko-lsp exited before initialization finished');
+      if (this.serverStates.get(RYOKO_LSP_ID) !== 'ready') {
+        throw new Error('ryoko-lsp failed to initialize');
       }
       this.active = true;
     } catch (error) {
@@ -165,15 +172,12 @@ export class LspClient {
       this.setState(id, 'error');
       return `${id} did not answer initialize${response?.error?.message ? `: ${response.error.message}` : ''}`;
     }
+    this.setState(id, 'ready');
     this.notifyTo(id, 'initialized', {});
     return undefined;
   }
 
-  private setReady(id: string, detail?: string): void {
-    this.setState(id, 'ready');
-    if (detail && id === RYOKO_LSP_ID) this.handlers.onState('ready', detail);
-  }
-
+ 
   async stop(): Promise<void> {
     if (!this.active && this.unlisteners.length === 0) return;
     this.active = false;
