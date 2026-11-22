@@ -561,6 +561,8 @@ struct SandboxArgs {
 enum SandboxCommands {
     /// Generate and build an offline OCI image for this checkout.
     Init(SandboxInitArgs),
+    /// Report the container runtime, the image and whether it is out of date.
+    Status(SandboxInitArgs),
 }
 
 #[derive(Debug, Args)]
@@ -579,6 +581,10 @@ struct SandboxInitArgs {
     /// Only write the Dockerfile; do not build it.
     #[arg(long)]
     no_build: bool,
+    /// Skip the build when the image exists and no manifest, lockfile or
+    /// generated Dockerfile changed since the last successful build.
+    #[arg(long)]
+    if_stale: bool,
     #[arg(long)]
     json: bool,
 }
@@ -1697,19 +1703,101 @@ async fn changed_paths(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
 async fn sandbox(args: SandboxArgs) -> Result<(), Box<dyn Error>> {
     match args.command {
         SandboxCommands::Init(args) => sandbox_init(args).await,
+        SandboxCommands::Status(args) => sandbox_status(args).await,
     }
+}
+
+fn init_backend(arg: SandboxBackendArg) -> BuildBackend {
+    match arg {
+        SandboxBackendArg::Auto => BuildBackend::Auto,
+        SandboxBackendArg::Docker => BuildBackend::Docker,
+        SandboxBackendArg::Podman => BuildBackend::Podman,
+    }
+}
+
+/// Whether the image is missing or built from different dependency inputs.
+/// An unreachable runtime counts as "needs a build" so the build reports it.
+async fn image_is_current(
+    plan: &SandboxPlan,
+    backend: BuildBackend,
+) -> Result<bool, Box<dyn Error>> {
+    if plan.freshness()?.needs_build() {
+        return Ok(false);
+    }
+    Ok(BuildSandbox::new(backend, None)
+        .image_exists(&plan.image)
+        .await
+        .unwrap_or(false))
+}
+
+async fn sandbox_status(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let plan = SandboxPlan::inspect(&root, args.tag, args.dockerfile)?;
+    let backend = init_backend(args.backend);
+    let probe = BuildSandbox::new(backend, None);
+    let runtime = probe.runtime().await.ok();
+    let image_present = match runtime {
+        Some(_) => probe.image_exists(&plan.image).await.ok(),
+        None => None,
+    };
+    let freshness = plan.freshness()?;
+    let ready = runtime.is_some() && image_present == Some(true) && !freshness.needs_build();
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ecosystem": plan.ecosystem,
+                "image": plan.image,
+                "dockerfile": plan.dockerfile,
+                "runtime": runtime,
+                "image_present": image_present,
+                "freshness": freshness,
+                "ready": ready,
+            })
+        );
+        return Ok(());
+    }
+    match runtime {
+        Some(runtime) => println!("Container runtime: {runtime}"),
+        None => println!(
+            "Container runtime: none found. Start Docker or Podman; checks never fall back to the host."
+        ),
+    }
+    match image_present {
+        Some(true) => println!("Image {}: present", plan.image),
+        Some(false) => println!("Image {}: not built", plan.image),
+        None => println!("Image {}: unknown (no runtime)", plan.image),
+    }
+    match &freshness {
+        ryoko_sandbox::Freshness::NeverBuilt => {
+            println!("Dependencies: no recorded build for this plan")
+        }
+        ryoko_sandbox::Freshness::Fresh => println!("Dependencies: unchanged since the last build"),
+        ryoko_sandbox::Freshness::Stale { changed } => {
+            println!(
+                "Dependencies: changed since the last build: {}",
+                changed.join(", ")
+            )
+        }
+    }
+    if ready {
+        println!("Ready. Use: --sandbox-image {}", plan.image);
+    } else {
+        println!("Run `ryoko sandbox init --if-stale` to rebuild.");
+    }
+    Ok(())
 }
 
 async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
     let root = canonical_root(&args.repo)?;
     let plan = SandboxPlan::inspect(&root, args.tag, args.dockerfile)?;
+    let backend = init_backend(args.backend);
+    // Freshness is checked before writing so a regenerated Dockerfile that
+    // differs from the built one is still detected.
+    let skipped = args.if_stale && !args.no_build && image_is_current(&plan, backend).await?;
     plan.write()?;
-    let backend = match args.backend {
-        SandboxBackendArg::Auto => BuildBackend::Auto,
-        SandboxBackendArg::Docker => BuildBackend::Docker,
-        SandboxBackendArg::Podman => BuildBackend::Podman,
-    };
-    if !args.no_build {
+    let built = !args.no_build && !skipped;
+    if built {
         plan.build(backend).await?;
     }
     if args.json {
@@ -1720,7 +1808,8 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 "image": plan.image,
                 "dockerfile": plan.dockerfile,
                 "frontend": plan.frontend,
-                "built": !args.no_build,
+                "built": built,
+                "up_to_date": skipped,
             })
         );
     } else {
@@ -1735,7 +1824,12 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 plan.frontend.frameworks.join(", ")
             );
         }
-        if args.no_build {
+        if skipped {
+            println!(
+                "{} is up to date; no manifest or lockfile changed since it was built.",
+                plan.image
+            );
+        } else if args.no_build {
             println!("Skipped the image build; pass it to --sandbox-image after building it.");
         } else {
             println!(

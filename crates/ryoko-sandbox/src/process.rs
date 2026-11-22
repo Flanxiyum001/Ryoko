@@ -291,6 +291,34 @@ impl BuildSandbox {
         run_bounded(process, timeout).await
     }
 
+    /// Reports which container runtime this backend would use, without running
+    /// anything in it. `Auto` probes Docker, then Podman; the host is never an
+    /// answer.
+    pub async fn runtime(&self) -> Result<&'static str, BuildSandboxError> {
+        if self.backend == BuildBackend::UnsafeHost {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        self.resolve_runtime().await
+    }
+
+    /// Whether `image` is already present in the local image store. Nothing is
+    /// pulled: a missing image is reported, never fetched.
+    pub async fn image_exists(&self, image: &str) -> Result<bool, BuildSandboxError> {
+        if image.trim().is_empty()
+            || image.starts_with('-')
+            || image
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+        {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        let runtime = self.runtime().await?;
+        let mut process = Command::new(runtime);
+        process.args(["image", "inspect", "--format", "{{.Id}}", image]);
+        let output = run_bounded(process, Duration::from_secs(15)).await?;
+        Ok(output.status.success())
+    }
+
     async fn resolve_runtime(&self) -> Result<&'static str, BuildSandboxError> {
         match self.backend {
             BuildBackend::Docker => Ok("docker"),
