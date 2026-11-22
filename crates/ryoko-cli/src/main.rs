@@ -3875,7 +3875,8 @@ fn record_marketplace_install(
     });
     match entry.kind {
         MarketplaceType::Extension => {
-            lock.extensions.insert(entry.id.clone(), entry.version.clone());
+            lock.extensions
+                .insert(entry.id.clone(), entry.version.clone());
         }
         MarketplaceType::Skill => {
             lock.skills.insert(entry.id.clone(), entry.version.clone());
