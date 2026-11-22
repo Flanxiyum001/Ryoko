@@ -200,7 +200,7 @@ jobs:
             TAG="$GITHUB_REF_NAME"
             TAG_FLAGS=(--verify-tag)
           else
-            # A successful preview-branch build automatically creates a public
+            # A successful preview build from main creates a public
             # GitHub prerelease. Nothing is published if any OS build fails.
             TAG="desktop-preview-v0.1.0-alpha.${GITHUB_RUN_NUMBER}"
             TAG_FLAGS=(--target "$GITHUB_SHA")
