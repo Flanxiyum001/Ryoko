@@ -406,6 +406,10 @@ struct RunArgs {
     /// Route to capture. Repeat per route; defaults to `/`.
     #[arg(long = "ui-route", value_name = "PATH")]
     ui_routes: Vec<String>,
+    /// Loopback origin the capture harness polls. Defaults to
+    /// `http://127.0.0.1:4173`.
+    #[arg(long = "ui-url", value_name = "URL")]
+    ui_url: Option<String>,
     /// Timeout for the pre-flight command.
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
@@ -561,6 +565,10 @@ struct ReviewArgs {
     /// Route to capture. Repeat per route; defaults to `/`.
     #[arg(long = "ui-route", value_name = "PATH")]
     ui_routes: Vec<String>,
+    /// Loopback origin the capture harness polls. Defaults to
+    /// `http://127.0.0.1:4173`.
+    #[arg(long = "ui-url", value_name = "URL")]
+    ui_url: Option<String>,
     #[arg(long, default_value_t = 300)]
     timeout_secs: u64,
     #[command(flatten)]
@@ -1894,7 +1902,11 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let manager = GitWorktreeManager::new(&root);
     let sandbox = resolve_sandbox(&args.isolation)?;
     let perf = perf_config(&args)?;
-    let ui = configured_ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
+    let ui = configured_ui_capture(
+        args.ui_command.as_deref(),
+        &args.ui_routes,
+        args.ui_url.as_deref(),
+    )?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
@@ -2296,7 +2308,11 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         backend: sandbox_label(&args.isolation),
         image: args.isolation.sandbox_image.clone(),
     };
-    let ui = configured_ui_capture(args.ui_command.as_deref(), &args.ui_routes)?;
+    let ui = configured_ui_capture(
+        args.ui_command.as_deref(),
+        &args.ui_routes,
+        args.ui_url.as_deref(),
+    )?;
     let validator: Arc<dyn ChangeValidator> = Arc::new(
         CommandValidator::new(
             check_command,
@@ -2821,21 +2837,28 @@ async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<String, Bo
     Ok(line.trim().to_owned())
 }
 
-/// Builds the visual capture from operator flags. A route without a dev command
-/// is a mistake, not a silent no-op.
+/// Builds the visual capture from operator flags. A route or origin without a
+/// dev command is a mistake, not a silent no-op.
 fn configured_ui_capture(
     command: Option<&str>,
     routes: &[String],
+    url: Option<&str>,
 ) -> Result<Option<UiCapture>, Box<dyn Error>> {
     let Some(command) = command else {
         if !routes.is_empty() {
             return Err(cli_error("--ui-route requires --ui-command"));
+        }
+        if url.is_some() {
+            return Err(cli_error("--ui-url requires --ui-command"));
         }
         return Ok(None);
     };
     let mut capture = UiCapture::new(command.trim());
     for route in routes {
         capture = capture.with_route(route.as_str());
+    }
+    if let Some(url) = url {
+        capture = capture.with_url(url.trim());
     }
     capture.validate().map_err(cli_error)?;
     Ok(Some(capture))
@@ -3172,6 +3195,68 @@ mod tests {
         assert_eq!(budget.task_limit_usd, Some(0.25));
         assert_eq!(budget.task_limit_tokens, Some(2_000));
         assert_eq!(budget.task_limit_seconds, Some(45));
+    }
+
+    /// `--ui-url` parsed from the command line reaches the harness invocation for
+    /// both capture-capable subcommands, and is an error rather than a no-op when
+    /// no dev command is configured.
+    #[test]
+    fn ui_url_reaches_the_capture_harness_on_run_and_review() {
+        for base in [
+            vec![
+                "ryoko",
+                "run",
+                "ship the change",
+                "--ui-command",
+                "npm run dev",
+            ],
+            vec!["ryoko", "review", "--ui-command", "npm run dev"],
+        ] {
+            let mut arguments = base.clone();
+            arguments.extend([
+                "--ui-url",
+                "http://localhost:3000",
+                "--ui-route",
+                "/pricing",
+            ]);
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            let (command, routes, url) = match cli.command {
+                Commands::Run(args) => (args.ui_command, args.ui_routes, args.ui_url),
+                Commands::Review(args) => (args.ui_command, args.ui_routes, args.ui_url),
+                other => panic!("{base:?} parsed as {other:?}"),
+            };
+            let capture = configured_ui_capture(command.as_deref(), &routes, url.as_deref())
+                .unwrap()
+                .expect("a configured capture");
+            let invocation = capture.command().unwrap();
+            assert!(
+                invocation.contains("--url 'http://localhost:3000'"),
+                "{invocation}"
+            );
+            assert!(!invocation.contains("4173"), "{invocation}");
+        }
+
+        let cli = Cli::try_parse_from([
+            "ryoko",
+            "run",
+            "ship the change",
+            "--ui-url",
+            "http://localhost:3000",
+        ])
+        .unwrap();
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        let error = configured_ui_capture(
+            args.ui_command.as_deref(),
+            &args.ui_routes,
+            args.ui_url.as_deref(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("--ui-url requires --ui-command"),
+            "{error}"
+        );
     }
 
     #[test]
