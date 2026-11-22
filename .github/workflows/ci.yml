@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run tests
+        run: |
+          # Annotations are readable without fetching logs, and logs need a
+          # signed-in session, so every failing test is surfaced as an error.
+          set +e
+          cargo test --workspace --locked --no-fail-fast > "$RUNNER_TEMP/tests.log" 2>&1
+          status=$?
+          tail -n 150 "$RUNNER_TEMP/tests.log"
+          grep -E "^(test .* FAILED|---- .* stdout ----|thread '.*' panicked at)" "$RUNNER_TEMP/tests.log" \
+            | head -40 | while IFS= read -r line; do echo "::error::${line}"; done
+          exit "$status"
+      - name: Verify container filesystem and network isolation
+        run: |
+          docker pull alpine:3.21
+          RYOKO_CONTAINER_TEST_IMAGE=alpine:3.21 cargo test -p ryoko-sandbox --locked --test container_isolation -- --nocapture
+
+  desktop:
+    name: Desktop UI / Tauri shell
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Run frontend unit tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      - name: Check Tauri shell formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+  desktop-shell:
+    name: Tauri shell
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - name: Install WebKit dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Build frontend assets
+        working-directory: apps/desktop
+        run: npm ci && npm run build
+      - name: Build ryoko-lsp sidecar
+        run: |
+          cargo build --locked -p ryoko-native --bin ryoko-lsp
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/debug/ryoko-lsp \
+            apps/desktop/src-tauri/binaries/ryoko-lsp-x86_64-unknown-linux-gnu
+      - name: Check Tauri shell
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+      - name: Test Tauri shell modules
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+  github-app:
+    name: GitHub App / Desktop Workbench
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: services/github-app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Node syntax
+        run: npm run check
+      - name: Test GitHub App security and API
+        run: npm test
+      - name: Check browser JS syntax
+        run: node --check ../../apps/desktop/app.js
