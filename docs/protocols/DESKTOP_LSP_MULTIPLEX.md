@@ -21,10 +21,15 @@ stdio language servers and routes JSON-RPC per method.
   is argv-only, never through a shell.
 - `languages`: lowercase language ids; one owner per language, enforced at
   validation time so routing stays deterministic.
-- At most 16 servers with 16 arguments each; the file is capped at sizes
-  enforced by `servers::LspRegistry::parse` and stored by `settings.rs`.
+- At most 16 servers with 16 arguments each; the registry file is limited
+  to 256 KiB when loaded by `servers::LspRegistry::load` or saved by `settings.rs`.
+- Opening a workspace never silently runs its listed external servers. The
+  webview displays their executable names and arguments and requires explicit
+  approval for that start. Declining starts only `ryoko-lsp`.
+  Treat the workspace registry as untrusted: argv-only spawning prevents shell
+  interpolation but does **not** make arbitrary executables safe.
 
-`ryoko-lsp` always starts; optional servers that are simply not installed are
+`ryoko-lsp` always starts; optional approved servers that are simply not installed are
 reported through `lsp_start`'s `failed` list and never take the shell down.
 
 ## Routing rules
