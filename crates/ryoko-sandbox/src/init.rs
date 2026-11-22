@@ -235,7 +235,7 @@ impl SandboxPlan {
     /// the detected ecosystem. Only file bytes are read; nothing is executed.
     pub fn fingerprint(&self) -> Result<ImageState, InitError> {
         let mut inputs = BTreeMap::new();
-        for relative in dependency_inputs(&self.context, self.ecosystem) {
+        for relative in dependency_inputs(&self.context, self.ecosystem)? {
             let path = self.context.join(&relative);
             // Stream large manifests instead of hashing only their length:
             // two different oversized lockfiles can have the same size.
@@ -536,7 +536,7 @@ WORKDIR /workspace
 const STATE_VERSION: u32 = 1;
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
 /// Bounds the manifest walk for Rust workspaces so a huge tree cannot stall it.
-const MAX_WALK_DEPTH: usize = 6;
+const MAX_WALK_DEPTH: usize = 32;
 const MAX_WALK_ENTRIES: usize = 20_000;
 const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules", "dist", ".ryoko"];
 
@@ -574,7 +574,7 @@ impl Freshness {
 /// The manifests and lockfiles that decide an ecosystem's dependency set.
 /// Symlinks are skipped so the fingerprint never follows a link out of the
 /// repository.
-fn dependency_inputs(root: &Path, ecosystem: Ecosystem) -> Vec<String> {
+fn dependency_inputs(root: &Path, ecosystem: Ecosystem) -> Result<Vec<String>, InitError> {
     let fixed: &[&str] = match ecosystem {
         Ecosystem::Rust => &[],
         Ecosystem::Node => &["package.json", "package-lock.json", "npm-shrinkwrap.json"],
@@ -598,23 +598,24 @@ fn dependency_inputs(root: &Path, ecosystem: Ecosystem) -> Vec<String> {
         let mut stack = vec![(root.to_path_buf(), 0usize)];
         let mut visited = 0usize;
         while let Some((dir, depth)) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
                 visited += 1;
                 if visited > MAX_WALK_ENTRIES {
-                    break;
+                    return Err(InitError::Io(std::io::Error::other(
+                        "dependency scan exceeded the directory entry limit",
+                    )));
                 }
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
+                let file_type = entry.file_type()?;
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if file_type.is_dir() {
-                    if depth < MAX_WALK_DEPTH && !SKIPPED_DIRS.contains(&name.as_ref()) {
-                        stack.push((entry.path(), depth + 1));
+                if file_type.is_dir() && !SKIPPED_DIRS.contains(&name.as_ref()) {
+                    if depth >= MAX_WALK_DEPTH {
+                        return Err(InitError::Io(std::io::Error::other(
+                            "dependency scan exceeded the directory depth limit",
+                        )));
                     }
+                    stack.push((entry.path(), depth + 1));
                 } else if file_type.is_file()
                     && matches!(
                         name.as_ref(),
@@ -629,7 +630,7 @@ fn dependency_inputs(root: &Path, ecosystem: Ecosystem) -> Vec<String> {
     }
     found.sort();
     found.dedup();
-    found
+    Ok(found)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1098,6 +1099,28 @@ console.log("ok");
 
         std::fs::write(plan.state_path().unwrap(), "not json").unwrap();
         assert_eq!(plan.freshness().unwrap(), Freshness::NeverBuilt);
+    }
+
+    #[test]
+    fn nested_manifests_are_tracked_and_scan_limits_fail_closed() {
+        let dir = rust_project();
+        let nested = dir.path().join("crates/a/src/deep/one/two/three/four");
+        std::fs::create_dir_all(&nested).unwrap();
+        let manifest = nested.join("Cargo.toml");
+        std::fs::write(&manifest, "[package]\nname=\"nested\"\n").unwrap();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        plan.write().unwrap();
+        plan.record_build().unwrap();
+        std::fs::write(&manifest, "[package]\nname=\"changed\"\n").unwrap();
+        assert!(matches!(plan.freshness(), Ok(Freshness::Stale { .. })));
+
+        // A deeper tree must error rather than silently become "fresh".
+        let mut deep = nested;
+        for _ in 0..MAX_WALK_DEPTH {
+            deep.push("child");
+        }
+        std::fs::create_dir_all(deep).unwrap();
+        assert!(plan.fingerprint().is_err());
     }
 
     #[test]
