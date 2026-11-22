@@ -146,7 +146,7 @@ jobs:
 
   preview-release:
     name: Publish explicit preview tag as prerelease
-    if: startsWith(github.ref, 'refs/tags/desktop-preview-v')
+    if: github.ref == 'refs/heads/preview/desktop-installers' || startsWith(github.ref, 'refs/tags/desktop-preview-v')
     needs: build
     runs-on: ubuntu-22.04
     permissions:
@@ -163,7 +163,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          find . -type f ! -name 'SHA256SUMS.txt' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           test -s SHA256SUMS.txt
 
       - name: Publish strictly prerelease assets
@@ -180,9 +180,19 @@ jobs:
             echo "::error::Missing platform installers, refusing to publish."
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
+          if [[ "$GITHUB_REF" == refs/tags/desktop-preview-v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+            TAG_FLAGS=(--verify-tag)
+          else
+            # A successful preview-branch build automatically creates a public
+            # GitHub prerelease. Nothing is published if any OS build fails.
+            TAG="desktop-preview-v0.1.0-alpha.${GITHUB_RUN_NUMBER}"
+            TAG_FLAGS=(--target "$GITHUB_SHA")
+          fi
+          gh release create "$TAG" \
+            "${TAG_FLAGS[@]}" \
             --prerelease \
-            --title "Ryoko Preview $GITHUB_REF_NAME" \
+            --latest=false \
+            --title "Ryoko Preview $TAG" \
             --notes "UNSIGNED experimental test builds for Windows x64, Linux x64 and Apple Silicon macOS. These are pre-alpha builds, not production releases. No Windows Authenticode signature or Apple notarization is provided. Test only with non-sensitive projects. Source commit: $GITHUB_SHA." \
             "${INSTALLERS[@]}" dist/SHA256SUMS.txt
