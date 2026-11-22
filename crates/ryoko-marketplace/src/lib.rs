@@ -37,7 +37,7 @@ mod errors;
 mod types;
 
 pub use client::{MarketplaceClient, UpdateInfo};
-pub use download::DownloadConfig;
+pub use download::{DownloadConfig, DownloadResult, DownloadResultWrapper};
 pub use errors::MarketplaceError;
 pub use types::{
     ExtensionManifest, InstallationRecord, MarketplaceEntry, MarketplaceIndex, MarketplaceLock,
