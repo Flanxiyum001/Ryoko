@@ -120,16 +120,22 @@ pub fn working_tree_changes(root: &Path) -> Option<Vec<ChangeEntry>> {
             .take((MAX_STATUS_BYTES + 1) as u64)
             .read_to_end(&mut output)
     });
-    let _ = child.wait();
-    let Some(read) = read else {
-        return None;
+    let read = match read {
+        Some(Ok(read)) => read as usize,
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
     };
-    let Ok(read) = read else {
-        return None;
-    };
-    if read as usize > MAX_STATUS_BYTES {
+    if read > MAX_STATUS_BYTES {
+        // The pipe may be full. Kill before wait or a large status result
+        // can deadlock the UI while Git is still trying to write stdout.
+        let _ = child.kill();
+        let _ = child.wait();
         return Some(Vec::new());
     }
+    let _ = child.wait();
     let text = String::from_utf8_lossy(&output).into_owned();
     Some(parse_porcelain(&text))
 }
