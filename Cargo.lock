@@ -2047,6 +2047,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryoko-tools"
+version = "0.1.0"
+dependencies = [
+ "ignore",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ryoko-vfs"
 version = "0.1.0"
 dependencies = [
