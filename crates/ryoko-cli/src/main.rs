@@ -125,6 +125,9 @@ enum MarketplaceCmds {
         /// Item type: 'extension' or 'skill'
         #[arg(value_enum)]
         r#type: MarketplaceType,
+        /// Print machine-readable registry items for the desktop catalog.
+        #[arg(long)]
+        json: bool,
     },
     /// Search the marketplace.
     Search {
@@ -3911,13 +3914,17 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
     let client = MarketplaceClient::new().map_err(|e| cli_error(e.to_string()))?;
 
     match cmd.command {
-        MarketplaceCmds::List { r#type } => {
+        MarketplaceCmds::List { r#type, json } => {
             let index = client.fetch_index().await?;
             let entries: Vec<_> = match r#type {
                 MarketplaceType::Extension => index.extensions,
                 MarketplaceType::Skill => index.skills,
             };
 
+            if json {
+                println!("{}", serde_json::to_string(&entries)?);
+                return Ok(());
+            }
             println!("Found {} {}s:", entries.len(), r#type);
             for entry in entries {
                 println!(
@@ -4124,6 +4131,27 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
             }
 
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod marketplace_browser_cli_tests {
+    use super::*;
+
+    #[test]
+    fn supports_machine_readable_catalog_for_both_item_kinds() {
+        for item_kind in ["extension", "skill"] {
+            let cli = Cli::try_parse_from(["ryoko", "marketplace", "list", item_kind, "--json"])
+                .expect("marketplace list must accept --json");
+
+            let Commands::Marketplace(args) = cli.command else {
+                panic!("marketplace subcommand expected");
+            };
+            assert!(matches!(
+                args.command,
+                MarketplaceCmds::List { json: true, .. }
+            ));
         }
     }
 }
