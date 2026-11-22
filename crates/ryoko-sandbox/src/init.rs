@@ -237,13 +237,19 @@ impl SandboxPlan {
         let mut inputs = BTreeMap::new();
         for relative in dependency_inputs(&self.context, self.ecosystem) {
             let path = self.context.join(&relative);
-            let digest = match std::fs::metadata(&path) {
-                Ok(metadata) if metadata.len() > MAX_FINGERPRINT_INPUT_BYTES => {
-                    format!("oversized:{}", metadata.len())
+            // Stream large manifests instead of hashing only their length:
+            // two different oversized lockfiles can have the same size.
+            let mut file = std::fs::File::open(&path)?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = std::io::Read::read(&mut file, &mut buffer)?;
+                if read == 0 {
+                    break;
                 }
-                Ok(_) => hex(&Sha256::digest(std::fs::read(&path)?)),
-                Err(error) => return Err(error.into()),
-            };
+                hasher.update(&buffer[..read]);
+            }
+            let digest = hex(&hasher.finalize());
             inputs.insert(relative, digest);
         }
         let mut hasher = Sha256::new();
@@ -529,7 +535,6 @@ WORKDIR /workspace
 
 const STATE_VERSION: u32 = 1;
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
-const MAX_FINGERPRINT_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 /// Bounds the manifest walk for Rust workspaces so a huge tree cannot stall it.
 const MAX_WALK_DEPTH: usize = 6;
 const MAX_WALK_ENTRIES: usize = 20_000;
@@ -1093,6 +1098,27 @@ console.log("ok");
 
         std::fs::write(plan.state_path().unwrap(), "not json").unwrap();
         assert_eq!(plan.freshness().unwrap(), Freshness::NeverBuilt);
+    }
+
+    #[test]
+    fn oversized_lockfile_changes_of_identical_length_are_detected() {
+        let dir = rust_project();
+        let path = dir.path().join("Cargo.lock");
+        let mut contents = vec![b'a'; 16 * 1024 * 1024 + 1];
+        std::fs::write(&path, &contents).unwrap();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        plan.write().unwrap();
+        plan.record_build().unwrap();
+        assert_eq!(plan.freshness().unwrap(), Freshness::Fresh);
+
+        contents[0] = b'b';
+        std::fs::write(path, &contents).unwrap();
+        assert_eq!(
+            plan.freshness().unwrap(),
+            Freshness::Stale {
+                changed: vec!["Cargo.lock".to_owned()]
+            }
+        );
     }
 
     #[cfg(unix)]
