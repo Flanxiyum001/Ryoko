@@ -670,11 +670,17 @@ if (!grandchild) {
   process.exit(1);
 }
 await stopServer(child);
+// The kill is a promise the kernel keeps on its own schedule, so a single probe
+// right after stopServer races signal delivery and reaping. Bounded polling
+// still fails the test if the grandchild really survived.
 let alive = true;
-try {
-  process.kill(grandchild, 0);
-} catch {
-  alive = false;
+for (let attempt = 0; attempt < 80 && alive; attempt += 1) {
+  try {
+    process.kill(grandchild, 0);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } catch {
+    alive = false;
+  }
 }
 if (alive) {
   console.error("the grandchild process survived the process-group kill");
