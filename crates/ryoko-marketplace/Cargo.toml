@@ -1,0 +1,21 @@
+[package]
+name = "ryoko-marketplace"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Marketplace for Ryoko extensions and skills"
+
+[dependencies]
+ryoko-core = { path = "../ryoko-core" }
+ryoko-scripting = { path = "../ryoko-scripting" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync"] }
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = { version = "0.10", features = ["std"] }
+url = { version = "2", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+tempfile = { workspace = true }

@@ -24,6 +24,7 @@ pub mod model;
 pub mod orchestrator;
 pub mod project_memory;
 pub mod spec_link;
+pub mod summary;
 pub mod team;
 pub mod validation;
 pub mod vision;
@@ -63,6 +64,10 @@ pub use orchestrator::{
     TaskFailure, TaskSuccess,
 };
 pub use project_memory::{MemoryEntry, MemoryKind, ProjectMemory};
+pub use summary::{
+    ChangeImpact, ChangeType, CodeReviewSummary, FileSummary, ImpactLevel, analyze_change_impact,
+    generate_review_summary, render_markdown_summary,
+};
 pub use team::{DynamicPlan, GoalSignals, VERIFICATION_METADATA, dynamic_plan};
 pub use validation::{AllowAllValidator, ChangeValidator, StagedChanges, ValidationReport};
 pub use workspace::{InMemoryWorkspaceProvider, PullRequest, WorkspaceLease, WorkspaceProvider};

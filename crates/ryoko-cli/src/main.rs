@@ -17,14 +17,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ignore::WalkBuilder;
 use ryoko_core::{
-    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, EventSink,
-    FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig, OrchestratorEvent,
-    ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory,
-    SourceFile, StagedChanges, Task, TaskContext, WorkspaceIndex, extract_files, goal_terms,
+    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeType, ChangeValidator,
+    CodeReviewSummary, EventSink, FileContext, FileSummary, Language, ModelAgent, Orchestrator,
+    OrchestratorConfig, OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange,
+    RETRY_FEEDBACK_METADATA, SharedMemory, SourceFile, StagedChanges, Task, TaskContext,
+    WorkspaceIndex, extract_files, goal_terms, render_markdown_summary,
     spec_link::SpecIndex,
     team::{application_plan, dynamic_plan, standard_team},
     validation::ValidationReport,
 };
+use ryoko_marketplace::{InstallationRecord, MarketplaceClient, MarketplaceLock, MarketplaceType};
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
     ProviderProfile, UsageLedger, discover_local_models,
@@ -86,6 +88,10 @@ enum Commands {
     Sandbox(SandboxArgs),
     /// Review published worktrees and accept, reject, or send feedback.
     Review(ReviewArgs),
+    /// Generate a structured summary of a published task's changes.
+    Summarize(SummarizeArgs),
+    /// Marketplace operations for extensions and skills.
+    Marketplace(MarketplaceArgs),
     /// Operator-controlled MCP stdio discovery and tool invocation.
     Mcp(McpArgs),
     /// Inspect, scaffold and toggle external MCP connectors.
@@ -102,6 +108,49 @@ enum Commands {
     Spec(SpecArgs),
     /// Sign and verify merge provenance attestations stored in Git notes.
     Attest(AttestArgs),
+}
+
+#[derive(Debug, Args)]
+struct MarketplaceArgs {
+    #[command(subcommand)]
+    command: MarketplaceCmds,
+}
+
+#[derive(Debug, Subcommand)]
+enum MarketplaceCmds {
+    /// List available extensions or skills.
+    List {
+        /// Item type: 'extension' or 'skill'
+        #[arg(value_enum)]
+        r#type: MarketplaceType,
+    },
+    /// Search the marketplace.
+    Search {
+        /// Search term
+        query: String,
+        /// Item type: 'extension' or 'skill'
+        #[arg(value_enum)]
+        r#type: MarketplaceType,
+    },
+    /// Install an extension or skill.
+    Install {
+        /// Item ID to install
+        id: String,
+    },
+    /// Check for updates to installed items.
+    Update {
+        /// Update all installed items
+        #[arg(long)]
+        all: bool,
+        /// Specific item to update
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Show information about an item.
+    Info {
+        /// Item ID to look up
+        id: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -663,6 +712,22 @@ struct ReviewArgs {
     isolation: IsolationArgs,
 }
 
+#[derive(Debug, Args)]
+struct SummarizeArgs {
+    /// Published task to summarize.
+    #[arg(long)]
+    task: Uuid,
+    /// Project checkout that owns the worktrees.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Print as JSON instead of markdown.
+    #[arg(long)]
+    json: bool,
+    /// Include detailed diff in the output.
+    #[arg(long)]
+    diff: bool,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SandboxBackendArg {
     Auto,
@@ -862,6 +927,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Index(args) => index_workspace(args).await,
         Commands::Sandbox(args) => sandbox(args).await,
         Commands::Review(args) => review(args).await,
+        Commands::Summarize(args) => summarize(args).await,
         Commands::Mcp(args) => mcp_command(args).await,
         Commands::Connectors(args) => connectors_command(args).await,
         Commands::Plugin(args) => plugin_command(args).await,
@@ -870,6 +936,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Sessions(args) => sessions(args).await,
         Commands::Spec(args) => spec(args).await,
         Commands::Attest(args) => attest(args).await,
+        Commands::Marketplace(args) => marketplace_command(args).await,
     }
 }
 
@@ -1492,6 +1559,65 @@ async fn sessions(args: SessionsArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    Ok(())
+}
+
+async fn summarize(args: SummarizeArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+
+    // Check if the task exists by looking at the worktrees
+    let manager = GitWorktreeManager::new(&root);
+    let records = manager.open_sessions()?;
+
+    let task_record = records
+        .iter()
+        .find(|r| r.session.id == args.task)
+        .ok_or_else(|| cli_error(format!("task {} not found in worktree sessions", args.task)))?;
+
+    // Get the branch and generate summary
+    let branch = &task_record.session.branch_name;
+    let files = &task_record.files;
+    let summary_text = &task_record.summary;
+
+    // Build a basic summary from the worktree record
+    let summary = CodeReviewSummary {
+        task_id: args.task.to_string(),
+        task_description: summary_text.clone().unwrap_or_default(),
+        role: "developer".to_string(),
+        agent: "ai-agent".to_string(),
+        files: files
+            .iter()
+            .map(|path| FileSummary {
+                path: path.clone(),
+                change_type: ChangeType::from_path(path),
+                lines_added: 0,
+                lines_removed: 0,
+                is_test: ChangeType::from_path(path) == ChangeType::Test,
+                description: None,
+            })
+            .collect(),
+        total_lines_added: 0,
+        total_lines_removed: 0,
+        impact_analysis: Vec::new(),
+        changelog: files.iter().map(|f| format!("- {}", f)).collect(),
+        validated: task_record.state == WorktreeState::Published,
+        branch: Some(branch.clone()),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        println!("{}", render_markdown_summary(&summary));
+    }
+
+    if args.diff {
+        // Show a simple diff preview
+        eprintln!("\n## Diff Preview");
+        for file in files {
+            eprintln!("--- {}", file);
+        }
+    }
+
     Ok(())
 }
 
@@ -3291,6 +3417,7 @@ fn cli_error(message: impl Into<String>) -> Box<dyn Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -3726,5 +3853,166 @@ mod tests {
         assert_eq!(verified.approvers[0].name, "Pourush Nair");
         assert_eq!(verified.approvers[0].email, "pourushnair6@gmail.com");
         assert_eq!(verified.files, vec!["feature.rs".to_owned()]);
+    }
+}
+
+async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>> {
+    let client = MarketplaceClient::new().map_err(|e| cli_error(e.to_string()))?;
+
+    match cmd.command {
+        MarketplaceCmds::List { r#type } => {
+            let index = client.fetch_index().await?;
+            let entries: Vec<_> = match r#type {
+                MarketplaceType::Extension => index.extensions,
+                MarketplaceType::Skill => index.skills,
+            };
+
+            println!("Found {} {}s:", entries.len(), r#type);
+            for entry in entries {
+                println!(
+                    "  {} v{} - {} ({})\n    {}",
+                    entry.name, entry.version, entry.id, r#type, entry.description
+                );
+                if let Some(homepage) = &entry.homepage {
+                    println!("    Homepage: {}", homepage);
+                }
+            }
+            Ok(())
+        }
+
+        MarketplaceCmds::Search { query, r#type } => {
+            let entries = match r#type {
+                MarketplaceType::Extension => client.search_extensions(&query).await?,
+                MarketplaceType::Skill => client.search_skills(&query).await?,
+            };
+
+            if entries.is_empty() {
+                println!("No {}s found matching '{}'", r#type, query);
+                return Ok(());
+            }
+
+            println!("Found {} matches for '{}':\n", entries.len(), query);
+            for entry in entries {
+                println!(
+                    "  {} v{} - {}\n    {}",
+                    entry.name, entry.version, entry.id, entry.description
+                );
+            }
+            Ok(())
+        }
+
+        MarketplaceCmds::Install { id } => {
+            eprintln!("Installing {}...", id);
+            let entry = client
+                .find_item(&id)
+                .await?
+                .ok_or_else(|| cli_error(format!("item {} not found", id)))?;
+
+            let result = client
+                .install_extension(&id)
+                .await
+                .map_err(|e| cli_error(e.to_string()))?;
+
+            // Load lock file
+            let mut lock = MarketplaceLock::load().map_err(|e| cli_error(e.to_string()))?;
+            lock.installed.push(InstallationRecord {
+                id: id.clone(),
+                kind: entry.kind,
+                version: entry.version,
+                installed_at: chrono::Utc::now(),
+                source_url: entry.asset_url,
+                install_path: result.path.to_string_lossy().to_string(),
+            });
+
+            // Save lock file
+            lock.save().map_err(|e| cli_error(e.to_string()))?;
+
+            println!("✅ Installed {} to {}", id, result.path.display());
+            eprintln!("   Type: {}", entry.kind);
+            eprintln!("   SHA-256: {}", result.checksum);
+
+            Ok(())
+        }
+
+        MarketplaceCmds::Update { all, id } => {
+            let lock = MarketplaceLock::load().map_err(cli_error)?;
+
+            if all {
+                let updates = client.check_for_updates(&lock).await?;
+                if updates.is_empty() {
+                    println!("All items are up to date!");
+                    return Ok(());
+                }
+
+                println!("Found {} updates available:", updates.len());
+                for update in &updates {
+                    println!(
+                        "  {} -> {} {} ({})",
+                        update.current_version,
+                        update.latest_version,
+                        update.entry.name,
+                        update.entry.id
+                    );
+                }
+
+                for update in updates {
+                    eprintln!("\nUpdating {}...", update.entry.id);
+                    let result = client
+                        .install_extension(&update.entry.id)
+                        .await
+                        .map_err(cli_error)?;
+                    println!("✅ Updated to {}", result.path.display());
+                }
+            } else if let Some(id) = id {
+                let _entry = client
+                    .find_item(&id)
+                    .await
+                    .map_err(|e| cli_error(e.to_string()))?
+                    .ok_or_else(|| cli_error(format!("{} not found", id)))?;
+                let result = client
+                    .install_extension(&id)
+                    .await
+                    .map_err(|e| cli_error(e.to_string()))?;
+                println!("✅ Updated {} to {}", id, result.path.display());
+            } else {
+                return Err(cli_error("--id is required when not using --all"));
+            }
+
+            Ok(())
+        }
+
+        MarketplaceCmds::Info { id } => {
+            let entry = client
+                .find_item(&id)
+                .await
+                .map_err(|e| cli_error(e.to_string()))?
+                .ok_or_else(|| cli_error(format!("{} not found in marketplace", id)))?;
+
+            println!("Name: {}", entry.name);
+            println!("ID: {}", entry.id);
+            println!("Version: {}", entry.version);
+            println!("Type: {}", entry.kind);
+            println!("Author: {}", entry.author);
+            println!("Description: {}", entry.description);
+
+            if let Some(homepage) = &entry.homepage {
+                println!("Homepage: {}", homepage);
+            }
+            if let Some(repo) = &entry.repository {
+                println!("Repository: {}", repo);
+            }
+            if let Some(license) = &entry.license {
+                println!("License: {}", license);
+            }
+
+            println!("\nTags: {}", entry.tags.join(", "));
+            println!("Downloads: {}", entry.downloads);
+
+            if !entry.compatible_with.is_empty() {
+                println!("Compatible with: {}", entry.compatible_with.join(", "));
+            }
+
+            Ok(())
+        }
     }
 }
