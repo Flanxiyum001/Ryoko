@@ -129,11 +129,17 @@ fn valid_artifact_id(id: &str) -> bool {
         || id.starts_with('.')
         || id.ends_with('.')
         || id.contains("..")
-        || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
         return false;
     }
-    let stem = id.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let stem = id
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
     if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
         return false;
     }
@@ -153,7 +159,19 @@ mod safe_id_tests {
 
     #[test]
     fn rejects_unsafe_registry_artifact_ids() {
-        for id in ["", ".", "..", "../secrets", "a/b", "a\\b", "CON", "nul", "LPT1", "a..b", ".hidden"] {
+        for id in [
+            "",
+            ".",
+            "..",
+            "../secrets",
+            "a/b",
+            "a\\b",
+            "CON",
+            "nul",
+            "LPT1",
+            "a..b",
+            ".hidden",
+        ] {
             assert!(!valid_artifact_id(id), "unsafe ID accepted: {id:?}");
         }
         for id in ["core-utils", "a_b", "vendor.tool", "skill42"] {
