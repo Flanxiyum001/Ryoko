@@ -45,6 +45,28 @@ it for untrusted code. The build itself needs network access; validation still
 uses `--network=none` and `--pull=never`. Mixed-language repositories use one
 detected ecosystem (Rust, then Node, then Python) in the generated image.
 
+### Rebuilding when dependencies change
+
+A successful `ryoko sandbox init` records a fingerprint next to the Dockerfile
+(`.ryoko/sandbox/Dockerfile.state.json`). It is a SHA-256 over the image tag,
+the generated Dockerfile and the dependency inputs of the detected ecosystem:
+every `Cargo.toml`, `Cargo.lock` and `rust-toolchain(.toml)` in the workspace
+(bounded walk, skipping `.git`, `target`, `node_modules`, `dist` and `.ryoko`);
+`package.json`, `package-lock.json` and `npm-shrinkwrap.json`; or
+`pyproject.toml`, `poetry.lock`, `uv.lock`, `requirements.txt`, `setup.cfg`
+and `setup.py`. Only file bytes are read and symlinks are never followed.
+
+- `ryoko sandbox status [--json]` reports the runtime (Docker, then Podman;
+  never the host), whether the image is in the local store, and which inputs
+  changed since the last build. Nothing is pulled or built.
+- `ryoko sandbox init --if-stale` skips the build when the image is present and
+  the fingerprint matches, and rebuilds otherwise.
+
+The fingerprint is a staleness hint, not an attestation: it does not prove the
+image in the store was built from these inputs, and a failed build never
+records one. Rebuilds are explicit; nothing watches the repository in the
+background.
+
 For reproducibility, pin the exact image digest and project lockfiles. Absent
 dependencies make the check fail; the pre-flight runner never enables network
 access to fetch them.
