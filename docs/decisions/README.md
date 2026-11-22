@@ -19,6 +19,7 @@ accepted. An ADR is superseded, not edited, when the decision changes.
 | 012 | Human approval for privileged operations | Policy-only automation | User control; interruption cost |
 | 013 | Durable event journal | In-memory broadcast only | Recovery and replay; storage and retention work |
 | 014 | Versioned plugin API before a marketplace | Ship a marketplace early | Stability; slower ecosystem growth |
+| 015 | Desktop LSP multiplexer routes per method, not per process | One multiplexer server; Monaco native providers only | One provider per language and fan-out sync; small routing layer to keep in sync with LSP |
 
 ## Format for new ADRs
 
@@ -41,3 +42,4 @@ Date: YYYY-MM-DD
 - Container versus VM default for project execution.
 - Memory scoping across workspaces.
 - Whether the CLI and desktop share one storage schema or separate databases.
+- Whether the desktop workbench replaces the CLI-driven review flow over time.

@@ -7,7 +7,21 @@ import '@xterm/xterm/css/xterm.css';
 import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
-import { LspClient, type LspState } from './lsp';
+import { LspClient, type LspState, type LspServerStatus } from './lsp';
+import { registerMonacoCapabilities } from './lsp_bridge';
+import { buildTree, changeKind, filterTreePaths } from './tree';
+import { mountSearchPanel } from './search_view';
+import {
+  renderChanges,
+  type ChangesSnapshot,
+} from './changes_view';
+import { mountSettingsDialog } from './settings_view';
+import { InlineEditController } from './inline_edit_view';
+import {
+  chordForEvent,
+  loadOverrides,
+  resolveKeybindings,
+} from './keybindings';
 import { mountConnectors } from './connectors_panel';
 import { mountGithubQueue } from './github_queue';
 import {
@@ -192,11 +206,17 @@ const runCancel = element<HTMLButtonElement>('runCancel');
 const runState = element('runState');
 const runLog = element('runLog');
 const lspStatus = element('lspStatus');
+const lspPills = element('lspPills');
+const changesSummary = element('changesSummary');
+const changesList = element('changesList');
 const editorStatus = element('editorStatus');
 const cursorPos = element('cursorPos');
 const languageMode = element('languageMode');
 const bottomPanel = element('bottomPanel');
 const terminalTab = element<HTMLButtonElement>('terminalTab');
+const searchTab = element<HTMLButtonElement>('searchTab');
+const searchPanel = element('searchPanel');
+const searchInput = element<HTMLInputElement>('searchInput');
 const debugTab = element<HTMLButtonElement>('debugTab');
 const bottomClose = element<HTMLButtonElement>('bottomClose');
 const bottomStatus = element('bottomStatus');
@@ -219,6 +239,14 @@ const debugStepOut = element<HTMLButtonElement>('debugStepOut');
 const debugBreakpoint = element<HTMLButtonElement>('debugBreakpoint');
 const debugStatus = element('debugStatus');
 const debugLog = element('debugLog');
+const inlineEditRun = element<HTMLButtonElement>('inlineEditRun');
+const inlineEditCancel = element<HTMLButtonElement>('inlineEditCancel');
+const inlineEditAccept = element<HTMLButtonElement>('inlineEditAccept');
+const inlineEditInput = element<HTMLInputElement>('inlineEditInput');
+const searchReplace = element<HTMLInputElement>('searchReplace');
+const changesDetails = element<HTMLDetailsElement>('changesDetails');
+const changesRefresh = element<HTMLButtonElement>('changesRefresh');
+const openSettings = element<HTMLButtonElement>('openSettings');
 
 const state: {
   root: string;
@@ -253,6 +281,9 @@ const debugBreakpoints = new Map<string, Set<number>>();
 const openFiles = new Map<string, OpenFile>();
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
 const changeTimers = new Map<string, number>();
+const expandedDirectories = new Set<string>();
+const workbenchChanges = new Map<string, ReturnType<typeof changeKind>>();
+const keybindings = resolveKeybindings(loadOverrides(localStorage));
 
 const editor = monaco.editor.create(editorHost, {
   theme: 'vs-dark',
@@ -388,23 +419,38 @@ const diffEditor = monaco.editor.createDiffEditor(diffEditorHost, {
 });
 
 const lsp = new LspClient({
-  onDiagnostics: (params) => applyDiagnostics(params),
+  onDiagnostics: (params, server) => applyDiagnostics(params, server),
   onState: (connection, detail) => setLspState(connection, detail),
+  onServers: (servers) => renderServerPills(servers),
+});
+
+const inlineEdit = new InlineEditController({
+  editor,
+  currentFile: () => (state.current ? { path: state.current.path, model: state.current.model } : null),
+  languageId: () => state.current?.languageId ?? 'plaintext',
+  setStatus,
+  onSaveAfterApply: saveCurrent,
 });
 
 function setStatus(message: string): void {
   editorStatus.textContent = message;
 }
 
-function showBottom(panel: 'terminal' | 'debug'): void {
+function showBottom(panel: 'terminal' | 'debug' | 'search'): void {
   bottomPanel.classList.remove('hidden');
   const terminal = panel === 'terminal';
+  const search = panel === 'search';
   terminalTab.classList.toggle('active', terminal);
-  debugTab.classList.toggle('active', !terminal);
+  searchTab.classList.toggle('active', search);
+  debugTab.classList.toggle('active', !terminal && !search);
   terminalPanel.classList.toggle('hidden', !terminal);
-  debugPanel.classList.toggle('hidden', terminal);
+  searchPanel.classList.toggle('hidden', !search);
+  debugPanel.classList.toggle('hidden', terminal || search);
   if (terminal) {
     window.requestAnimationFrame(() => fitTerminal());
+  }
+  if (search) {
+    searchInput.focus();
   }
 }
 
@@ -620,6 +666,17 @@ function setLspState(connection: LspState, detail?: string): void {
   if (detail) setStatus(`ryoko-lsp: ${detail}`);
 }
 
+function renderServerPills(servers: LspServerStatus[]): void {
+  lspPills.replaceChildren();
+  for (const server of servers) {
+    if (server.id === 'ryoko-lsp') continue;
+    const pill = document.createElement('span');
+    pill.className = 'status-pill ' + server.state;
+    pill.textContent = `${server.id} ${server.state}`;
+    lspPills.append(pill);
+  }
+}
+
 function markDirty(file: OpenFile): void {
   file.dirty = file.model.getValue() !== file.savedText;
   if (state.current === file) {
@@ -630,7 +687,7 @@ function markDirty(file: OpenFile): void {
 
 function renderFiles(): void {
   const query = fileFilter.value.trim().toLowerCase();
-  const visible = state.files.filter((path) => path.toLowerCase().includes(query));
+  const visible = filterTreePaths(state.files, query);
   fileCount.textContent = `${state.files.length} files`;
   fileList.replaceChildren();
   if (visible.length === 0) {
@@ -640,19 +697,62 @@ function renderFiles(): void {
     fileList.append(hint);
     return;
   }
+  const nodes = buildTree(visible, { expanded: expandedDirectories, changes: workbenchChanges });
   const fragment = document.createDocumentFragment();
-  for (const path of visible.slice(0, 1500)) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'file-link' + (state.current?.path === path ? ' active' : '');
-    button.textContent = path;
-    button.title = path;
-    button.addEventListener('click', () => {
-      void openFile(path);
-    });
-    fragment.append(button);
+  for (const node of nodes) {
+    if (node.type === 'dir') {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'tree-dir';
+      button.style.paddingLeft = `${8 + node.depth * 14}px`;
+      button.textContent = `${expandedDirectories.has(node.path) ? '▾' : '▸'} ${node.name}`;
+      button.title = node.path;
+      button.addEventListener('click', () => {
+        if (expandedDirectories.has(node.path)) expandedDirectories.delete(node.path);
+        else expandedDirectories.add(node.path);
+        renderFiles();
+      });
+      fragment.append(button);
+    } else {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'file-link tree-file'
+        + (state.current?.path === node.path ? ' active' : '')
+        + (node.change ? ` change-${node.change}` : '');
+      button.style.paddingLeft = `${8 + node.depth * 14}px`;
+      button.textContent = node.change ? `${node.name} · ${node.change.charAt(0).toUpperCase()}` : node.name;
+      button.title = node.change ? `${node.path} (${node.change})` : node.path;
+      button.addEventListener('click', () => {
+        void openFile(node.path);
+      });
+      fragment.append(button);
+    }
   }
   fileList.append(fragment);
+}
+
+async function refreshWorkbenchChanges(): Promise<void> {
+  if (!state.root) return;
+  try {
+    const snapshot = await invoke<ChangesSnapshot>('git_changes');
+    workbenchChanges.clear();
+    if (snapshot.isRepository) {
+      for (const entry of snapshot.entries) {
+        workbenchChanges.set(entry.path, changeKind(entry.kind));
+      }
+    }
+    renderFiles();
+    changesSummary.textContent = snapshot.isRepository
+      ? `${snapshot.entries.length} change(s)`
+      : 'not a repository';
+    renderChanges(snapshot.entries, snapshot.isRepository, changesList, {
+      openDiff: openPathDiff,
+      setStatus,
+    });
+  } catch (error) {
+    changesSummary.textContent = 'unavailable';
+    setStatus(`Change scan failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function revealEditor(): void {
@@ -695,6 +795,10 @@ async function openFolder(): Promise<void> {
     for (const file of openFiles.values()) file.model.dispose();
     openFiles.clear();
     diagnostics.clear();
+    workbenchChanges.clear();
+    expandedDirectories.clear();
+    changesSummary.textContent = 'no folder';
+    changesList.replaceChildren();
     state.current = null;
     closeDiffReview();
     missionLogs = [];
@@ -736,6 +840,8 @@ async function openFolder(): Promise<void> {
     setStatus('Loading files…');
     await loadFiles();
     setStatus(`${state.files.length} files from ${info.name}`);
+    lsp.setWorkspaceRoot(info.root);
+    void refreshWorkbenchChanges();
     void refreshAgentSessions();
     void refreshMissionLogs();
     void refreshHunks();
@@ -893,6 +999,7 @@ async function stageSelectedHunks(): Promise<void> {
   const ids = chosenHunks();
   try {
     await invoke('stage_review_hunks', { ids, expectedPatch: gitHunks.patch });
+    void refreshWorkbenchChanges();
     setStatus('Staged ' + ids.length + ' selected text hunk(s) in Git index. No commit or merge was made.');
     await refreshHunks();
   } catch (error) {
@@ -910,6 +1017,39 @@ function clearDiffEditor(): void {
   diffModifiedModel?.dispose();
   diffOriginalModel = null;
   diffModifiedModel = null;
+}
+
+async function openPathDiff(path: string): Promise<void> {
+  if (!state.root) return;
+  if ([...openFiles.values()].some((file) => file.dirty)) {
+    setStatus('Save or discard unsaved Monaco edits before reviewing changes.');
+    return;
+  }
+  try {
+    const review = await invoke<ReviewFileContent>('read_review_file', { path });
+    clearDiffEditor();
+    const languageId = languageForPath(path);
+    const suffix = encodeURIComponent(path).replaceAll('%', '_');
+    diffOriginalModel = monaco.editor.createModel(
+      review.original,
+      languageId,
+      monaco.Uri.parse(`ryoko-review://original/${suffix}`),
+    );
+    diffModifiedModel = monaco.editor.createModel(
+      review.modified,
+      languageId,
+      monaco.Uri.parse(`ryoko-review://modified/${suffix}`),
+    );
+    diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
+    diffReviewPath.textContent = `${path} - working tree`;
+    diffReview.classList.remove('hidden');
+    editorHost.classList.add('hidden');
+    emptyEditor.classList.add('hidden');
+    diffEditor.layout();
+    setStatus(`Reviewing ${path} against HEAD`);
+  } catch (error) {
+    setStatus('Diff review failed: ' + (error instanceof Error ? error.message : String(error)));
+  }
 }
 
 function closeDiffReview(): void {
@@ -1049,9 +1189,11 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
   try {
     if (action === 'accept') {
       await invoke('stage_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      void refreshWorkbenchChanges();
       setStatus(`Accepted hunk #${hunk.id} into the Git index. No commit or merge was made.`);
     } else {
       await invoke('reject_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      void refreshWorkbenchChanges();
       setStatus(`Rejected hunk #${hunk.id}; only those working-file edits were reverted.`);
     }
     await refreshHunks();
@@ -1519,6 +1661,7 @@ async function saveCurrent(): Promise<void> {
     lsp.change(file.uri, file.version, content);
     renderFiles();
     setStatus(`Saved ${file.path}`);
+    void refreshWorkbenchChanges();
     void refreshHunks();
   } catch (error) {
     setStatus(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1538,11 +1681,11 @@ function toMarker(diagnostic: LspDiagnostic): monaco.editor.IMarkerData {
   };
 }
 
-function applyDiagnostics(params: PublishDiagnosticsParams): void {
-  diagnostics.set(params.uri, params);
+function applyDiagnostics(params: PublishDiagnosticsParams, server: string): void {
+  diagnostics.set(`${server}\u0000${params.uri}`, params);
   const model = monaco.editor.getModel(monaco.Uri.parse(params.uri));
   if (model) {
-    monaco.editor.setModelMarkers(model, 'ryoko-lsp', params.diagnostics.map(toMarker));
+    monaco.editor.setModelMarkers(model, `lsp-${server}`, params.diagnostics.map(toMarker));
   }
   renderProblems();
 }
@@ -1707,8 +1850,57 @@ missionLogSelect.addEventListener('change', () => {
 toggleTerminal.addEventListener('click', () => showBottom('terminal'));
 toggleDebug.addEventListener('click', () => showBottom('debug'));
 terminalTab.addEventListener('click', () => showBottom('terminal'));
+searchTab.addEventListener('click', () => showBottom('search'));
 debugTab.addEventListener('click', () => showBottom('debug'));
 bottomClose.addEventListener('click', () => bottomPanel.classList.add('hidden'));
+
+function dispatchBinding(action: string): void {
+  switch (action) {
+    case 'workbench.search':
+      showBottom('search');
+      break;
+    case 'workbench.replace':
+      showBottom('search');
+      searchReplace.focus();
+      break;
+    case 'workbench.changes':
+      changesDetails.open = !changesDetails.open;
+      break;
+    case 'workbench.settings':
+      openSettings.click();
+      break;
+    case 'editor.inlineEdit':
+      inlineEdit.open();
+      break;
+    default:
+      break;
+  }
+}
+
+window.addEventListener('keydown', (event) => {
+  if (event.repeat) return;
+  const action = keybindings.byChord.get(chordForEvent(event));
+  if (!action || action === 'editor.save') return;
+  event.preventDefault();
+  dispatchBinding(action);
+});
+
+inlineEditRun.addEventListener('click', () => void inlineEdit.submit());
+inlineEditCancel.addEventListener('click', () => inlineEdit.reject());
+inlineEditAccept.addEventListener('click', () => inlineEdit.accept());
+inlineEditInput.addEventListener('keydown', (event) => {
+  event.stopPropagation();
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    void inlineEdit.submit();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    inlineEdit.reject();
+  }
+});
+changesRefresh.addEventListener('click', () => {
+  void refreshWorkbenchChanges();
+});
 terminalStart.addEventListener('click', () => {
   void startTerminal();
 });
@@ -1772,3 +1964,10 @@ setLspState('offline');
 renderMissionOptions();
 mountGithubQueue(setStatus);
 mountConnectors(setStatus);
+mountSearchPanel({ openFile, setStatus });
+mountSettingsDialog({ setStatus });
+registerMonacoCapabilities(
+  monaco,
+  lsp,
+  ['rust', 'typescript', 'javascript', 'python', 'go', 'c', 'cpp', 'java', 'css', 'shell'],
+);
