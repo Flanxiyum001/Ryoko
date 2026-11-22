@@ -45,25 +45,6 @@ export interface LspHandlers {
 const INITIALIZE_TIMEOUT_MS = 8_000;
 const CAPABILITY_TIMEOUT_MS = 3_000;
 
-function withTimeout<T>(promise: Promise<T>, milliseconds: number, fallback?: T): Promise<T | null> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (fallback !== undefined) resolve(fallback);
-      else reject(new Error(`language server did not answer within ${milliseconds}ms`));
-    }, milliseconds);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
 /**
  * Multi-server JSON-RPC client. The Rust shell owns process lifecycle and
  * framing; this class multiplexes: document notifications fan out to every
@@ -74,7 +55,7 @@ export class LspClient {
   private nextId = 1;
   private registry: LspServerDescriptor[] = [];
   private serverStates = new Map<string, LspState>();
-  private pending = new Map<string, Map<number, (message: JsonRpcMessage) => void>>();
+  private pending = new Map<string, Map<number, (message: JsonRpcMessage | null) => void>>();
   private opened = new Map<string, { languageId: string; servers: Set<string> }>();
   private unlisteners: UnlistenFn[] = [];
   private active = false;
@@ -112,21 +93,21 @@ export class LspClient {
       }),
       await listen<{ server: string }>('lsp-exit', (event) => {
         const server = event.payload.server;
-        this.serverStates.delete(server);
+        this.pending.get(server)?.forEach((resolve) => resolve(null));
         this.pending.delete(server);
+        this.setState(server, 'stopped');
         for (const opened of this.opened.values()) opened.servers.delete(server);
-        this.emitServers();
       }),
     ];
     try {
       const reply = await invoke<LspRegistryReply>('lsp_registry');
       this.registry = reply.registry.servers;
       const allowExternalServers = reply.registry.servers.length === 0 || window.confirm(
-        'This workspace requests permission to launch these external language servers:\\n\\n'
+        'This workspace requests permission to launch these external language servers:\n\n'
           + reply.registry.servers.map((server) =>
             `${server.id}: ${server.command} ${server.args.join(' ')}`
-          ).join('\\n')
-          + '\\n\\nOnly approve if you trust this workspace and these commands.',
+          ).join('\n')
+          + '\n\nOnly approve if you trust this workspace and these commands.',
       );
       const report = await invoke<LspStartReport>('lsp_start', { root, allowExternalServers });
       this.setState(RYOKO_LSP_ID, 'starting');
@@ -148,8 +129,7 @@ export class LspClient {
   }
 
   private async initializeServer(id: string, root: string): Promise<string | undefined> {
-    const response = await withTimeout(
-      this.requestTo(id, 'initialize', {
+    const response = await this.requestTo(id, 'initialize', {
         processId: null,
         rootUri: fileUri(root),
         capabilities: {
@@ -165,9 +145,7 @@ export class LspClient {
         workspaceFolders: [
           { uri: fileUri(root), name: root.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace' },
         ],
-      }),
-      INITIALIZE_TIMEOUT_MS,
-    );
+      }, INITIALIZE_TIMEOUT_MS);
     if (!response || response.error) {
       this.setState(id, 'error');
       return `${id} did not answer initialize${response?.error?.message ? `: ${response.error.message}` : ''}`;
@@ -182,6 +160,9 @@ export class LspClient {
     if (!this.active && this.unlisteners.length === 0) return;
     this.active = false;
     this.opened.clear();
+    for (const requests of this.pending.values()) {
+      requests.forEach((resolve) => resolve(null));
+    }
     this.pending.clear();
     for (const unlisten of this.unlisteners) unlisten();
     this.unlisteners = [];
@@ -199,6 +180,7 @@ export class LspClient {
   ensureOpen(uri: string, languageId: string, version: number, text: string): void {
     if (!this.active) return;
     const servers = runningServers(this.serverStates);
+    if (this.opened.has(uri)) return;
     this.opened.set(uri, { languageId, servers: new Set(servers) });
     for (const server of servers) {
       this.notifyTo(server, 'textDocument/didOpen', {
@@ -246,15 +228,28 @@ export class LspClient {
     const owner = this.registry.find((server) => server.languages.includes(language))?.id
       ?? RYOKO_LSP_ID;
     if (!runningServers(this.serverStates).includes(owner)) return null;
-    return withTimeout(this.requestTo(owner, method, params), CAPABILITY_TIMEOUT_MS, null);
+    return this.requestTo(owner, method, params, CAPABILITY_TIMEOUT_MS);
   }
 
-  private requestTo(server: string, method: string, params: unknown): Promise<JsonRpcMessage | null> {
+  private requestTo(
+    server: string,
+    method: string,
+    params: unknown,
+    timeoutMs: number,
+  ): Promise<JsonRpcMessage | null> {
     const id = this.nextId++;
-    const byServer = this.pending.get(server) ?? new Map<number, (message: JsonRpcMessage) => void>();
+    const byServer = this.pending.get(server)
+      ?? new Map<number, (message: JsonRpcMessage | null) => void>();
     this.pending.set(server, byServer);
     return new Promise((resolve) => {
-      byServer.set(id, resolve);
+      let timer: number;
+      const finish = (answer: JsonRpcMessage | null): void => {
+        window.clearTimeout(timer);
+        byServer.delete(id);
+        resolve(answer);
+      };
+      byServer.set(id, finish);
+      timer = window.setTimeout(() => finish(null), timeoutMs);
       this.post(server, { jsonrpc: '2.0', id, method, params });
     });
   }
