@@ -16,13 +16,13 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let client = MarketplaceClient::new();
+//!     let client = MarketplaceClient::new()?;
 //!
 //!     // List available extensions
 //!     let extensions = client.list_extensions().await?;
 //!
 //!     // Search for skills
-//!     let skills = client.search("security").await?;
+//!     let skills = client.search_skills("security").await?;
 //!
 //!     // Install an extension
 //!     client.install_extension("github-fetch").await?;
