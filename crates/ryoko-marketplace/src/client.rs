@@ -2,17 +2,22 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use reqwest::Client;
 use url::Url;
 
 use crate::{
-    DownloadConfig, MarketplaceEntry, MarketplaceError, MarketplaceIndex, download::DownloadResult,
+    DownloadConfig, MarketplaceEntry, MarketplaceError, MarketplaceIndex,
+    download::{DownloadResult, marketplace_url_allowed},
 };
 
 /// Default registry endpoints
 const DEFAULT_INDEX_ENDPOINT: &str = "/v1/index";
 #[allow(dead_code)]
 const DEFAULT_DOWNLOAD_ENDPOINT: &str = "/v1/download/";
+
+/// Cap the untrusted registry payload before JSON decoding.
+const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Client for interacting with the Ryoko marketplace.
 #[derive(Debug, Clone)]
@@ -38,17 +43,26 @@ impl MarketplaceClient {
         let base_url = Url::parse(base_str)
             .map_err(|e| MarketplaceError::InvalidUrl(format!("invalid registry URL: {}", e)))?;
 
-        // Validate it's an HTTP(S) URL
-        let scheme = base_url.scheme();
-        if scheme != "https" && scheme != "http" {
-            return Err(MarketplaceError::InvalidUrl(format!(
-                "registry URL must use HTTPS or HTTP: {}",
-                scheme
-            )));
+        if !marketplace_url_allowed(&base_url) {
+            return Err(MarketplaceError::InvalidUrl(
+                "registry URL must use HTTPS, or HTTP with an exact loopback host".into(),
+            ));
         }
 
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10
+                    || !marketplace_url_allowed(attempt.url())
+                    || attempt.previous().last().is_some_and(|previous| {
+                        previous.scheme() == "https" && attempt.url().scheme() != "https"
+                    })
+                {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .user_agent("Ryoko-Marketplace/1.0")
             .build()
             .map_err(|e| MarketplaceError::Http(format!("create HTTP client: {}", e)))?;
@@ -85,12 +99,30 @@ impl MarketplaceClient {
             )));
         }
 
-        let index = response
-            .json::<MarketplaceIndex>()
-            .await
-            .map_err(|e| MarketplaceError::Parse(format!("parse index JSON: {}", e)))?;
+        if response
+            .content_length()
+            .is_some_and(|bytes| bytes > MAX_INDEX_BYTES as u64)
+        {
+            return Err(MarketplaceError::Registry(
+                "marketplace index exceeds 4 MiB".into(),
+            ));
+        }
 
-        Ok(index)
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|e| MarketplaceError::network(format!("read index: {}", e)))?;
+            if chunk.len() > MAX_INDEX_BYTES.saturating_sub(bytes.len()) {
+                return Err(MarketplaceError::Registry(
+                    "marketplace index exceeds 4 MiB".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+
+        serde_json::from_slice::<MarketplaceIndex>(&bytes)
+            .map_err(|e| MarketplaceError::Parse(format!("parse index JSON: {}", e)))
     }
 
     /// Search for extensions by term.
@@ -237,6 +269,18 @@ mod tests {
     fn client_accepts_https_urls() {
         let result = MarketplaceClient::with_url("https://marketplace.ryoko.ai");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn client_rejects_external_cleartext_and_fake_loopback() {
+        for registry in [
+            "http://example.com",
+            "http://127.0.0.1.evil.example",
+            "http://localhost.evil.example",
+            "https://user:password@example.com",
+        ] {
+            assert!(MarketplaceClient::with_url(registry).is_err(), "{registry}");
+        }
     }
 
     #[test]
