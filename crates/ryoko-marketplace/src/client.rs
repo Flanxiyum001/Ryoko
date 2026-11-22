@@ -111,8 +111,8 @@ impl MarketplaceClient {
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| MarketplaceError::network(format!("read index: {}", e)))?;
+            let chunk =
+                chunk.map_err(|e| MarketplaceError::network(format!("read index: {}", e)))?;
             if chunk.len() > MAX_INDEX_BYTES.saturating_sub(bytes.len()) {
                 return Err(MarketplaceError::Registry(
                     "marketplace index exceeds 4 MiB".into(),
