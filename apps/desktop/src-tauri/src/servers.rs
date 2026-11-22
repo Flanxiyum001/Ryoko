@@ -148,9 +148,18 @@ impl LspRegistry {
     /// file is an empty registry so the shell starts with `ryoko-lsp` only.
     pub fn load(root: &Path) -> Result<Self, String> {
         let path = registry_path(root);
-        let Ok(text) = fs::read_to_string(&path) else {
-            return Ok(Self::default());
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(format!("cannot inspect LSP registry: {error}")),
         };
+        if !metadata.file_type().is_file() || metadata.len() > 256 * 1024 {
+            return Err("LSP registry must be a regular file under 256 KiB".to_owned());
+        }
+        let text = fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read LSP registry: {error}"))?;
         Self::parse(&text)
     }
 
