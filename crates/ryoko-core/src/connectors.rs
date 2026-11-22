@@ -280,6 +280,30 @@ impl ConnectorConfig {
         self.write_tools.iter().any(|entry| entry == tool)
     }
 
+    /// Narrows a requested allowlist to the tools this connector advertises.
+    ///
+    /// Configuration UIs use this so a name the server never offers cannot be
+    /// written into the registry; each accepted name is kept once, in request
+    /// order.
+    pub fn select_tools(
+        &self,
+        tools: impl IntoIterator<Item = String>,
+    ) -> Result<Vec<String>, ConnectorError> {
+        let mut allowed = Vec::new();
+        for tool in tools {
+            if !self.allowed_tools.contains(&tool) && !self.write_tools.contains(&tool) {
+                return Err(ConnectorError::Invalid(format!(
+                    "`{tool}` is not a tool the `{}` connector advertises",
+                    self.id
+                )));
+            }
+            if !allowed.contains(&tool) {
+                allowed.push(tool);
+            }
+        }
+        Ok(allowed)
+    }
+
     /// Every tool the connector advertises to a configuration UI.
     pub fn catalog(&self) -> Vec<ConnectorTool> {
         let mut tools = Vec::new();
@@ -905,6 +929,24 @@ mod tests {
         assert!(connector.validate().is_err());
         connector.max_calls_per_run = Some(7);
         assert_eq!(connector.call_limit(), 7);
+    }
+
+    #[test]
+    fn a_selection_only_keeps_advertised_tools_once() {
+        let connector = github();
+        let selected = connector
+            .select_tools([
+                "list_issues".to_string(),
+                "list_issues".to_string(),
+                "create_issue".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(selected, vec!["list_issues", "create_issue"]);
+
+        let error = connector
+            .select_tools(["drop_database".to_string()])
+            .expect_err("an unadvertised tool is refused");
+        assert!(error.to_string().contains("drop_database"), "{error}");
     }
 
     #[test]
