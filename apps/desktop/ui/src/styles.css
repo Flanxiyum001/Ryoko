@@ -629,3 +629,87 @@ pre.mission-detail-value {
   background: rgb(45 127 249 / 22%);
   outline: 1px solid rgb(45 127 249 / 55%);
 }
+
+/* Ryoko workbench: a compact navigation spine keeps the editor first. */
+:root {
+  --bg: #0b1014;
+  --panel: #10191d;
+  --panel-raised: #1a282b;
+  --border: #27373a;
+  --text: #e6eee9;
+  --muted: #9aaca6;
+  --accent: #bded91;
+  --accent-soft: #324c36;
+}
+#app { grid-template-rows: 50px minmax(0, 1fr) 28px; }
+.topbar { background: #10191d; gap: 16px; }
+.brand { align-items: center; }
+.brand-mark {
+  background: #bded91; color: #122117; border-radius: 5px;
+  font-family: Georgia, serif; font-style: italic;
+}
+.brand-name { font-weight: 700; letter-spacing: -.04em; font-size: 17px; }
+.brand-sub { color: var(--accent); font-size: 9px; }
+.workspace-name { border-left: 1px solid var(--border); padding-left: 16px; }
+.button.primary { color: #132117; }
+.layout { grid-template-columns: 64px 252px minmax(0, 1fr) 350px; }
+.layout.hide-explorer { grid-template-columns: 64px minmax(0, 1fr) 350px; }
+.layout.hide-explorer .explorer { display: none; }
+.layout.hide-inspector { grid-template-columns: 64px 252px minmax(0, 1fr); }
+.layout.hide-explorer.hide-inspector { grid-template-columns: 64px minmax(0, 1fr); }
+.layout.hide-inspector .problems { display: none; }
+.activity-rail {
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  padding: 12px 5px 10px; background: #0b1417;
+  border-right: 1px solid var(--border);
+}
+.rail-button {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; min-height: 54px; border: 0; border-left: 2px solid transparent;
+  border-radius: 5px; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 21px; line-height: 1;
+}
+.rail-button span { font-size: 9px; letter-spacing: .02em; }
+.rail-button:hover, .rail-button:focus-visible { background: var(--panel-raised); color: var(--text); }
+.rail-button.active { border-left-color: var(--accent); color: var(--accent); background: #1c3027; }
+.rail-bottom { margin-top: auto; }
+.editor-column, .monaco-editor .margin, .monaco-editor-background { background: #121b1d; }
+.tabbar { background: #172226; }
+.statusbar { background: #15261f; }
+.empty-editor {
+  background: radial-gradient(ellipse at 50% 35%, #23352b 0, #121b1d 55%);
+}
+.empty-mark {
+  display: grid; place-items: center; width: 66px; height: 66px;
+  border: 1px solid #537753; border-radius: 14px; color: var(--accent);
+  font: italic 48px Georgia, serif; opacity: 1;
+}
+.empty-eyebrow { margin-top: 10px; color: var(--accent); font-size: 10px; letter-spacing: .2em; }
+.empty-editor h1 { font-size: clamp(25px, 3vw, 38px); letter-spacing: -.05em; }
+.empty-editor p { max-width: 370px; }
+.empty-editor .button { margin-top: 14px; }
+.file-link.active { color: var(--accent); }
+.mission-node.running, .mission-node.validating { border-left-color: var(--accent); }
+.mission-node-status { color: var(--accent); }
+@media (max-width: 1100px) {
+  .layout, .layout.hide-explorer { grid-template-columns: 58px minmax(0, 1fr) 310px; }
+  .layout .explorer { display: none; }
+  .layout.hide-inspector { grid-template-columns: 58px 220px minmax(0, 1fr); }
+  .layout.hide-inspector .explorer { display: flex; }
+  .activity-rail { padding-inline: 2px; }
+  .shortcut-hint { display: none; }
+}
+@media (max-width: 720px) {
+  .layout, .layout.hide-explorer, .layout.hide-inspector { grid-template-columns: 52px minmax(0, 1fr); }
+  .layout .problems, .layout.hide-inspector .problems { display: none; }
+  .layout:not(.hide-explorer) .explorer { display: flex; grid-column: 2; }
+  .layout:not(.hide-explorer) .editor-column { display: none; }
+  .layout.hide-explorer .editor-column { grid-column: 2; }
+  .layout.hide-explorer .problems { display: flex; grid-column: 2; grid-row: 1; }
+  .layout.hide-explorer .editor-column { display: none; }
+  .layout.hide-explorer.hide-inspector .problems { display: none; }
+  .layout.hide-explorer.hide-inspector .editor-column { display: flex; }
+  .top-actions { gap: 4px; }
+  .top-actions .button { padding: 5px 7px; }
+  .brand-sub, .workspace-name { display: none; }
+}
