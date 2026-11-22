@@ -332,7 +332,7 @@ impl Orchestrator {
                     let (outcome, success) = execute_task(
                         &task,
                         agent,
-                        context,
+                        context.clone(),
                         workspace,
                         events.clone(),
                         max_attempts,
@@ -344,8 +344,8 @@ impl Orchestrator {
                     drop(permit);
 
                     if speculative {
-                        // The result only stands if the work it ran ahead of
-                        // actually succeeded.
+                        // Do not publish a speculative success to the event
+                        // stream or shared memory until all dependencies pass.
                         if let Some(reason) = wait_for_dependencies(&dependencies).await {
                             let reason = format!("speculative result discarded: {reason}");
                             events.emit(OrchestratorEvent::TaskSkipped {
@@ -354,6 +354,20 @@ impl Orchestrator {
                                 reason: reason.clone(),
                             });
                             return (task, None, TaskOutcome::Skipped { reason });
+                        }
+                        if let (TaskOutcome::Succeeded { attempts }, Some(success)) =
+                            (&outcome, &success)
+                        {
+                            context.memory.insert(
+                                task_summary_key(task.id),
+                                success.output.chars().take(2_000).collect::<String>(),
+                            );
+                            events.emit(OrchestratorEvent::TaskSucceeded {
+                                task_id: task.id,
+                                role: task.assigned_to.clone(),
+                                output: success.output.clone(),
+                                attempts: *attempts,
+                            });
                         }
                     }
 
@@ -946,16 +960,18 @@ async fn execute_task(
                     .contains_key(crate::vision::VISUAL_REVIEW_METADATA))
         {
             let _ = lease.discard().await;
-            context.memory.insert(
-                task_summary_key(task.id),
-                result.output.chars().take(2_000).collect::<String>(),
-            );
-            events.emit(OrchestratorEvent::TaskSucceeded {
-                task_id: task.id,
-                role: task.assigned_to.clone(),
-                output: result.output.clone(),
-                attempts: attempt,
-            });
+            if !task.is_speculative() {
+                context.memory.insert(
+                    task_summary_key(task.id),
+                    result.output.chars().take(2_000).collect::<String>(),
+                );
+                events.emit(OrchestratorEvent::TaskSucceeded {
+                    task_id: task.id,
+                    role: task.assigned_to.clone(),
+                    output: result.output.clone(),
+                    attempts: attempt,
+                });
+            }
             return (
                 TaskOutcome::Succeeded { attempts: attempt },
                 Some(TaskSuccess {
@@ -2562,7 +2578,10 @@ mod tests {
             sec,
         ];
 
+        let events = EventSink::default();
+        let mut emitted = events.subscribe();
         let report = concurrent(1)
+            .with_events(events)
             .run(
                 vec![producer, audit.clone()],
                 agents,
@@ -2571,6 +2590,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1, "it ran speculatively");
+        // A discarded speculative result must not leak a false success to
+        // Mission Control (or to shared task summaries).
+        let mut reported_success = false;
+        while let Ok(event) = emitted.try_recv() {
+            if let OrchestratorEvent::TaskSucceeded { task_id, .. } = event {
+                reported_success |= task_id == audit.id;
+            }
+        }
+        assert!(!reported_success, "discarded task emitted TaskSucceeded");
         assert!(report.succeeded.iter().all(|s| s.task_id != audit.id));
         let skipped = report
             .skipped
