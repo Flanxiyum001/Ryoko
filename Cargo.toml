@@ -4,6 +4,7 @@ members = [
     "crates/ryoko-core",
     "crates/ryoko-models",
     "crates/ryoko-native",
+    "crates/ryoko-orchestrator",
     "crates/ryoko-sandbox",
     "crates/ryoko-scripting",
     "crates/ryoko-storage",
