@@ -252,7 +252,7 @@ pub fn workspace_replace_apply(
     let expected_counts = expected
         .clone()
         .into_iter()
-        .map(|preview| (preview.path, preview))
+        .map(|preview| (preview.path.clone(), preview))
         .collect::<BTreeMap<_, _>>();
     let mut result = ReplaceResult {
         protocol: WORKBENCH_PROTOCOL_VERSION,
