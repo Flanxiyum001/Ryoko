@@ -472,7 +472,9 @@ mod tests {
         let old = context("src/lib.rs", &["before"], &[]);
         let present = BTreeSet::from(["src/lib.rs".to_owned()]);
         assert_eq!(
-            index.sync_files(&[(old, "hash-one".to_owned())], &present).unwrap(),
+            index
+                .sync_files(&[(old, "hash-one".to_owned())], &present)
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -487,7 +489,9 @@ mod tests {
 
         let new = context("src/lib.rs", &["after"], &[]);
         assert_eq!(
-            index.sync_files(&[(new, "hash-two".to_owned())], &present).unwrap(),
+            index
+                .sync_files(&[(new, "hash-two".to_owned())], &present)
+                .unwrap(),
             1
         );
         assert!(index.symbol("before", 5).unwrap().is_empty());
