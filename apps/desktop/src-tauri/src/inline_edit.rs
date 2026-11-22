@@ -44,20 +44,20 @@ fn bounded(text: &str, limit: usize) -> String {
 /// response that merely contains fenced code is returned unchanged: only a
 /// fully-wrapped answer is unwrapped, so partial fences never swallow content.
 pub fn strip_wrapping_fence(answer: &str) -> String {
-    let trimmed = answer.trim_start_matches('\u{feff}').trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return trimmed.trim_end().to_owned();
+    // Preserve whitespace in ordinary code. Trimming the first line would
+    // break indented replacements in Python and other languages.
+    let text = answer.strip_prefix('\u{feff}').unwrap_or(answer);
+    let candidate = text.trim_matches(['\n', '\r']);
+    let Some(rest) = candidate.strip_prefix("```") else {
+        return text.to_owned();
     };
     let Some((_, body)) = rest.split_once('\n') else {
-        return trimmed.to_owned();
+        return text.to_owned();
     };
-    let Some(body) = body.strip_suffix("```") else {
-        return trimmed.to_owned();
+    let Some(body) = body.strip_suffix("\n```") else {
+        return text.to_owned();
     };
-    let Some(last) = body.rfind('\n') else {
-        return trimmed.to_owned();
-    };
-    body[..last].trim_matches('\n').to_owned()
+    body.to_owned()
 }
 
 pub fn validate_answer(answer: &str) -> Result<String, String> {
@@ -90,7 +90,15 @@ mod tests {
     #[test]
     fn strips_one_wrapping_fence_with_language() {
         let answer = "```rust\nfn a() {}\n\n```";
-        assert_eq!(strip_wrapping_fence(answer), "fn a() {}");
+        assert_eq!(strip_wrapping_fence(answer), "fn a() {}\n");
+    }
+
+    #[test]
+    fn indented_unfenced_and_fenced_edits_keep_exact_whitespace() {
+        let raw = "    print('hello')\n";
+        assert_eq!(strip_wrapping_fence(raw), raw);
+        let fenced = "```python\n    print('hello')\n```";
+        assert_eq!(strip_wrapping_fence(fenced), "    print('hello')");
     }
 
     #[test]
