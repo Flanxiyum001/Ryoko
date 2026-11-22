@@ -33,6 +33,47 @@ The existing `Desktop installers` workflow remains the separate
 production-signing pipeline; this preview workflow never substitutes unsigned
 packages for signed production builds.
 
+## Slow downloads from GitHub (Windows)
+
+GitHub chooses its download CDN; Ryoko cannot directly change that route.
+If your browser downloads at only a few KB/s, first choose the **smaller
+Windows x64 NSIS `.exe`** rather than the MSI: for Alpha 0.7, the EXE is
+about 15.2 MB instead of 22.4 MB.
+
+For a resumable download that can use several HTTP connections, open
+**PowerShell** and install the open-source aria2 downloader using Windows
+Package Manager (one-time setup):
+
+```powershell
+winget install --id aria2.aria2 --exact
+```
+
+Open a **new PowerShell window** after installation and run:
+
+```powershell
+$tag = "desktop-preview-v0.1.0-alpha.7"
+$asset = "Ryoko_0.1.0_x64-setup.exe"
+$url = "https://github.com/Flanxiyum001/Ryoko/releases/download/$tag/$asset"
+aria2c --continue=true --max-connection-per-server=8 --split=8 --min-split-size=1M --file-allocation=none --out=$asset $url
+Get-FileHash ".\\$asset" -Algorithm SHA256
+```
+
+For newer previews, replace `$tag` with the release tag shown on the
+[Releases page](https://github.com/Flanxiyum001/Ryoko/releases). Compare
+the printed hash with that release's **SHA256SUMS.txt** before running
+the unsigned installer. If the hash differs, delete the file.
+
+Aria2 attempts parallel HTTP range downloads and can resume interrupted
+transfers. It **may** improve speed on a throttled connection; it cannot
+override a bottleneck imposed by GitHub, your ISP, or the route to GitHub's
+download CDN. If speed remains low, try another network (for example, a
+phone hotspot), or use a different connection. Do not use unofficial
+third-party executable mirrors or bypass security warnings globally.
+
+There is **no verified alternate Ryoko download mirror yet**. An
+independently hosted mirror should serve the **exact release bytes** with
+matching SHA-256 hashes; an unverified redirect or relay is not a substitute.
+
 ## First test session
 
 - [ ] Start Ryoko and open a disposable workspace; close and reopen it.
