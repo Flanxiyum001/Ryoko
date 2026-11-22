@@ -73,7 +73,8 @@ pub async fn download_and_verify(
     entry: &MarketplaceEntry,
     config: &DownloadConfig,
 ) -> Result<DownloadResult, MarketplaceError> {
-    // Create cache directory if needed
+    // Reject registry-supplied unsafe paths before any filesystem operations.
+    let artifact_name = entry.artifact_filename()?;
     ensure_cache_dir(config).await?;
 
     // Validate URL before requesting
@@ -136,10 +137,21 @@ pub async fn download_and_verify(
         }
     }
 
-    // Stream download with size limiting and hash computation
-    let temp_path = config.cache_dir.join(format!("{}.tmp", entry.id));
+    if response.content_length().is_some_and(|size| size > config.max_size_bytes) {
+        return Err(MarketplaceError::download("response exceeds maximum download size".into()));
+    }
 
-    let mut file = tokio::fs::File::create(&temp_path)
+    // Stream download with size limiting and hash computation
+    let temp_path = config.cache_dir.join(format!(
+        ".ryoko-{}-{}.tmp",
+        entry.id,
+        uuid::Uuid::new_v4()
+    ));
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
         .await
         .map_err(|e| MarketplaceError::Io(format!("create temp file: {}", e)))?;
 
@@ -148,7 +160,14 @@ pub async fn download_and_verify(
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| MarketplaceError::network(format!("stream error: {}", e)))?;
+        let chunk = match chunk {
+            Ok(value) => value,
+            Err(error) => {
+                drop(file);
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(MarketplaceError::network(format!("stream error: {}", error)));
+            }
+        };
         let bytes = chunk.len() as u64;
         total_bytes += bytes;
 
@@ -160,9 +179,11 @@ pub async fn download_and_verify(
             )));
         }
 
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| MarketplaceError::Io(format!("write to temp file: {}", e)))?;
+        if let Err(error) = file.write_all(&chunk).await {
+            drop(file);
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(MarketplaceError::Io(format!("write to temp file: {}", error)));
+        }
 
         hasher.update(&chunk);
     }
@@ -178,7 +199,7 @@ pub async fn download_and_verify(
         return Err(MarketplaceError::checksum(expected_hash, actual_hash));
     }
 
-    let final_path = config.cache_dir.join(entry.artifact_filename()?);
+    let final_path = config.cache_dir.join(artifact_name);
     tokio::fs::rename(&temp_path, &final_path)
         .await
         .map_err(|e| MarketplaceError::Io(format!("rename to final path: {}", e)))?;
