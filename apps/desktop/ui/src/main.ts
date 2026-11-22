@@ -23,6 +23,7 @@ import {
   resolveKeybindings,
 } from './keybindings';
 import { mountConnectors } from './connectors_panel';
+import { mountMarketplaceBrowser } from './marketplace_browser';
 import { mountGithubQueue } from './github_queue';
 import {
   focusMissionTasks,
@@ -1964,6 +1965,7 @@ setLspState('offline');
 renderMissionOptions();
 mountGithubQueue(setStatus);
 mountConnectors(setStatus);
+mountMarketplaceBrowser(setStatus);
 mountSearchPanel({ openFile, setStatus });
 mountSettingsDialog({ setStatus });
 registerMonacoCapabilities(
