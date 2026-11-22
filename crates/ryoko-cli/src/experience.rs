@@ -14,8 +14,24 @@ use serde::{Deserialize, Serialize};
 pub struct TeamSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Role label -> `provider/model`, or `tier:<name>` to use a named tier.
     #[serde(default)]
     pub role_models: BTreeMap<String, String>,
+    /// Named model tiers such as `fast` (local) and `frontier` (hosted). A tier
+    /// is a user-owned alias for one `provider/model`; nothing picks a tier
+    /// automatically.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tiers: BTreeMap<String, String>,
+}
+
+const TIER_PREFIX: &str = "tier:";
+
+fn valid_tier_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 fn bad(message: impl Into<String>) -> io::Error {
@@ -35,8 +51,21 @@ impl TeamSettings {
             .iter()
             .map(|member| member.role.label().to_owned())
             .collect();
-        if let Some(model) = &self.default_model {
+        for (tier, model) in &self.tiers {
+            if !valid_tier_name(tier) {
+                return Err(bad(format!(
+                    "invalid tier name {tier:?}; use lowercase letters, digits, - or _"
+                )));
+            }
+            if model.starts_with(TIER_PREFIX) {
+                return Err(bad(format!(
+                    "tier {tier} must name a model, not another tier"
+                )));
+            }
             valid_model(model)?;
+        }
+        if let Some(model) = &self.default_model {
+            self.resolve(model)?;
         }
         for (role, model) in &self.role_models {
             if !roles.contains(role) {
@@ -44,9 +73,23 @@ impl TeamSettings {
                     "unknown team role {role}; use ryoko roles for valid names"
                 )));
             }
-            valid_model(model)?;
+            self.resolve(model)?;
         }
         Ok(())
+    }
+
+    /// Expand a `tier:<name>` reference to its model; validate plain models.
+    fn resolve<'a>(&'a self, selection: &'a str) -> io::Result<&'a str> {
+        let model = match selection.strip_prefix(TIER_PREFIX) {
+            Some(tier) => self
+                .tiers
+                .get(tier)
+                .map(String::as_str)
+                .ok_or_else(|| bad(format!("unknown model tier {tier:?}")))?,
+            None => selection,
+        };
+        valid_model(model)?;
+        Ok(model)
     }
 
     pub fn model_for(&self, role: &str, cli_default: Option<&str>) -> io::Result<String> {
@@ -61,8 +104,7 @@ impl TeamSettings {
                     "no model configured for {role}; set --model or default_model"
                 ))
             })?;
-        valid_model(selected)?;
-        Ok(selected.to_owned())
+        Ok(self.resolve(selected)?.to_owned())
     }
 
     pub fn check_catalog(
@@ -252,6 +294,59 @@ mod tests {
                 .unwrap(),
             "local/override"
         );
+    }
+
+    #[test]
+    fn tier_references_resolve_to_configured_models() {
+        let settings = TeamSettings::from_json(
+            r#"{"default_model":"tier:fast",
+                "tiers":{"fast":"local/small","frontier":"cloud/large"},
+                "role_models":{"software-architect":"tier:frontier","qa-engineer":"local/qa"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.model_for("software-architect", None).unwrap(),
+            "cloud/large"
+        );
+        assert_eq!(
+            settings.model_for("project-manager", None).unwrap(),
+            "local/small"
+        );
+        assert_eq!(settings.model_for("qa-engineer", None).unwrap(), "local/qa");
+        assert_eq!(
+            settings
+                .model_for("project-manager", Some("tier:frontier"))
+                .unwrap(),
+            "cloud/large"
+        );
+        let choices = settings.check_catalog(&catalog(), None).unwrap();
+        assert!(choices.iter().all(|(_, model)| !model.starts_with("tier:")));
+    }
+
+    #[test]
+    fn rejects_bad_tiers_before_calls() {
+        for json in [
+            r#"{"default_model":"tier:missing"}"#,
+            r#"{"role_models":{"qa-engineer":"tier:missing"},"default_model":"local/a"}"#,
+            r#"{"tiers":{"fast":"tier:frontier","frontier":"local/a"},"default_model":"local/a"}"#,
+            r#"{"tiers":{"Fast":"local/a"},"default_model":"local/a"}"#,
+            r#"{"tiers":{"fast":"/bad"},"default_model":"local/a"}"#,
+        ] {
+            assert!(TeamSettings::from_json(json).is_err(), "accepted {json}");
+        }
+        let settings =
+            TeamSettings::from_json(r#"{"tiers":{"fast":"local/a"},"default_model":"local/a"}"#)
+                .unwrap();
+        assert!(
+            settings
+                .model_for("qa-engineer", Some("tier:nope"))
+                .is_err()
+        );
+        let unknown_provider = TeamSettings::from_json(
+            r#"{"tiers":{"fast":"nowhere/a"},"default_model":"tier:fast"}"#,
+        )
+        .unwrap();
+        assert!(unknown_provider.check_catalog(&catalog(), None).is_err());
     }
 
     #[test]

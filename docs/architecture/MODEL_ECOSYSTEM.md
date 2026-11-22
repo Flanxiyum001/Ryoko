@@ -38,3 +38,27 @@ operator; do not interpret a missing price as a verified zero-dollar cost.
 are checked before joining the endpoint to prevent path manipulation.
 Account/region quotas and paid usage still apply. Ryoko must not
 automatically select a paid model without configured spending controls.
+
+# Team model tiers
+
+Team settings (`--team-config`, see `configs/team.example.json`) can declare
+named tiers, each an alias for one `provider/model`:
+
+```json
+{
+  "default_model": "tier:fast",
+  "tiers": { "fast": "ollama/qwen2.5-coder", "frontier": "cloud/large-model" },
+  "role_models": { "software-architect": "tier:frontier" }
+}
+```
+
+`default_model`, `role_models` values and the `--model` CLI value accept
+`tier:<name>`. Selection order is unchanged: role override, then `--model`, then
+`default_model`. Tiers are resolved and checked against the provider catalog
+before any provider call. Tier names are lowercase `[a-z0-9_-]`, at most 32
+bytes, and a tier must name a model, not another tier.
+
+Tiering is a user-owned static mapping. Ryoko does not classify tasks or
+escalate to a paid tier on its own, in line with the rule above. FIM ghost
+text, commit messages and Integrator conflict resolution do not read team
+tiers yet; they keep their own model settings.
