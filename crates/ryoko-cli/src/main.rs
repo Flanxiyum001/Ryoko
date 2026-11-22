@@ -2072,7 +2072,7 @@ async fn check_worktree(args: CheckArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
+fn symbol_candidates(root: &Path) -> Result<Vec<SourceFile>, Box<dyn Error>> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -2114,10 +2114,7 @@ fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
         }
         candidates.push((path, entry.path().to_path_buf()));
     }
-    // Parsing dominates here, and tree-sitter parsers cannot be shared, so each
-    // worker owns one. The input order is preserved, which keeps the index the
-    // same on every machine regardless of how the walk interleaves.
-    Ok(extract_files(candidates))
+    Ok(candidates)
 }
 
 fn symbol_index_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
@@ -2152,11 +2149,34 @@ fn symbol_index_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn build_symbol_index(root: &Path) -> Result<(WorkspaceIndex, usize), Box<dyn Error>> {
-    let files = workspace_symbols(root)?;
     let index_path = symbol_index_path(root)?;
     let mut index = WorkspaceIndex::open(&index_path)?;
-    let count = index.rebuild(files.iter())?;
-    Ok((index, count))
+    let candidates = symbol_candidates(root)?;
+
+    // Hash bytes before invoking tree-sitter. Parsing is only needed for files
+    // that have changed since the last successful index pass.
+    let mut present = std::collections::BTreeSet::new();
+    let mut changed = Vec::new();
+    let mut hashes = HashMap::new();
+    for (path, disk_path) in candidates {
+        present.insert(path.clone());
+        let Ok(bytes) = std::fs::read(&disk_path) else {
+            continue;
+        };
+        let hash = sha256_hex(&bytes);
+        if index.content_hash(&path)?.as_deref() != Some(hash.as_str()) {
+            hashes.insert(path.clone(), hash);
+            changed.push((path, disk_path));
+        }
+    }
+
+    // The parser's existing bounded, ordered extraction remains unchanged.
+    let parsed = extract_files(changed)
+        .into_iter()
+        .filter_map(|file| hashes.remove(&file.path).map(|hash| (file, hash)))
+        .collect::<Vec<_>>();
+    index.sync_files(&parsed, &present)?;
+    Ok((index, present.len()))
 }
 
 fn indexed_context(root: &Path, goal: &str) -> Result<String, Box<dyn Error>> {
