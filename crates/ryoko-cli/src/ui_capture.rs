@@ -14,7 +14,8 @@ use ryoko_sandbox::{ARTIFACT_MOUNT, BuildSandbox};
 
 /// Harness path inside a `ryoko sandbox init` image.
 pub const DEFAULT_HARNESS: &str = "/opt/ryoko/verify-ui.mjs";
-/// Loopback URL the harness polls; the harness refuses anything else.
+/// Origin the harness polls unless `--ui-url` names another one. The harness
+/// accepts loopback only, so validation rejects anything else up front.
 pub const DEFAULT_URL: &str = "http://127.0.0.1:4173";
 
 const MAX_ROUTES: usize = 25;
@@ -56,6 +57,14 @@ impl UiCapture {
         self
     }
 
+    /// Points the harness at a dev server that does not listen on
+    /// [`DEFAULT_URL`]. The origin must be loopback, because the harness in the
+    /// sandbox image refuses to poll anything else.
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = url.into();
+        self
+    }
+
     /// Redirects the harness. Production images use [`DEFAULT_HARNESS`]; tests
     /// point at a stand-in so they exercise the invocation, not a browser.
     #[cfg(test)]
@@ -77,6 +86,7 @@ impl UiCapture {
         if self.dev_command.chars().any(char::is_control) {
             return Err("the UI dev command must not contain control characters".to_owned());
         }
+        validate_url(&self.url)?;
         if self.routes.len() > MAX_ROUTES {
             return Err(format!("at most {MAX_ROUTES} UI routes can be captured"));
         }
@@ -163,6 +173,67 @@ impl UiCapture {
     }
 }
 
+/// Accepts only what the harness can poll: a loopback `http`/`https` origin with
+/// an optional numeric port. A wider URL is rejected here rather than failing
+/// inside the sandbox, where the only signal is a dead browser.
+fn validate_url(url: &str) -> Result<(), String> {
+    if url.is_empty() || url.trim() != url {
+        return Err("the UI URL must not be empty or padded with whitespace".to_owned());
+    }
+    if url
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control() || matches!(ch, ',' | '\'' | '"'))
+    {
+        return Err("the UI URL must not contain whitespace, quotes or commas".to_owned());
+    }
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| format!("UI URL `{url}` must start with `http://` or `https://`"))?;
+    if rest.contains('/') {
+        return Err(format!(
+            "UI URL `{url}` must be an origin without a path; routes are captured with --ui-route"
+        ));
+    }
+    let (host, port) = match rest.strip_prefix('[') {
+        Some(bracketed) => {
+            let end = bracketed
+                .find(']')
+                .ok_or_else(|| format!("UI URL `{url}` has an unterminated IPv6 host"))?;
+            let port = bracketed[end + 1..].strip_prefix(':');
+            (&bracketed[..end], port)
+        }
+        None => match rest.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (rest, None),
+        },
+    };
+    if rest.contains('@') {
+        return Err(format!("UI URL `{url}` must not carry credentials"));
+    }
+    if host.is_empty() {
+        return Err(format!("UI URL `{url}` has no host"));
+    }
+    if let Some(port) = port {
+        if port.is_empty() || !port.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(format!("UI URL `{url}` has a non-numeric port"));
+        }
+        port.parse::<u16>()
+            .map_err(|_| format!("UI URL `{url}` has a port above 65535"))?;
+    }
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback());
+    if !loopback {
+        return Err(format!(
+            "UI URL `{url}` must point at a loopback host; the sandbox harness refuses anything else"
+        ));
+    }
+    Ok(())
+}
+
 /// Single-quote for POSIX `sh`, which is what the sandbox runs.
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
@@ -219,6 +290,10 @@ mod tests {
             command.contains(r"--dev-command 'sh -c '\''npm run dev -- --port 3000'\'''"),
             "{command}"
         );
+        assert!(
+            command.contains("--url 'http://127.0.0.1:4173'"),
+            "{command}"
+        );
         assert!(command.contains("--routes '/pricing'"), "{command}");
         assert!(command.contains("--out '/ryoko-artifacts'"), "{command}");
         assert!(command.contains("--allow-issues"), "{command}");
@@ -228,6 +303,54 @@ mod tests {
     fn a_capture_without_routes_reviews_the_root() {
         let command = UiCapture::new("npm start").command().unwrap();
         assert!(command.contains("--routes '/'"), "{command}");
+    }
+
+    #[test]
+    fn a_custom_url_replaces_the_default_origin() {
+        let command = UiCapture::new("npm start")
+            .with_url("http://127.0.0.1:3000")
+            .command()
+            .unwrap();
+        assert!(
+            command.contains("--url 'http://127.0.0.1:3000'"),
+            "{command}"
+        );
+        assert!(!command.contains("4173"), "{command}");
+
+        let ipv6 = UiCapture::new("npm start")
+            .with_url("http://[::1]:8080")
+            .validate();
+        assert!(ipv6.is_ok(), "{ipv6:?}");
+        assert!(
+            UiCapture::new("npm start")
+                .with_url("https://localhost:8443")
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn urls_the_harness_cannot_poll_are_rejected() {
+        for url in [
+            "",
+            "127.0.0.1:4173",
+            "ftp://127.0.0.1:4173",
+            "http://example.com:4173",
+            "http://0.0.0.0:4173",
+            "http://127.0.0.1:4173/app",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:http",
+            "http://127.0.0.1:70000",
+            "http://user:pass@127.0.0.1:4173",
+            "http://127.0.0.1:4173 ",
+            "http://[::1:8080",
+        ] {
+            let error = UiCapture::new("npm start")
+                .with_url(url)
+                .validate()
+                .unwrap_err();
+            assert!(error.contains("UI URL"), "{url}: {error}");
+        }
     }
 
     #[test]
