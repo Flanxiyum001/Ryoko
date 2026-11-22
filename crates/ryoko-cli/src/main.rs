@@ -3858,6 +3858,34 @@ mod tests {
     }
 }
 
+fn record_marketplace_install(
+    entry: &ryoko_marketplace::MarketplaceEntry,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut lock = MarketplaceLock::load().map_err(|e| cli_error(e.to_string()))?;
+    lock.installed
+        .retain(|item| !(item.id == entry.id && item.kind == entry.kind));
+    lock.installed.push(InstallationRecord {
+        id: entry.id.clone(),
+        kind: entry.kind,
+        version: entry.version.clone(),
+        installed_at: chrono::Utc::now(),
+        source_url: entry.asset_url.clone(),
+        install_path: path.to_string_lossy().into_owned(),
+    });
+    match entry.kind {
+        MarketplaceType::Extension => {
+            lock.extensions.insert(entry.id.clone(), entry.version.clone());
+        }
+        MarketplaceType::Skill => {
+            lock.skills.insert(entry.id.clone(), entry.version.clone());
+        }
+    }
+    lock.last_checked = chrono::Utc::now();
+    lock.save().map_err(|e| cli_error(e.to_string()))?;
+    Ok(())
+}
+
 async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>> {
     let client = MarketplaceClient::new().map_err(|e| cli_error(e.to_string()))?;
 
@@ -3927,23 +3955,13 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
                 }
             };
 
-            // Load lock file
-            let mut lock = MarketplaceLock::load().map_err(|e| cli_error(e.to_string()))?;
-            let install_path = match &result {
-                DownloadResultWrapper::Extension(r) => r.path.to_string_lossy().to_string(),
-                DownloadResultWrapper::Skill(p) => p.to_string_lossy().to_string(),
-            };
-            lock.installed.push(InstallationRecord {
-                id: id.clone(),
-                kind: entry.kind,
-                version: entry.version,
-                installed_at: chrono::Utc::now(),
-                source_url: entry.asset_url,
-                install_path,
-            });
-
-            // Save lock file
-            lock.save().map_err(|e| cli_error(e.to_string()))?;
+            record_marketplace_install(
+                &entry,
+                match &result {
+                    DownloadResultWrapper::Extension(r) => &r.path,
+                    DownloadResultWrapper::Skill(p) => p,
+                },
+            )?;
 
             let (display_path, checksum) = match &result {
                 DownloadResultWrapper::Extension(r) => {
@@ -4003,6 +4021,13 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
                         DownloadResultWrapper::Extension(r) => r.path.display().to_string(),
                         DownloadResultWrapper::Skill(p) => p.display().to_string(),
                     };
+                    record_marketplace_install(
+                        &update.entry,
+                        match &result {
+                            DownloadResultWrapper::Extension(r) => &r.path,
+                            DownloadResultWrapper::Skill(p) => p,
+                        },
+                    )?;
                     println!("✅ Updated to {}", display_path);
                 }
             } else if let Some(id) = id {
@@ -4031,6 +4056,13 @@ async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>>
                     DownloadResultWrapper::Extension(r) => r.path.display().to_string(),
                     DownloadResultWrapper::Skill(p) => p.display().to_string(),
                 };
+                record_marketplace_install(
+                    &entry,
+                    match &result {
+                        DownloadResultWrapper::Extension(r) => &r.path,
+                        DownloadResultWrapper::Skill(p) => p,
+                    },
+                )?;
                 println!("✅ Updated {} to {}", id, display_path);
             } else {
                 return Err(cli_error("--id is required when not using --all"));
