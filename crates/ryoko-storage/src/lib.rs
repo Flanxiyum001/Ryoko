@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -64,7 +64,9 @@ impl TaskState {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
-            other => Err(StorageError::InvalidData(format!("unknown task state: {other}"))),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown task state: {other}"
+            ))),
         }
     }
 
@@ -162,7 +164,12 @@ impl DurableStore {
         self.connection.execute(
             "INSERT INTO tasks(id, goal, state, revision, updated_ms)
              VALUES (?1, ?2, ?3, 0, ?4)",
-            params![id.to_string(), goal, TaskState::Queued.as_str(), now.timestamp_millis()],
+            params![
+                id.to_string(),
+                goal,
+                TaskState::Queued.as_str(),
+                now.timestamp_millis()
+            ],
         )?;
         Ok(TaskRecord {
             id,
@@ -193,9 +200,8 @@ impl DurableStore {
             let state = TaskState::parse(&raw_state)?;
             let revision = u64::try_from(revision)
                 .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-            let updated_at = DateTime::from_timestamp_millis(ms).ok_or_else(|| {
-                StorageError::InvalidData("invalid task timestamp".into())
-            })?;
+            let updated_at = DateTime::from_timestamp_millis(ms)
+                .ok_or_else(|| StorageError::InvalidData("invalid task timestamp".into()))?;
             Ok(TaskRecord {
                 id,
                 goal,
@@ -265,7 +271,10 @@ impl DurableStore {
     pub fn append(&mut self, event: &JournalEvent) -> Result<bool, StorageError> {
         if event.kind.is_empty()
             || event.kind.len() > 128
-            || !event.kind.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || !event
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         {
             return Err(StorageError::InvalidData("invalid event kind".into()));
         }
@@ -433,7 +442,10 @@ mod tests {
             payload: Value::String("x".repeat(MAX_EVENT_BYTES + 1)),
             created_at: Utc::now(),
         };
-        assert!(matches!(store.append(&event), Err(StorageError::EventTooLarge)));
+        assert!(matches!(
+            store.append(&event),
+            Err(StorageError::EventTooLarge)
+        ));
         #[cfg(unix)]
         {
             let link = temp.path().join("linked.sqlite3");
