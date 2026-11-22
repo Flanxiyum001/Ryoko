@@ -2034,6 +2034,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryoko-storage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "ryoko-tools"
 version = "0.1.0"
 dependencies = [
