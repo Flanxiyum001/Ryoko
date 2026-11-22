@@ -180,6 +180,13 @@ pub struct GitWorktreeManager {
     worktrees_root: PathBuf,
     state_path: PathBuf,
     state: Arc<Mutex<Option<Connection>>>,
+    /// Serializes operations that add or remove a `git worktree` in this
+    /// checkout. Git creates `.git/worktrees/<id>/` and then writes its
+    /// `commondir` file, while every other git command in the same repository
+    /// enumerates those sibling directories to locate the common dir. Two
+    /// concurrent creations therefore let one read a half-written sibling and
+    /// die with `fatal: failed to read .git/worktrees/<other>/commondir`.
+    worktree_admin: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for GitWorktreeManager {
@@ -202,6 +209,7 @@ impl GitWorktreeManager {
             state_path: state_root.join("worktrees.sqlite3"),
             base_project_path: base,
             state: Arc::new(Mutex::new(None)),
+            worktree_admin: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -218,11 +226,16 @@ impl GitWorktreeManager {
     }
 
     /// Creates an isolated branch and worktree at the current `HEAD`.
+    ///
+    /// Parallel agents create these at the same time, so the whole sequence is
+    /// serialized: git's worktree administration directory is not readable by
+    /// another command until creation finishes (see [`Self::worktree_admin`]).
     pub async fn create_worktree(
         &self,
         agent_id: &str,
         task_id: Uuid,
     ) -> Result<WorktreeSession, WorktreeError> {
+        let _admin = self.worktree_admin.lock().await;
         self.ensure_repository().await?;
         let slug = sanitize_agent_id(agent_id)?;
         let base_commit = self
@@ -309,6 +322,7 @@ impl GitWorktreeManager {
     /// published worktree was released. Active and published leases can be
     /// resumed; merged or abandoned leases cannot.
     pub async fn resume_worktree(&self, id: Uuid) -> Result<WorktreeSession, WorktreeError> {
+        let _admin = self.worktree_admin.lock().await;
         self.ensure_repository().await?;
         let record = self
             .load_session(id)?
@@ -1086,6 +1100,9 @@ impl GitWorktreeManager {
     }
 
     async fn remove_worktree_dir(&self, session: &WorktreeSession) -> Result<(), WorktreeError> {
+        // `worktree remove` and the `prune` below rewrite the same
+        // `.git/worktrees` entries a concurrent creation is building.
+        let _admin = self.worktree_admin.lock().await;
         if session.path.exists() {
             let path = session.path.to_string_lossy().into_owned();
             let output = self
@@ -1846,21 +1863,38 @@ mod tests {
         manager.abandon_worktree(&session).await.unwrap();
     }
 
+    /// Parallel agents allocate worktrees at the same time. `git worktree add`
+    /// creates `.git/worktrees/<id>/` before writing its `commondir` file, and
+    /// a second creation reading that sibling failed intermittently with
+    /// `fatal: failed to read .git/worktrees/<other>/commondir`. Rounds with
+    /// four simultaneous allocations keep that window under test.
     #[tokio::test]
     async fn parallel_agents_receive_distinct_worktrees() {
         let (_dir, manager) = repo().await;
-        let (left, right) = tokio::join!(
-            manager.create_worktree("dev-01", Uuid::new_v4()),
-            manager.create_worktree("dev-02", Uuid::new_v4())
-        );
-        let left = left.unwrap();
-        let right = right.unwrap();
-        assert_ne!(left.path, right.path);
-        assert_ne!(left.branch_name, right.branch_name);
-        assert!(left.path.join("README.md").exists());
-        assert!(right.path.join("README.md").exists());
-        manager.clean_worktree(&left).await.unwrap();
-        manager.clean_worktree(&right).await.unwrap();
+        for round in 0..5 {
+            let (first, second, third, fourth) = tokio::join!(
+                manager.create_worktree("dev-01", Uuid::new_v4()),
+                manager.create_worktree("dev-02", Uuid::new_v4()),
+                manager.create_worktree("dev-03", Uuid::new_v4()),
+                manager.create_worktree("dev-04", Uuid::new_v4())
+            );
+            let sessions = [
+                first.unwrap_or_else(|error| panic!("round {round}: {error}")),
+                second.unwrap_or_else(|error| panic!("round {round}: {error}")),
+                third.unwrap_or_else(|error| panic!("round {round}: {error}")),
+                fourth.unwrap_or_else(|error| panic!("round {round}: {error}")),
+            ];
+            for (index, session) in sessions.iter().enumerate() {
+                for other in &sessions[index + 1..] {
+                    assert_ne!(session.path, other.path);
+                    assert_ne!(session.branch_name, other.branch_name);
+                }
+                assert!(session.path.join("README.md").exists());
+            }
+            for session in &sessions {
+                manager.clean_worktree(session).await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]
