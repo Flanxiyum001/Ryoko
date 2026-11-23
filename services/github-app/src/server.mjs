@@ -282,28 +282,48 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       }
       const delivery = String(req.headers['x-github-delivery'] || '');
       if (!/^[A-Za-z0-9-]{16,80}$/.test(delivery)) throw bad('missing webhook delivery identifier');
-      if (deliveries.has(delivery)) return json(res, 202, { accepted: true, duplicate: true });
+      if (!stateDb && deliveries.has(delivery)) return json(res, 202, { accepted: true, duplicate: true });
       let payload;
       try { payload = JSON.parse(body.toString('utf8')); } catch { throw bad('invalid webhook JSON'); }
       const type = String(req.headers['x-github-event'] || '');
       const allowed = ['installation', 'installation_repositories', 'issues', 'issue_comment',
         'pull_request', 'pull_request_review', 'check_run', 'check_suite', 'workflow_run', 'push'];
-      // Persist delivery identity before acknowledging it. A crash can lose
-      // work but must never silently duplicate a potentially remote write.
-      botState.recordDelivery(delivery);
-      if (allowed.includes(type) && payload.installation?.id) emit(summarizeWebhook(type, payload));
       const command = issueBotCommand(type, payload, settings.allowedUsers);
       const labelRequest = issueAgentRequest(type, payload);
       const trustedLabel = labelRequest && settings.allowedUsers.includes(
         String(payload.sender?.login || '').toLowerCase()) ? labelRequest : null;
       const pipelineRequest = command?.command === 'status'
         ? null : (command || trustedLabel);
+      const allowedRequest = pipelineRequest && settings.agentRepoIds.includes(pipelineRequest.repoId)
+        ? pipelineRequest : null;
+
+      if (stateDb) {
+        // The signed delivery ID and any job are committed in ONE transaction.
+        // Multiple HTTP replicas cannot acknowledge the same event twice.
+        const accepted = stateDb.acceptWebhook(
+          delivery, allowedRequest, command?.command === 'retry',
+        );
+        if (accepted.duplicate) return json(res, 202, { accepted: true, duplicate: true });
+        if (allowed.includes(type) && payload.installation?.id) emit(summarizeWebhook(type, payload));
+        if (command?.command === 'status' && settings.agentRepoIds.includes(command.repoId)) {
+          void notifyIssue(command, botStatus(command, pipelineJobs.get(jobKey(command))));
+        }
+        if (accepted.queued && allowedRequest) {
+          emit({ ...summarizeWebhook('pipeline', payload), action: 'queued',
+            summary: 'Engineering job queued for worker' });
+        } else if (command && accepted.refusal) {
+          void notifyIssue(command, botStatus(command, pipelineJobs.get(jobKey(command))));
+        }
+        return json(res, 202, { accepted: true, queued: Boolean(accepted.queued) });
+      }
+      botState.recordDelivery(delivery);
+      if (allowed.includes(type) && payload.installation?.id) emit(summarizeWebhook(type, payload));
       if (command?.command === 'status' && settings.agentRepoIds.includes(command.repoId)) {
         void notifyIssue(command, botStatus(command, pipelineJobs.get(jobKey(command))));
       }
-      if (pipelineRequest && settings.agentRepoIds.includes(pipelineRequest.repoId)) {
+      if (allowedRequest) {
         try {
-          startJob(pipelineRequest, command?.command === 'retry');
+          startJob(allowedRequest, command?.command === 'retry');
         } catch {
           if (command) void notifyIssue(command,
             botStatus(command, pipelineJobs.get(jobKey(command)))
