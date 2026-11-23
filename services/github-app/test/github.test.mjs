@@ -335,6 +335,18 @@ test('paired native GitHub proposals require separate human approval and recheck
   const rejected = await req('/api/desktop/proposals/' + other + '/reject', { method: 'POST', headers });
   assert.equal((await rejected.json()).status, 'rejected');
   assert.equal(fakeBroker.executionCount, initialWrites + 1);
+
+  // Two simultaneous desktop callers must never both execute a stale pending
+  // record while authorization yields; exactly one request can win.
+  const concurrent = await req('/api/desktop/proposals', { method: 'POST', headers, body: proposed });
+  const raceId = (await concurrent.json()).id;
+  const writesBeforeRace = fakeBroker.executionCount;
+  const approvals = await Promise.all([
+    req('/api/desktop/proposals/' + raceId + '/approve', { method: 'POST', headers }),
+    req('/api/desktop/proposals/' + raceId + '/approve', { method: 'POST', headers }),
+  ]);
+  assert.deepEqual(approvals.map((answer) => answer.status).sort(), [200, 409]);
+  assert.equal(fakeBroker.executionCount, writesBeforeRace + 1);
   await req('/api/disconnect', { method: 'POST', sessionCookie: cookie, csrf });
   const revoked = await req('/api/desktop/proposals?installationId=17&repoId=41', { headers });
   assert.equal(revoked.status, 401);
