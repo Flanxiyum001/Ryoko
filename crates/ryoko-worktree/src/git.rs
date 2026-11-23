@@ -1524,7 +1524,7 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     }
 
     let batch_id = Uuid::new_v4();
-    let mut prepared = Vec::new();
+    let mut prepared: Vec<PreparedWrite> = Vec::new();
     for (index, change) in changes.iter().enumerate() {
         let target = root.join(&paths[index].2);
         let parent = target
