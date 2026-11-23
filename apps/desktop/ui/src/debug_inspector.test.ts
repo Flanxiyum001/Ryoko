@@ -20,6 +20,7 @@ import {
   validateScopes,
   validateStackFrames,
   validateVariables,
+  visibleVariablesForScope,
   MAX_STACK_FRAMES,
   MAX_VARIABLE_VALUE_LENGTH,
   MAX_LOG_LINES,
@@ -348,5 +349,35 @@ describe('DAP inspector state lifecycle', () => {
     }
     expect(state.logLines.length).toBe(MAX_LOG_LINES);
     expect(state.logLines[state.logLines.length - 1]).toBe(`Line ${MAX_LOG_LINES + 49}`);
+  });
+});
+
+describe('DAP variable tree visibility', () => {
+  it('renders nested values once, hides collapsed refs, and ignores unrelated cached scopes', () => {
+    const state = createInitialDebugState();
+    state.scopes = [{ name: 'Locals', variablesReference: 1, expensive: false }];
+    state.variables.set(1, [
+      { name: 'user', value: 'Object', variablesReference: 2 },
+      { name: 'count', value: '1', variablesReference: 0 },
+    ]);
+    state.variables.set(2, [{ name: 'address', value: 'Object', variablesReference: 3 }]);
+    state.variables.set(3, [{ name: 'city', value: 'Hyderabad', variablesReference: 0 }]);
+    state.variables.set(999, [{ name: 'unrelated', value: 'hidden', variablesReference: 0 }]);
+
+    expect(visibleVariablesForScope(state, 1).map((row) => row.variable.name))
+      .toEqual(['user', 'count']);
+    state.expandedVarRefs.add(2);
+    expect(visibleVariablesForScope(state, 1).map((row) => row.variable.name))
+      .toEqual(['user', 'address', 'count']);
+    state.expandedVarRefs.add(3);
+    expect(visibleVariablesForScope(state, 1).map((row) => [row.variable.name, row.depth]))
+      .toEqual([['user', 0], ['address', 1], ['city', 2], ['count', 0]]);
+  });
+
+  it('stops cyclic adapter references without duplicating root variables', () => {
+    const state = createInitialDebugState();
+    state.variables.set(1, [{ name: 'loop', value: 'Object', variablesReference: 1 }]);
+    state.expandedVarRefs.add(1);
+    expect(visibleVariablesForScope(state, 1).map((row) => row.variable.name)).toEqual(['loop']);
   });
 });
