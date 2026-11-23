@@ -1560,7 +1560,9 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        directory.create_dir(&parent).map_err(|error| invalid(error.to_string()))?;
+                        directory
+                            .create_dir(&parent)
+                            .map_err(|error| invalid(error.to_string()))?;
                     }
                     Err(error) => return Err(invalid(error.to_string())),
                 }
@@ -1580,14 +1582,25 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     let mut prepared: Vec<PreparedWrite> = Vec::new();
     for (index, change) in changes.iter().enumerate() {
         let relative = &paths[index].2;
-        let parent = relative.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-        let parent_dir = directory.open_dir(parent).map_err(|error| invalid(error.to_string()))?;
-        let name = relative.file_name().ok_or_else(|| invalid("missing file name".into()))?.to_os_string();
+        let parent = relative
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent_dir = directory
+            .open_dir(parent)
+            .map_err(|error| invalid(error.to_string()))?;
+        let name = relative
+            .file_name()
+            .ok_or_else(|| invalid("missing file name".into()))?
+            .to_os_string();
         let staged = format!(".ryoko-stage-{batch_id}-{index}.tmp");
         let backup = format!(".ryoko-backup-{batch_id}-{index}.tmp");
         let write = (|| -> std::io::Result<()> {
             use std::io::Write;
-            let mut writer = parent_dir.open_with(&staged, cap_std::fs::OpenOptions::new().write(true).create_new(true))?;
+            let mut writer = parent_dir.open_with(
+                &staged,
+                cap_std::fs::OpenOptions::new().write(true).create_new(true),
+            )?;
             writer.write_all(change.content.as_bytes())?;
             writer.sync_all()?;
             // Replacing an existing executable must preserve its permission bits.
@@ -1618,13 +1631,19 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     let mut failure = None;
     for (index, entry) in prepared.iter().enumerate() {
         if entry.existed {
-            if let Err(error) = entry.parent.rename(&entry.name, &entry.parent, &entry.backup) {
+            if let Err(error) = entry
+                .parent
+                .rename(&entry.name, &entry.parent, &entry.backup)
+            {
                 failure = Some(format!("cannot back up {}: {error}", entry.path));
                 break;
             }
             backed_up[index] = true;
         }
-        if let Err(error) = entry.parent.rename(&entry.staged, &entry.parent, &entry.name) {
+        if let Err(error) = entry
+            .parent
+            .rename(&entry.staged, &entry.parent, &entry.name)
+        {
             failure = Some(format!("cannot commit {}: {error}", entry.path));
             break;
         }
@@ -1640,7 +1659,9 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
                 rollback_errors.push(restore.to_string());
             }
             if backed_up[index]
-                && let Err(restore) = entry.parent.rename(&entry.backup, &entry.parent, &entry.name)
+                && let Err(restore) = entry
+                    .parent
+                    .rename(&entry.backup, &entry.parent, &entry.name)
             {
                 rollback_errors.push(restore.to_string());
             }
@@ -1668,8 +1689,11 @@ impl WorkspaceLease for GitWorktreeLease {
     }
 
     fn validation_root(&self) -> PathBuf {
-        self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner())
-            .as_ref().map(|(path, _): &(PathBuf, String)| path.clone())
+        self.validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(path, _): &(PathBuf, String)| path.clone())
             .unwrap_or_else(|| self.root.clone())
     }
 
@@ -1734,26 +1758,53 @@ impl WorkspaceLease for GitWorktreeLease {
             .manager
             .checked("seal source tree", &["write-tree"], &self.session.path)
             .await?;
-        let commit = self.manager.checked("commit source snapshot", &[
-            "-c", "commit.gpgsign=false", "commit-tree", &tree,
-            "-p", &self.session.base_commit, "-m", "Ryoko validation snapshot",
-        ], &self.session.path).await?;
-        let checkout = self.manager.base_project_path().join(".ryoko/validation").join(self.session.id.to_string());
+        let commit = self
+            .manager
+            .checked(
+                "commit source snapshot",
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &self.session.base_commit,
+                    "-m",
+                    "Ryoko validation snapshot",
+                ],
+                &self.session.path,
+            )
+            .await?;
+        let checkout = self
+            .manager
+            .base_project_path()
+            .join(".ryoko/validation")
+            .join(self.session.id.to_string());
         tokio::fs::create_dir_all(checkout.parent().expect("validation path has parent"))
-            .await.map_err(|error| CoreError::Workspace(error.to_string()))?;
+            .await
+            .map_err(|error| CoreError::Workspace(error.to_string()))?;
         let checkout_arg = checkout.to_string_lossy().to_string();
-        self.manager.checked("materialize validation snapshot", &[
-            "worktree", "add", "--detach", &checkout_arg, &commit,
-        ], self.manager.base_project_path()).await?;
+        self.manager
+            .checked(
+                "materialize validation snapshot",
+                &["worktree", "add", "--detach", &checkout_arg, &commit],
+                self.manager.base_project_path(),
+            )
+            .await?;
         *self.sealed_tree.lock().unwrap_or_else(|e| e.into_inner()) = Some(tree);
-        *self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner()) = Some((checkout, commit));
+        *self
+            .validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((checkout, commit));
         Ok(())
     }
 
     async fn verify_seal(&self) -> CoreResult<()> {
         let root = self.validation_root();
         if root == self.root {
-            return Err(CoreError::Workspace("validation snapshot is missing".to_owned()));
+            return Err(CoreError::Workspace(
+                "validation snapshot is missing".to_owned(),
+            ));
         }
         let paths: Vec<String> = self
             .applied
@@ -1789,8 +1840,12 @@ impl WorkspaceLease for GitWorktreeLease {
 
     async fn publish(&self, task: &Task, summary: &str) -> CoreResult<PullRequest> {
         self.verify_seal().await?;
-        let commit = self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner())
-            .as_ref().map(|(_, commit)| commit.clone())
+        let commit = self
+            .validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(_, commit)| commit.clone())
             .ok_or_else(|| CoreError::Workspace("validation snapshot is missing".to_owned()))?;
         // The branch now points to the immutable tree used by the validation
         // gate. A later worktree mutation cannot change this commit object.
@@ -1822,12 +1877,20 @@ impl WorkspaceLease for GitWorktreeLease {
     }
 
     async fn discard(&self) -> CoreResult<()> {
-        let checkout = self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let checkout = self
+            .validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         if let Some((checkout, _)) = checkout {
             let path = checkout.to_string_lossy().to_string();
-            self.manager.checked("remove validation snapshot", &[
-                "worktree", "remove", "--force", &path,
-            ], self.manager.base_project_path()).await?;
+            self.manager
+                .checked(
+                    "remove validation snapshot",
+                    &["worktree", "remove", "--force", &path],
+                    self.manager.base_project_path(),
+                )
+                .await?;
         }
         self.manager
             .clean_worktree(&self.session)
@@ -1987,7 +2050,10 @@ mod tests {
             }
         });
         for _ in 0..300 {
-            let _ = apply_batch(root.path(), &[ProposedChange::new("src/escape.rs", "payload")]);
+            let _ = apply_batch(
+                root.path(),
+                &[ProposedChange::new("src/escape.rs", "payload")],
+            );
         }
         attacker.join().unwrap();
         assert!(!outside.path().join("escape.rs").exists());
@@ -2228,10 +2294,16 @@ mod tests {
         tokio::fs::write(lease.root().join("source.rs"), "tampered")
             .await
             .unwrap();
-        assert_eq!(tokio::fs::read_to_string(lease.validation_root().join("source.rs")).await.unwrap(), "validated");
+        assert_eq!(
+            tokio::fs::read_to_string(lease.validation_root().join("source.rs"))
+                .await
+                .unwrap(),
+            "validated"
+        );
         lease.verify_seal().await.unwrap();
         tokio::fs::write(lease.validation_root().join("source.rs"), "tampered")
-            .await.unwrap();
+            .await
+            .unwrap();
         assert!(lease.verify_seal().await.is_err());
         assert!(lease.publish(&task, "source").await.is_err());
         tokio::fs::write(lease.validation_root().join("source.rs"), "validated")
