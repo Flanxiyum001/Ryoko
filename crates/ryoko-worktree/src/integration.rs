@@ -356,30 +356,7 @@ async fn read_confined(session: &WorktreeSession, path: &str) -> Result<String, 
 
 async fn write_confined(session: &WorktreeSession, file: &ProposedChange) -> Result<(), String> {
     let relative = validate_relative_path(&file.path).map_err(|error| error.to_string())?;
-    let absolute = session.path.join(&relative);
-    let Some(parent) = absolute.parent() else {
-        return Err(format!("resolved path has no parent: {}", file.path));
-    };
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    let canonical_parent = tokio::fs::canonicalize(parent)
-        .await
-        .map_err(|error| format!("cannot resolve {}: {error}", parent.display()))?;
-    if !canonical_parent.starts_with(&session.path) {
-        return Err(format!("resolved path escapes the worktree: {}", file.path));
-    }
-    if tokio::fs::symlink_metadata(&absolute)
-        .await
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Err(format!(
-            "refusing to write through a symlink: {}",
-            file.path
-        ));
-    }
-    tokio::fs::write(&absolute, &file.content)
-        .await
+    crate::confined::write(&session.path, &relative, file.content.as_bytes())
         .map_err(|error| format!("cannot write resolved {}: {error}", file.path))
 }
 
