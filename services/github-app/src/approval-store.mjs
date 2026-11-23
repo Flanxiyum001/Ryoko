@@ -119,5 +119,16 @@ export class ApprovalStore {
     return item;
   }
 
+  claim(id) {
+    const item = this.proposals.get(id);
+    if (!item || item.status !== 'pending' || Date.now() > item.expires) {
+      throw Object.assign(new Error('approval is expired or already claimed'), { status: 409 });
+    }
+    // No await between observation and persistence: one-shot in one process.
+    const claimed = { ...item, status: 'executing', leaseId: randomUUID() };
+    this.save(claimed);
+    return claimed;
+  }
+
   get(id) { return this.proposals.get(id); }
 }
