@@ -199,7 +199,7 @@ export function mountOnboarding(deps: OnboardingDeps): {
       content.innerHTML = `
         <div class="setup-summary"><strong>Your first agent task</strong><span>Ryoko will stage its proposed changes for review.</span></div>
         <p class="setup-goal"></p>
-        <p class="hint">This prepares the goal in Mission Control. You explicitly choose Run to start work.</p>`;
+        <p class="hint">This prepares the goal in Mission Control. Use Generate image to prepare a validation sandbox if needed, then explicitly choose Run.</p>`;
       content.querySelector<HTMLElement>('.setup-goal')!.textContent = FIRST_GOAL;
       next.disabled = false;
       next.textContent = 'Prepare my first task';
