@@ -2516,7 +2516,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             "run": &report,
             "ledger": router.ledger().snapshot(),
             "validation": values,
-            "independent_reviews": report.successful_reviews(),
+            "independent_reviews": &report.review_records,
         });
         let path = if path.is_absolute() {
             path.clone()
