@@ -289,7 +289,8 @@ function activateView(view: WorkbenchView): void {
   }
   workbenchLayout.dataset.activeView = view;
   workbenchLayout.classList.toggle('hide-explorer', view !== 'explorer');
-  workbenchLayout.classList.toggle('hide-inspector', view === 'explorer');
+  const narrowLayout = window.matchMedia('(max-width: 720px)').matches;
+  workbenchLayout.classList.toggle('hide-inspector', view === 'explorer' || (view === 'editor' && narrowLayout));
   for (const button of railButtons) {
     const active = button.dataset.view === view;
     button.classList.toggle('active', active);
