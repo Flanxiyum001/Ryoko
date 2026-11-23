@@ -72,6 +72,19 @@ unverifiable attestation path, or a documented boundary without a regression tes
 No merge, publish, deploy or release step happens automatically from an agent
 proposal.
 
+## Tag-published releases
+
+`.github/workflows/release.yml` publishes a GitHub Release for every tag push,
+including `-alpha` and `-beta` tags, and marks it as the repository's Latest
+release (`prerelease: false`, `make_latest: true`). The human act that authorizes
+that publication is the tag push itself; no agent or workflow decides it.
+
+The workflow does not gate on CI and does not attach installers. It creates the
+release entry and commits-generated notes only, so a tag can point at a commit
+whose CI failed and `Latest` can name a pre-release build. The gates above still
+decide whether a build is shippable; a tag does not replace them. Installer
+artifacts continue to come from the `Desktop installers` workflow.
+
 
 ## Desktop installer signing gate (workflow-ready, credentials not supplied)
 
