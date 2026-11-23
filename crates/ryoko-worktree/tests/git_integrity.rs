@@ -732,16 +732,18 @@ async fn concurrent_merges_update_the_target_branch_without_losing_commits() {
     }
     write(root, "user/notes.txt", "mine\n").await;
 
-    // All four validated branches ask to land at once. Git's compare-and-swap
-    // ref update lets one win; the others must fail cleanly and can retry.
+    // All four validated branches ask to land at once through two manager
+    // instances, as a daemon and a CLI run would. Git's compare-and-swap ref
+    // update lets one win; the others must fail cleanly and can retry.
+    let managers = [manager.clone(), GitWorktreeManager::new(root)];
     let mut pending = sessions.clone();
     let mut last_errors: Vec<String> = Vec::new();
     let mut attempts = 0;
-    while !pending.is_empty() && attempts < 20 {
+    while !pending.is_empty() && attempts < 30 {
         attempts += 1;
         let mut tasks = Vec::new();
-        for session in pending {
-            let manager = manager.clone();
+        for (index, session) in pending.into_iter().enumerate() {
+            let manager = managers[index % managers.len()].clone();
             tasks.push(tokio::spawn(async move {
                 let outcome = manager.merge_worktree(&session, "main", &approved()).await;
                 (session, outcome)
@@ -759,6 +761,9 @@ async fn concurrent_merges_update_the_target_branch_without_losing_commits() {
             }
         }
         pending = retry;
+        if !pending.is_empty() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
     assert!(
         pending.is_empty(),
