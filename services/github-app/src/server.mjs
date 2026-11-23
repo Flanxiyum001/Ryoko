@@ -7,7 +7,8 @@ import { promisify } from 'node:util';
 import { GitHubBroker } from './github.mjs';
 import { issueAgentRequest, runIssuePipeline } from './pipeline.mjs';
 import { issueBotCommand, postBotComment, botStatus } from './bot.mjs';
-import { isAllowedOrigin, validateProposal, verifyWebhookSignature } from './security.mjs';
+import { BotJobStore } from './durable-queue.mjs';
+import { isAllowedOrigin, positiveId, validateProposal, verifyWebhookSignature } from './security.mjs';
 
 const execFileAsync = promisify(execFile);
 const BODY_LIMIT = 150_000;
@@ -75,6 +76,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     ryokoBinary: config?.ryokoBinary || '',
     projectRoot: config?.projectRoot || '',
     projectsRoot: config?.projectsRoot || '',
+    botStateFile: config?.botStateFile || '',
     pipelineTimeoutMs: config?.pipelineTimeoutMs || 15 * 60_000,
     // Operator-owned MCP settings for pipeline runs. Absent means no MCP tools.
     mcp: config?.mcp && typeof config.mcp === 'object' ? config.mcp : null,
@@ -84,11 +86,12 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
   const sessions = new Map();
   const proposals = new Map();
   const events = [];
-  const deliveries = new Map();
+  const botState = new BotJobStore(settings.botStateFile);
+  const deliveries = botState.deliveries;
   const subscribers = new Set();
   const desktopPairings = new Map();
   const desktopSessions = new Map();
-  const pipelineJobs = new Map();
+  const pipelineJobs = botState.jobs;
   const isSecure = new URL(settings.origin).protocol === 'https:';
 
   function sessionFor(req) {
@@ -149,7 +152,57 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     }
   }
 
-  // Native desktop pairing is a deliberately read-only bridge. GitHub OAuth
+  function jobKey(request) {
+    return String(request.repoId) + ':' + String(request.number);
+  }
+
+  function startJob(request, retry = false) {
+    if (!settings.agentRepoIds.includes(request.repoId)) throw bad('repository not allowlisted', 403);
+    if (!settings.ryokoBinary || !settings.projectsRoot) {
+      throw bad('configure RYOKO_CLI_BIN and RYOKO_PROJECTS_ROOT before starting jobs', 503);
+    }
+    const key = jobKey(request);
+    const previous = pipelineJobs.get(key);
+    if (retry ? !['failed', 'interrupted'].includes(previous?.status)
+      : Boolean(previous)) throw bad('job already recorded; inspect status before retrying', 409);
+    botState.pruneJobs();
+    if (pipelineJobs.size >= 300 && !previous) throw bad('bot job queue full', 429);
+    const startedAt = Date.now();
+    botState.setJob(key, { status: 'running', startedAt });
+    const event = {
+      id: randomUUID(), type: 'pipeline', action: 'started',
+      installationId: request.installationId,
+      repositoryId: request.repoId,
+      repository: request.fullName,
+      summary: `Issue #${request.number}: ${request.title}`.slice(0, 180),
+      timestamp: new Date().toISOString(),
+    };
+    emit(event);
+    void (async () => {
+      await notifyIssue(request,
+        `Ryoko started work on issue #${request.number}. A successful run creates a **draft PR** only; a human must review and merge.`);
+      try {
+        const result = await runPipeline({ broker: client, request, settings });
+        const finished = { status: 'completed', ...result, startedAt, finishedAt: Date.now() };
+        botState.setJob(key, finished);
+        emit({ ...event, id: randomUUID(), action: 'completed',
+          summary: `Draft PR #${result.number} opened`, timestamp: new Date().toISOString() });
+        await notifyIssue(request, botStatus(request, finished));
+      } catch (error) {
+        // Do not surface untrusted provider, Git or filesystem errors to GitHub.
+        const failed = { status: 'failed', startedAt, finishedAt: Date.now() };
+        try { botState.setJob(key, failed); }
+        catch { console.error('Ryoko failed to persist job failure'); }
+        emit({ ...event, id: randomUUID(), action: 'failed',
+          summary: 'Engineering run failed; inspect the broker logs',
+          timestamp: new Date().toISOString() });
+        await notifyIssue(request, botStatus(request, failed));
+      }
+    })();
+    return { status: 'running', issue: request.number, startedAt };
+  }
+
+  // Native desktop pairing is a short-lived, loopback-only broker bridge. GitHub OAuth
   // credentials remain in the Node broker, never in Tauri's webview.
   function requireLoopback(req) {
     if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
@@ -226,76 +279,23 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       const type = String(req.headers['x-github-event'] || '');
       const allowed = ['installation', 'installation_repositories', 'issues', 'issue_comment',
         'pull_request', 'pull_request_review', 'check_run', 'check_suite', 'workflow_run', 'push'];
-      deliveries.set(delivery, Date.now());
-      if (deliveries.size > 1000) deliveries.delete(deliveries.keys().next().value);
+      // Persist delivery identity before acknowledging it. A crash can lose
+      // work but must never silently duplicate a potentially remote write.
+      botState.recordDelivery(delivery);
       if (allowed.includes(type) && payload.installation?.id) emit(summarizeWebhook(type, payload));
-      // Only allowlisted operators can request work through an issue comment.
-      // Label-based runs require GitHub's *newly applied* ryoko-fix label.
       const command = issueBotCommand(type, payload, settings.allowedUsers);
       const pipelineRequest = command?.command === 'status'
         ? null : (command || issueAgentRequest(type, payload));
       if (command?.command === 'status' && settings.agentRepoIds.includes(command.repoId)) {
-        const key = `${command.repoId}:${command.number}`;
-        void notifyIssue(command, botStatus(command, pipelineJobs.get(key)));
+        void notifyIssue(command, botStatus(command, pipelineJobs.get(jobKey(command))));
       }
       if (pipelineRequest && settings.agentRepoIds.includes(pipelineRequest.repoId)) {
-        const key = `${pipelineRequest.repoId}:${pipelineRequest.number}`;
-        const previous = pipelineJobs.get(key);
-        const retry = command?.command === 'retry';
-        const canStart = (!previous && !retry) || (retry && previous?.status === 'failed');
-        if (!canStart) {
-          if (command) {
-            void notifyIssue(command, retry && !previous
-              ? 'Ryoko has no failed job to retry in this broker session. Use `/ryoko run` for a new request.'
-              : botStatus(command, previous));
-          }
-        } else {
-          // The in-memory queue is bounded. Never evict a running job.
-          if (pipelineJobs.size >= 300) {
-            for (const [oldKey, oldJob] of pipelineJobs) {
-              if (oldJob.status !== 'running' && Date.now() - oldJob.finishedAt > 86_400_000) {
-                pipelineJobs.delete(oldKey);
-              }
-            }
-          }
-          if (pipelineJobs.size >= 300 && !previous) {
-            if (command) void notifyIssue(command, 'Ryoko is at its job limit. Contact the operator.');
-          } else {
-            const started = {
-              id: randomUUID(), type: 'pipeline', action: 'started',
-              installationId: pipelineRequest.installationId,
-              repositoryId: pipelineRequest.repoId,
-              repository: pipelineRequest.fullName,
-              summary: `Issue #${pipelineRequest.number}: ${pipelineRequest.title}`.slice(0, 180),
-              timestamp: new Date().toISOString(),
-            };
-            pipelineJobs.set(key, { status: 'running', startedAt: Date.now() });
-            emit(started);
-            void (async () => {
-              await notifyIssue(pipelineRequest,
-                `Ryoko started work on issue #${pipelineRequest.number}. I'll report the result here. If successful, I'll open a **draft PR** for manual review—never merge automatically.`);
-              try {
-                const result = await runPipeline({ broker: client, request: pipelineRequest, settings });
-                const finished = { status: 'completed', ...result, finishedAt: Date.now() };
-                pipelineJobs.set(key, finished);
-                emit({
-                  ...started, id: randomUUID(), action: 'completed',
-                  summary: `Draft PR #${result.number} opened`.slice(0, 180),
-                  timestamp: new Date().toISOString(),
-                });
-                await notifyIssue(pipelineRequest, botStatus(pipelineRequest, finished));
-              } catch (error) {
-                const message = safeError(error).message;
-                const failed = { status: 'failed', error: message, finishedAt: Date.now() };
-                pipelineJobs.set(key, failed);
-                emit({
-                  ...started, id: randomUUID(), action: 'failed', summary: message.slice(0, 180),
-                  timestamp: new Date().toISOString(),
-                });
-                await notifyIssue(pipelineRequest, botStatus(pipelineRequest, failed));
-              }
-            })();
-          }
+        try {
+          startJob(pipelineRequest, command?.command === 'retry');
+        } catch {
+          if (command) void notifyIssue(command,
+            botStatus(command, pipelineJobs.get(jobKey(command)))
+            + ' Check broker configuration and existing branches before retrying.');
         }
       }
       return json(res, 202, { accepted: true });
