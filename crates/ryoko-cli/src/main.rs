@@ -32,8 +32,8 @@ use ryoko_models::{
 use ryoko_sandbox::{BuildBackend, BuildSandbox, SandboxPlan, SpecPolicy};
 use ryoko_worktree::{
     AttestOptions, GitWorktreeManager, HunkPatch, IntegrationAgent, MergeReceipt, ModelProvenance,
-    SandboxProvenance, ValidationProvenance, WorktreeDiff, WorktreeRecord, WorktreeSession,
-    WorktreeState, attestation, attestation::Approver,
+    SandboxProvenance, ValidationProvenance, WorktreeDiff, WorktreeError, WorktreeRecord,
+    WorktreeSession, WorktreeState, attestation, attestation::Approver,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::Command;
@@ -2421,6 +2421,29 @@ async fn attest_accepted_merge(
     Ok(format!("Attested merge at {commit} with key {keyid}"))
 }
 
+/// True when the merge was refused before the target ref moved, so the checkout
+/// and the target branch are provably unchanged. Other failures (a branch that
+/// disappeared, work that is already merged) say nothing about the checkout.
+fn merge_refused_cleanly(error: &WorktreeError) -> bool {
+    matches!(
+        error,
+        WorktreeError::DirtyMainCheckout
+            | WorktreeError::UntrackedOverwrite(_)
+            | WorktreeError::MergeConflict { .. }
+            | WorktreeError::TargetCheckedOut(_)
+            | WorktreeError::UncommittedChanges
+            | WorktreeError::NotApproved(_)
+    )
+}
+
+/// Follows a merge error with the guarantee the user actually needs: their
+/// checkout, including files Ryoko refused to overwrite, was left alone.
+fn report_merge_refusal(error: &WorktreeError, target: &str) {
+    if merge_refused_cleanly(error) {
+        eprintln!("Nothing was merged; {target} and the checkout are unchanged.");
+    }
+}
+
 async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
     let root = canonical_root(&args.repo)?;
     let manager = GitWorktreeManager::new(&root);
@@ -2536,6 +2559,7 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                     }
                     Err(error) => {
                         eprintln!("merge failed: {error}");
+                        report_merge_refusal(&error, &target);
                         continue;
                     }
                 }
@@ -2625,7 +2649,10 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                                 manager.release_worktree(&session).await?;
                                 return Ok(());
                             }
-                            Err(error) => eprintln!("Selective merge refused: {error}"),
+                            Err(error) => {
+                                eprintln!("Selective merge refused: {error}");
+                                report_merge_refusal(&error, &target);
+                            }
                         }
                     }
                 }
@@ -3199,6 +3226,35 @@ fn cli_error(message: impl Into<String>) -> Box<dyn Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_merges_are_reported_as_leaving_the_checkout_alone() {
+        for error in [
+            WorktreeError::DirtyMainCheckout,
+            WorktreeError::UntrackedOverwrite("notes.md, .env".to_owned()),
+            WorktreeError::MergeConflict {
+                branch: "ryoko/dev/1".to_owned(),
+                details: "CONFLICT (content)".to_owned(),
+            },
+            WorktreeError::TargetCheckedOut("/tmp/somewhere".to_owned()),
+            WorktreeError::UncommittedChanges,
+            WorktreeError::NotApproved("tests failed".to_owned()),
+        ] {
+            assert!(merge_refused_cleanly(&error), "{error}");
+        }
+        assert!(!merge_refused_cleanly(&WorktreeError::NoChanges(
+            "ryoko/dev/1".to_owned()
+        )));
+        assert!(!merge_refused_cleanly(&WorktreeError::NotPublished(
+            "ryoko/dev/1".to_owned()
+        )));
+
+        // The user sees the cause and the remedy, and which paths collide.
+        let message = WorktreeError::UntrackedOverwrite("notes.md, .env".to_owned()).to_string();
+        assert!(message.contains("untracked"), "{message}");
+        assert!(message.contains("commit, stash or move"), "{message}");
+        assert!(message.contains("notes.md, .env"), "{message}");
+    }
 
     #[tokio::test]
     async fn project_brief_includes_structural_outline() {
