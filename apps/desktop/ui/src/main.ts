@@ -20,6 +20,8 @@ import {
 } from './changes_view';
 import { mountSettingsDialog } from './settings_view';
 import { InlineEditController } from './inline_edit_view';
+import { mountAgentChat, type CodeSuggestion, type EditorSelectionContext } from './agent_chat';
+import { previewAccepted, proposalHunks, type ProposalHunk } from './proposal_review';
 import { DebugViewController } from './debug_view';
 import {
   chordForEvent,
@@ -233,6 +235,13 @@ const lspPills = element('lspPills');
 const changesSummary = element('changesSummary');
 const changesList = element('changesList');
 const editorStatus = element('editorStatus');
+const usageMeter = element('usageMeter');
+const reviewInboxList = element('reviewInboxList');
+const reviewInboxCount = element('reviewInboxCount');
+const proposalToolbar = element('proposalToolbar');
+const proposalHunksNode = element('proposalHunks');
+const proposalApply = element<HTMLButtonElement>('proposalApply');
+const proposalDiscard = element<HTMLButtonElement>('proposalDiscard');
 const cursorPos = element('cursorPos');
 const languageMode = element<HTMLSelectElement>('languageMode');
 const runActiveFile = element<HTMLButtonElement>('runActiveFile');
@@ -271,7 +280,7 @@ const workbenchLayout = document.querySelector<HTMLElement>('.layout')!;
 const inspectorPane = element('inspectorPane');
 const railButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.rail-button'));
 
-type WorkbenchView = 'explorer' | 'editor' | 'mission' | 'changes' | 'problems' | 'settings';
+type WorkbenchView = 'explorer' | 'editor' | 'chat' | 'mission' | 'changes' | 'problems' | 'settings';
 
 function activateView(view: WorkbenchView): void {
   if (view === 'settings') {
@@ -289,6 +298,9 @@ function activateView(view: WorkbenchView): void {
   if (view === 'changes') {
     changesDetails.open = true;
     changesDetails.scrollIntoView({ block: 'nearest' });
+  } else if (view === 'chat') {
+    element('agentChat').scrollIntoView({ block: 'nearest' });
+    agentChat.focus();
   } else if (view === 'mission') {
     inspectorPane.querySelector('.mission')?.scrollIntoView({ block: 'nearest' });
   } else if (view === 'problems') {
@@ -299,7 +311,7 @@ function activateView(view: WorkbenchView): void {
 
 railButtons.forEach((button) => button.addEventListener('click', () => {
   const view = button.dataset.view;
-  if (view === 'explorer' || view === 'editor' || view === 'mission' ||
+  if (view === 'explorer' || view === 'editor' || view === 'chat' || view === 'mission' ||
       view === 'changes' || view === 'problems' || view === 'settings') {
     activateView(view);
   }
@@ -317,6 +329,8 @@ let missionSnapshot: MissionSnapshot | null = null;
 let missionSelection: string | null = null;
 let missionFocusEnabled = false;
 let missionPolling = false;
+let chatInputTokens = 0;
+let chatOutputTokens = 0;
 let agentSessions: AgentSession[] = [];
 let agentSessionPolling = false;
 let gitHunks: GitHunkSnapshot | null = null;
@@ -327,6 +341,12 @@ let runPolling = false;
 let diffWidgets: monaco.editor.IContentWidget[] = [];
 let diffOriginalModel: monaco.editor.ITextModel | null = null;
 let diffModifiedModel: monaco.editor.ITextModel | null = null;
+interface PendingProposal {
+  context: EditorSelectionContext;
+  hunks: ProposalHunk[];
+  accepted: Set<number>;
+}
+let pendingProposal: PendingProposal | null = null;
 let xterm: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let terminalSessionId: number | null = null;
@@ -504,6 +524,40 @@ const inlineEdit = new InlineEditController({
   languageId: () => state.current?.languageId ?? 'plaintext',
   setStatus,
   onSaveAfterApply: saveCurrent,
+  onReview: openSuggestedReview,
+});
+
+function currentSelectionContext(): EditorSelectionContext | null {
+  const file = state.current;
+  const selection = editor.getSelection();
+  if (!file || !selection || selection.isEmpty() || editor.getModel() !== file.model) return null;
+  return {
+    path: file.path,
+    text: file.model.getValueInRange(selection),
+    fullText: file.model.getValue(),
+    startOffset: file.model.getOffsetAt(selection.getStartPosition()),
+    endOffset: file.model.getOffsetAt(selection.getEndPosition()),
+  };
+}
+
+function updateUsageMeter(): void {
+  const totals = missionSnapshot?.totals;
+  const missionTokens = (totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0);
+  const total = missionTokens + chatInputTokens + chatOutputTokens;
+  usageMeter.textContent = `${formatTokens(total)} tokens · mission est. ${formatLedgerCost(totals?.ledgerCostUsd ?? 0)}`;
+  usageMeter.title = 'Includes reported chat and mission tokens. Cost estimates cover Mission Control ledger only, not chat billing.';
+}
+
+const agentChat = mountAgentChat({
+  files: () => state.files,
+  selection: currentSelectionContext,
+  review: openSuggestedReview,
+  onTokens: (input, output) => {
+    chatInputTokens += input;
+    chatOutputTokens += output;
+    updateUsageMeter();
+  },
+  setStatus,
 });
 
 function setStatus(message: string): void {
@@ -911,6 +965,10 @@ async function openFolder(): Promise<void> {
     state.current = null;
     updateTabs();
     closeDiffReview();
+    agentChat.reset();
+    chatInputTokens = 0;
+    chatOutputTokens = 0;
+    updateUsageMeter();
     editorHost.classList.add('hidden');
     emptyEditor.classList.remove('hidden');
     missionLogs = [];
@@ -932,6 +990,8 @@ async function openFolder(): Promise<void> {
     missionDetail.replaceChildren();
     agentSessions = [];
     agentSessionList.replaceChildren();
+    reviewInboxList.replaceChildren();
+    reviewInboxCount.textContent = '0';
     agentSessionSummary.textContent = '0 sessions';
     agentSessionRefresh.disabled = false;
     gitHunks = null;
@@ -1026,8 +1086,10 @@ async function refreshAgentSessions(): Promise<void> {
     if (openedRoot !== state.root) return;
     agentSessions = sessions;
     renderAgentSessions();
+    renderReviewInbox();
   } catch (error) {
     agentSessions = [];
+    renderReviewInbox();
     agentSessionSummary.textContent = 'unavailable';
     const hint = document.createElement('p');
     hint.className = 'hint';
@@ -1529,6 +1591,7 @@ async function refreshMissionLogs(): Promise<void> {
     }
     const text = await invoke<string>('read_mission_log', { name: missionLogSelect.value });
     missionSnapshot = reduceMissionEvents(parseMissionLog(text));
+    updateUsageMeter();
     renderMission();
   } catch (error) {
     missionSummary.textContent = 'unavailable';
@@ -1553,6 +1616,7 @@ function renderMission(): void {
     renderMissionDetail();
     return;
   }
+  updateUsageMeter();
   const tokens = formatTokens(snapshot.totals.inputTokens + snapshot.totals.outputTokens);
   const usage = `${tokens} tok · est. ${formatLedgerCost(snapshot.totals.ledgerCostUsd)}`;
   missionSummary.textContent = snapshot.finished
@@ -1608,7 +1672,14 @@ function renderMission(): void {
     const description = document.createElement('span');
     description.className = 'mission-node-description';
     description.textContent = node.task.description;
-    button.append(role, label, description);
+    const usageLine = document.createElement('span');
+    usageLine.className = 'mission-node-usage';
+    const tokenCount = (node.task.usage?.inputTokens ?? 0) + (node.task.usage?.outputTokens ?? 0);
+    usageLine.textContent = `${formatTokens(tokenCount)} tok · ${formatLedgerCost(node.task.usage?.ledgerCostUsd ?? 0)}`;
+    const filesLine = document.createElement('span');
+    filesLine.className = 'mission-node-usage';
+    filesLine.textContent = node.task.pullRequest?.files.slice(0, 2).join(' · ') || 'No files published';
+    button.append(role, label, description, usageLine, filesLine);
     button.addEventListener('click', () => {
       missionSelection = node.task.id;
       renderMission();
