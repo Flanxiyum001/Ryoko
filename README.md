@@ -13,7 +13,13 @@ For headless Linux x64 use, the optional **Ryoko CLI-only** GitHub Packages imag
 
 > **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, a Tauri desktop shell with a Monaco editor wired to `ryoko-lsp` plus customer language servers through a multiplexer (registry, search/replace, changes drawer, inline model edits, visual settings), WASI test execution and structural context extraction. It includes local FIM ghost text, a SQLite cross-file symbol index, an integrated PTY terminal and a DAP bridge, an interactive Mission Control task DAG, local diff-editor hunk review with sandboxed pre-flight validation, hardened container-backed project checks, and unsigned cross-platform preview installers, but not production-signed installers, automatic updates or deployment. Do not use its previews as proof of successful implementation.
 
-The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. Contribution rules are in [`AGENTS.md`](AGENTS.md).
+The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. See [contributing](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), [security reporting](SECURITY.md), and [engineering rules](AGENTS.md) before opening a PR.
+
+## License and commercial use
+
+Ryoko's currently published source code is licensed under the **[Apache License 2.0](LICENSE)**. It is permissive open source: commercial use, redistribution, modification, and the development of paid products are allowed under the license's conditions, including applicable notices and attribution. The license does not grant rights to use project trademarks.
+
+Ryoko may later offer paid, hosted, enterprise, or separately licensed proprietary features. That does **not** revoke rights already granted to recipients of Apache-2.0 code. Contributions remain owned by their authors, and any future relicensing of third-party contributions must respect those rights. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution licensing.
 
 ## Prerequisites
 
