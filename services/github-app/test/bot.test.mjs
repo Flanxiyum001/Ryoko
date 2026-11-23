@@ -102,6 +102,8 @@ test('signed webhook starts one review-only bot run and posts result', async () 
       allowedUsers: ['approved-owner'],
       webhookSecret: 'test-signature-secret',
       agentRepoIds: [41],
+      ryokoBinary: '/trusted/ryoko',
+      projectsRoot: '/tmp',
     },
     runPipeline: async () => {
       runCount += 1;
