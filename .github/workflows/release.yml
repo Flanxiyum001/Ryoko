@@ -1,0 +1,34 @@
+name: Auto Release
+
+on:
+  push:
+    tags:
+      - '*'
+      # `desktop-preview-v*` already has a publisher: the preview installer
+      # workflow creates that release with the signed-off asset set. Two
+      # publishers on one tag would race to create the same release.
+      - '!desktop-preview-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish release as latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Publish release as latest
+        uses: softprops/action-gh-release@v2
+        with:
+          # Release notes are generated from the commits reachable from the tag.
+          generate_release_notes: true
+          # Alpha and beta tags are published as Latest too; this is deliberate.
+          prerelease: false
+          make_latest: true
