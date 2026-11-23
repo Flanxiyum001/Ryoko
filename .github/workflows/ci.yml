@@ -64,6 +64,17 @@ jobs:
         run: npm test
       - name: Build frontend
         run: npm run build
+      - name: Install Chromium for renderer acceptance tests
+        run: npx playwright install --with-deps chromium
+      - name: Test workbench interactions
+        run: npm run test:ui
+      - name: Upload workbench screenshots and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-ui-evidence
+          path: apps/desktop/test-results/
+          if-no-files-found: ignore
       - name: Check Tauri shell formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 

@@ -349,3 +349,12 @@ Requirements: Node.js 22+, Git for server-side clones. After configuring environ
 
 Open http://127.0.0.1:4173 and connect your GitHub App installation. **This separate GitHub App workbench** is a browser shell, not the Tauri/Monaco desktop IDE described above. The packaged desktop has an experimental, read-only GitHub queue bridge to the local broker; the broker is not embedded in the installer. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
 
+
+### Desktop workbench navigation
+
+The native desktop UI includes file tabs with unsaved-change confirmation, a
+workspace file picker, explorer refresh, quick-open control, and direct Search
+and Extensions navigation. Open a local folder and edit/save existing files from
+the interface. The extensions catalog remains browse-only; VS Code extension
+installation is not supported. See the [workbench guide](docs/architecture/DESKTOP_IDE_WORKBENCH.md)
+for behavior, acceptance checks and current limits.
