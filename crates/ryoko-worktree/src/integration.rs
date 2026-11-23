@@ -35,7 +35,9 @@ Return exactly one JSON object, with no Markdown fences or prose:
 
 Rules:
 - Resolve every listed path and no other path.
+- Use base, ours and theirs snapshots to understand both sides of each conflict.
 - Preserve both branches' intended behavior, tests and security fixes.
+- If the intended semantics are ambiguous, do not fabricate a resolution.
 - Never leave conflict markers (<<<<<<<, =======, >>>>>>>) in a file.
 - Return complete file contents, not a patch.
 - Never add commands, scripts, credentials or unrelated files.
@@ -139,6 +141,14 @@ impl IntegrationAgent {
 
         let head = git_text(&session.path, &["rev-parse", "HEAD"], "resolve merged HEAD").await?;
         let range = format!("{}..{}", base.trim(), head.trim());
+        // A textual merge can still contain malformed whitespace/errors. The
+        // normal orchestrator validation then runs compilation and regressions.
+        git_text(
+            &session.path,
+            &["diff", "--check", &range],
+            "check integrated patch",
+        )
+        .await?;
         let files = git_text(
             &session.path,
             &["diff", "--name-only", "--no-renames", &range],
@@ -201,9 +211,31 @@ impl IntegrationAgent {
         );
         for path in conflicts {
             let content = read_confined(session, path).await?;
+            // Git index stages are the authoritative three-way conflict inputs.
+            // Non-text/add-delete conflicts without all three stages fail closed
+            // instead of asking a model to invent the missing source.
+            let mut stages = Vec::new();
+            for (number, label) in [(1, "base"), (2, "ours"), (3, "theirs")] {
+                let object = format!(":{number}:{path}");
+                let text = git_text(
+                    &session.path,
+                    &["show", &object],
+                    "inspect three-way merge source",
+                )
+                .await
+                .map_err(|error| format!(
+                    "cannot safely resolve {path}: missing {label} stage ({error}); human review required"
+                ))?;
+                stages.push((label, text));
+            }
             prompt.push_str(&format!(
                 "\n<conflicted_file path=\"{path}\">\n{content}\n</conflicted_file>\n"
             ));
+            for (label, source) in stages {
+                prompt.push_str(&format!(
+                    "<merge_stage name=\"{label}\" path=\"{path}\">\n{source}\n</merge_stage>\n"
+                ));
+            }
         }
         if prompt.len() > 80_000 {
             return Err("conflict context exceeds the resolution limit".to_owned());
@@ -233,6 +265,12 @@ impl IntegrationAgent {
         let mut args = vec!["add", "--"];
         args.extend(paths);
         git_text(&session.path, &args, "stage resolved conflicts").await?;
+        git_text(
+            &session.path,
+            &["diff", "--cached", "--check"],
+            "check staged merge resolution",
+        )
+        .await?;
         if !conflicted_paths(&session.path).await?.is_empty() {
             return Err("conflicts remain after model resolution".to_owned());
         }
@@ -356,30 +394,7 @@ async fn read_confined(session: &WorktreeSession, path: &str) -> Result<String, 
 
 async fn write_confined(session: &WorktreeSession, file: &ProposedChange) -> Result<(), String> {
     let relative = validate_relative_path(&file.path).map_err(|error| error.to_string())?;
-    let absolute = session.path.join(&relative);
-    let Some(parent) = absolute.parent() else {
-        return Err(format!("resolved path has no parent: {}", file.path));
-    };
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    let canonical_parent = tokio::fs::canonicalize(parent)
-        .await
-        .map_err(|error| format!("cannot resolve {}: {error}", parent.display()))?;
-    if !canonical_parent.starts_with(&session.path) {
-        return Err(format!("resolved path escapes the worktree: {}", file.path));
-    }
-    if tokio::fs::symlink_metadata(&absolute)
-        .await
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        return Err(format!(
-            "refusing to write through a symlink: {}",
-            file.path
-        ));
-    }
-    tokio::fs::write(&absolute, &file.content)
-        .await
+    crate::confined::write(&session.path, &relative, file.content.as_bytes())
         .map_err(|error| format!("cannot write resolved {}: {error}", file.path))
 }
 

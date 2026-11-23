@@ -1904,6 +1904,7 @@ dependencies = [
  "clap",
  "ignore",
  "ryoko-core",
+ "ryoko-marketplace",
  "ryoko-models",
  "ryoko-sandbox",
  "ryoko-scripting",
@@ -1947,6 +1948,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryoko-marketplace"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "futures",
+ "reqwest",
+ "ryoko-core",
+ "ryoko-scripting",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "ryoko-models"
 version = "0.1.0"
 dependencies = [
@@ -1978,6 +1999,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryoko-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "ryoko-storage",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
 name = "ryoko-sandbox"
 version = "0.1.0"
 dependencies = [
@@ -1985,6 +2017,7 @@ dependencies = [
  "ryoko-core",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -2012,6 +2045,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryoko-storage"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "ryoko-tools"
+version = "0.1.0"
+dependencies = [
+ "ignore",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ryoko-vfs"
 version = "0.1.0"
 dependencies = [
@@ -2023,6 +2079,7 @@ name = "ryoko-worktree"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cap-std",
  "rusqlite",
  "ryoko-core",
  "ryoko-models",

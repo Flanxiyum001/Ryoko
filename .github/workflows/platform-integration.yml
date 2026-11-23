@@ -1,0 +1,100 @@
+name: Phase 5 cross-platform integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native tests / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev build-essential
+
+      - name: Record native toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc -vV
+          cargo --version
+          node --version
+          npm --version
+          printf 'Runner: %s\nRef: %s\nCommit: %s\n' "$RUNNER_OS" "$GITHUB_REF" "$GITHUB_SHA"
+
+      - name: Frontend unit tests and production build
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Rust workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Build and smoke-test CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p ryoko-cli --bin ryoko
+          BIN="target/debug/ryoko"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then BIN="$BIN.exe"; fi
+          "$BIN" --help
+
+      - name: Build native language-server sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          test -n "$HOST"
+          cargo build --locked -p ryoko-native --bin ryoko-lsp
+          mkdir -p apps/desktop/src-tauri/binaries
+          EXT=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then EXT=".exe"; fi
+          cp "target/debug/ryoko-lsp$EXT" "apps/desktop/src-tauri/binaries/ryoko-lsp-$HOST$EXT"
+
+      - name: Check and test native Tauri shell
+        run: |
+          cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+          cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+
+      - name: Verify native Tauri formatting
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check

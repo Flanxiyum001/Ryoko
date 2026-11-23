@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+cap-std = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 ryoko-core = { path = "../ryoko-core" }
 ryoko-models = { path = "../ryoko-models" }

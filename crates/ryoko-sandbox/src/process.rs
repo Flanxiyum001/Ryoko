@@ -54,6 +54,10 @@ pub enum BuildSandboxError {
     MissingImage,
     #[error("invalid sandbox image or worktree path")]
     InvalidConfiguration,
+    #[error("sandbox image must be pinned to an exact sha256 digest")]
+    UnpinnedImage,
+    #[error("local sandbox image digest does not match the requested digest")]
+    ImageDigestMismatch,
     #[error("no working Docker or Podman daemon; refusing to run the check on the host")]
     NoContainerRuntime,
     #[error("could not execute sandboxed check: {0}")]
@@ -120,6 +124,13 @@ fn run_arguments(
     args
 }
 
+fn pinned_digest(image: &str) -> Option<&str> {
+    let digest = image
+        .strip_prefix("sha256:")
+        .or_else(|| image.rsplit_once("@sha256:").map(|(_, hash)| hash))?;
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(digest)
+}
+
 impl BuildSandbox {
     pub fn new(backend: BuildBackend, image: Option<String>) -> Self {
         Self {
@@ -142,23 +153,32 @@ impl BuildSandbox {
         let Some(dir) = &self.artifacts else {
             return Ok(None);
         };
+        // Compare physical paths on both sides. A worktree beneath a macOS
+        // /var alias must not bypass the "outside worktree" mount boundary.
+        let canonical_root = root.canonicalize()?;
+        if !canonical_root.is_dir() {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
         if dir
             .symlink_metadata()
             .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
             return Err(BuildSandboxError::InvalidConfiguration);
         }
+        let already_existed = dir.exists();
         std::fs::create_dir_all(dir)?;
         let canonical = dir.canonicalize()?;
         if !canonical.is_dir()
-            || canonical.starts_with(root)
+            || canonical.starts_with(&canonical_root)
             || canonical
                 .to_string_lossy()
                 .chars()
                 .any(|ch| matches!(ch, ',' | '\n' | '\r'))
         {
-            // Remove the directory only if this call created it empty.
-            let _ = std::fs::remove_dir(&canonical);
+            // Never delete a pre-existing user directory when rejecting it.
+            if !already_existed {
+                let _ = std::fs::remove_dir(&canonical);
+            }
             return Err(BuildSandboxError::InvalidConfiguration);
         }
         Ok(Some(canonical))
@@ -183,6 +203,7 @@ impl BuildSandbox {
             .as_deref()
             .filter(|image| !image.trim().is_empty() && !image.starts_with('-'))
             .ok_or(BuildSandboxError::MissingImage)?;
+        pinned_digest(image).ok_or(BuildSandboxError::UnpinnedImage)?;
         // Docker --mount uses comma-separated key/value pairs. Forbid commas
         // instead of allowing a workspace path to inject extra mount options.
         if root
@@ -193,6 +214,27 @@ impl BuildSandbox {
             return Err(BuildSandboxError::InvalidConfiguration);
         }
         let runtime = self.resolve_runtime().await?;
+        let mut inspect = Command::new(runtime);
+        let format = if image.starts_with("sha256:") {
+            "{{.Id}}"
+        } else {
+            "{{json .RepoDigests}}"
+        };
+        inspect.args(["image", "inspect", "--format", format, image]);
+        let inspected = run_bounded(inspect, Duration::from_secs(15)).await?;
+        if !inspected.status.success() {
+            return Err(BuildSandboxError::ImageDigestMismatch);
+        }
+        let identity = String::from_utf8_lossy(&inspected.stdout);
+        let matches = if image.starts_with("sha256:") {
+            identity.trim().eq_ignore_ascii_case(image)
+        } else {
+            serde_json::from_str::<Vec<String>>(identity.trim())
+                .is_ok_and(|digests| digests.iter().any(|entry| entry == image))
+        };
+        if !matches {
+            return Err(BuildSandboxError::ImageDigestMismatch);
+        }
         let uid_gid = user_identity()?;
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -289,6 +331,50 @@ impl BuildSandbox {
         };
         process.current_dir(root);
         run_bounded(process, timeout).await
+    }
+
+    /// Reports which container runtime this backend would use, without running
+    /// anything in it. `Auto` probes Docker, then Podman; the host is never an
+    /// answer.
+    pub async fn runtime(&self) -> Result<&'static str, BuildSandboxError> {
+        if self.backend == BuildBackend::UnsafeHost {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        self.resolve_runtime().await
+    }
+
+    /// Whether `image` is already present in the local image store. Nothing is
+    /// pulled: a missing image is reported, never fetched.
+    pub async fn image_exists(&self, image: &str) -> Result<bool, BuildSandboxError> {
+        if image.trim().is_empty()
+            || image.starts_with('-')
+            || image
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+        {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        let runtime = self.runtime().await?;
+        let mut process = Command::new(runtime);
+        process.args(["image", "inspect", "--format", "{{.Id}}", image]);
+        let output = run_bounded(process, Duration::from_secs(15)).await?;
+        Ok(output.status.success())
+    }
+
+    /// Resolve an operator-built tag to the local immutable image ID. Callers
+    /// pass this ID to `run`, which verifies it again before each execution.
+    pub async fn image_id(&self, image: &str) -> Result<String, BuildSandboxError> {
+        if image.is_empty() || image.starts_with('-') || image.chars().any(char::is_whitespace) {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
+        let mut inspect = Command::new(self.runtime().await?);
+        inspect.args(["image", "inspect", "--format", "{{.Id}}", image]);
+        let output = run_bounded(inspect, Duration::from_secs(15)).await?;
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || !id.starts_with("sha256:") || pinned_digest(&id).is_none() {
+            return Err(BuildSandboxError::ImageDigestMismatch);
+        }
+        Ok(id)
     }
 
     async fn resolve_runtime(&self) -> Result<&'static str, BuildSandboxError> {
@@ -406,6 +492,15 @@ mod runtime_flags {
     }
 
     #[test]
+    fn only_full_image_digests_are_accepted() {
+        let full = format!("sha256:{}", "a".repeat(64));
+        assert!(pinned_digest(&full).is_some());
+        assert!(pinned_digest(&format!("registry.local/app@{full}")).is_some());
+        assert!(pinned_digest("app:latest").is_none());
+        assert!(pinned_digest("sha256:abcd").is_none());
+    }
+
+    #[test]
     fn chromium_gets_writable_scratch_space_and_enough_processes() {
         let args = run_args(None);
         let has = |value: &str| args.iter().any(|arg| arg == value);
@@ -455,6 +550,21 @@ mod runtime_flags {
             sandbox.prepare_artifacts(&worktree),
             Err(BuildSandboxError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn an_existing_artifact_directory_inside_worktree_is_not_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worktree = dir.path().join("worktree");
+        let artifacts = worktree.join("screenshots");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let sandbox = BuildSandbox::new(BuildBackend::Docker, Some("image:1".to_owned()))
+            .with_artifacts(&artifacts);
+        assert!(matches!(
+            sandbox.prepare_artifacts(&worktree),
+            Err(BuildSandboxError::InvalidConfiguration)
+        ));
+        assert!(artifacts.is_dir());
     }
 
     #[test]
