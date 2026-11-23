@@ -179,7 +179,7 @@ normal isolation configuration.
 
 The web shell provides repository installation selection, read-only file browser, branches/issues/PRs/CI, dark/light appearance, reduced motion, a persistent sidebar, a Mission Control board with eight agents, a verified GitHub event timeline, and a user approval queue. It is **not yet packaged as a Tauri/native desktop binary**, and the file panel is a read-only inspector rather than a Monaco editor.
 
-**Still required for the full product:** native desktop packaging, LSP/Monaco editor, terminal, live per-agent inference events, durable audit/job queue, native OAuth token refresh, a first-party Rust agent bridge submitting proposals, bulk patch staging, and staged deployment with proper production controls.
+**Still required for a production GitHub integration:** a distributed transactional job queue, persistent user sessions and reauthentication, a reviewed multi-host agent bridge, full remote PR/branch reconciliation, and staged deployment testing. Native desktop, Monaco/LSP, and the first-party proposal-only MCP adapter exist experimentally but are not production certified.
 
 ## 7. Native desktop Mission Control (stacked prototype)
 
@@ -213,6 +213,64 @@ and passing, at least one check has succeeded, and the HEAD is unchanged
 on immediate reinspection. Status data is advisory and potentially
 time-sensitive; **GitHub branch rulesets must still enforce checks and
 reviews on the default branch**. Ryoko never merges PRs or bypasses rulesets.
+
+### First-party agent-to-GitHub MCP bridge
+
+For a **single trusted broker host**, turn on the first-party MCP adapter after
+you have registered the GitHub App, installed it on a disposable test repository,
+and configured all existing backend credentials:
+
+```sh
+export RYOKO_AGENT_BROKER_TOKEN="REPLACE_WITH_RANDOM_SECRET_AT_LEAST_32_CHARACTERS"
+export RYOKO_GITHUB_AGENT_MCP=1
+export RYOKO_GITHUB_BROKER_URL="http://127.0.0.1:4173"
+```
+
+The backend's issue pipeline now attaches `queue_github_proposal` to its
+`ryoko run --team` child. **Only this one queuing tool is allowed** (at most
+eight calls per run); the trusted host binds the GitHub installation and
+repository IDs from the signed/authorized issue request. The model cannot
+select another repository, obtain the App or OAuth secret, approve a queued
+proposal, merge, or push through this tool.
+
+The tool supports safe `ryoko/` branch proposals, text commits, draft PR
+proposals, and review comments. It submits a proposal to the existing
+`/api/agent/proposals` endpoint. The broker validates the exact operation and
+repository allowlist, then adds it to the same native **approval inbox** used
+by human-created proposals. A maintainer still needs to inspect the full
+arguments and confirm the actual GitHub write in an OS-native dialog.
+
+This connection is **opt-in**. It is separate from external custom MCP
+servers: the broker refuses to enable both `RYOKO_GITHUB_AGENT_MCP=1`
+and `RYOKO_MCP_SERVER` simultaneously. Standalone desktop agent runs do
+not automatically mount this tool; it is currently attached to the broker's
+issue engineering pipeline, where repo scope can be verified reliably.
+
+For a hosted broker on a different port, explicitly configure
+`RYOKO_GITHUB_BROKER_URL` as the trusted HTTPS origin or local loopback
+endpoint. Do not place the broker token in GitHub issues, a repo config,
+an IDE renderer, or a file committed to Git.
+
+### Durable GitHub approval inbox
+
+Set a **separate** owner-private ledger path in the same private directory
+as the bot job ledger:
+
+```sh
+export RYOKO_APPROVAL_STATE_FILE="/srv/ryoko/private/github-approvals.json"
+```
+
+Pending approvals persist across a single-process broker restart. An action
+that was already in `executing` state becomes `interrupted`, never
+auto-executed again. Only still-pending, unexpired requests may be approved;
+completed, rejected, failed and interrupted items remain visible as read-only
+history for up to 24 hours. The records contain proposal parameters and may
+include source code: keep the file private (0600), never commit it.
+
+Both ledgers are **single-process** and use atomic file snapshots, not a
+distributed transactional queue. Run one broker instance only. The next
+production step is a database-backed queue with leases, GitHub remote
+reconciliation, and a durable audit log shared across replicas.
 
 ### Durable bot job ledger
 
