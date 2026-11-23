@@ -1,9 +1,11 @@
 # Execution sandbox
 
 Status: Ryoko has two independent execution paths: WASM artifact validation
-with no host preopens, and a Docker/Podman **container-backed** project
-pre-flight runner. The project runner fails closed if the operator has not
-selected an image or an available runtime. There is no automatic host fallback.
+with no host preopens (in-process on Unix, isolated worker process on Windows),
+and a Docker/Podman **container-backed** project pre-flight runner. Neither
+path silently falls back to unguarded host execution: the project runner fails
+closed if the operator has not selected an image or an available runtime, and
+the Windows guardrail fails closed if its worker binary cannot be resolved.
 
 ## Container-backed pre-flight checks
 
@@ -97,6 +99,39 @@ exclude that adversary.
   memory and tables.
 - Only a clean `_start` return counts as a pass.
 - `SandboxSpecValidator` refuses proposals without tests.
+
+## Isolated Windows worker process
+
+Wasmtime 26 guest traps can abort the process hosting them on Windows
+(`0xc0000409`), so Windows never evaluates guardrail artifacts in-process. The
+host spawns the dedicated `wasm-guardrail-worker` binary next to the
+application executable (or at `RYOKO_WASM_WORKER_BIN`) for every evaluation:
+
+- One typed JSON request on stdin carries only the artifact bytes and the
+  enforced fuel, timeout and memory limits; one typed JSON response on stdout
+  carries the outcome. No paths, environment or credentials cross the
+  boundary.
+- The worker is spawned with a cleared environment (`env_clear`), only the
+  three standard streams piped and `kill_on_drop` armed. Empty WASI state
+  means no preopens, no inherited environment and no network at runtime.
+- The host enforces the wall-clock deadline itself (sandbox timeout plus a
+  small protocol grace) and kills plus reaps the worker on every exit path,
+  including future cancellation.
+- A fresh worker is spawned per evaluation; there is no worker pool and no
+  implicit reuse of stale processes.
+- A guest trap can abort the worker; the host then observes EOF without a
+  response and reports a bounded failed validation. A missing or crashing
+  worker binary fails closed exactly the same way; there is never a fallback
+  to unguarded host execution.
+- Unix hosts keep in-process evaluation; `WasmSandbox::new_with_worker` opts
+  any platform into the worker path explicitly (used by the
+  `wasm_worker_process` regression suite, which is green in native Windows
+  CI and in the Linux and macOS platform jobs).
+
+Native CI proves the automated paths only: worker crashes, traps and
+deadline kills are exercised on real GitHub-hosted Windows, macOS and Linux
+runners, while parity certification still requires the manual install tests
+described in the desktop preview testing guide.
 
 ## Planned restricted runner
 

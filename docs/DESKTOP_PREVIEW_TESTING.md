@@ -104,6 +104,13 @@ matching SHA-256 hashes; an unverified redirect or relay is not a substitute.
       prerequisites.
 - [ ] Check that cancelled runs and failed model requests leave no unexpected
       modified files.
+- [ ] Windows only: verify the isolated WASM guardrail worker. The build must
+      deliver `wasm-guardrail-worker.exe` next to the app executable (or set
+      `RYOKO_WASM_WORKER_BIN`). A guardrail run must never kill the app: a
+      trapped or endless test artifact must surface as a failed validation
+      with the editor session intact, and installing without the worker must
+      fail closed instead of running WASM in-process. Record the OS version
+      and Ryoko source SHA with the result of this manual test.
 
 For a bug, report the operating system, Ryoko source SHA from the build run,
 the exact actions, expected versus actual result, and a screenshot or
