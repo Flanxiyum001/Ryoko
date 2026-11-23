@@ -7,7 +7,7 @@ Ryoko's first launch uses the native Tauri desktop backend, not browser persiste
 1. Choose **OpenAI**, **Anthropic**, **Gemini**, or **Ollama**.
 2. Pick a model ID. Hosted providers require an API key; Ollama uses the local server at `127.0.0.1:11434` and does not require a key.
 3. Select a folder or clone a public HTTPS Git repository using a local Git installation.
-4. Review the suggested starter task in Mission Control. The run does **not** start automatically: select **Run** after checking its goal, budget and sandbox settings. Review agent diffs before applying them.
+4. Review the suggested starter task in Mission Control. The run does **not** start automatically: use **Generate image** to prepare a supported sandbox if needed, then select **Run** after checking its goal, budget and sandbox settings. Review agent diffs before applying them.
 
 The **Configure your AI provider** welcome action can be used to change the provider later. Dismissing onboarding still allows local editing without a provider.
 
@@ -19,6 +19,8 @@ The credential is sent from the password field to the native `onboarding_configu
 - **macOS:** system Keychain generic password.
 - **Linux:** a running freedesktop Secret Service implementation and the `secret-tool` binary (typically `libsecret-tools`) must be available and unlocked. Setup fails closed if the service is unavailable.
 - **Other platforms:** no plaintext fallback. Provider configuration is rejected if native credential storage is unsupported.
+
+Mission Control starts the `ryoko` CLI as a child process. The desktop shell creates a private, per-run provider catalog containing **only the API key environment variable name** (never its value) and passes the key from the OS vault in the child's process environment. Its `--config` argument points at that catalog. Child process environments can be inspected by the same OS user or elevated processes, so consider the local user account trusted. The CLI never receives the key as a command-line argument. Existing explicit `--config` choices override onboarding, as does a workspace provider catalog.
 
 The global model choice takes precedence over environment-only fallback. An explicitly configured workspace `.ryoko/desktop/providers.json` still takes precedence over global onboarding preferences, and workspace catalogs continue to resolve credentials from environment-variable names.
 
