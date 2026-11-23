@@ -11,6 +11,8 @@
 
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const DESKTOP = { width: 1440, height: 900 };
@@ -447,8 +449,17 @@ async function main() {
   }
 }
 
-const invokedDirectly =
-  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
+// On macOS /var is commonly a symlink to /private/var. Node resolves the
+// imported module to its physical location, while argv[1] can retain the
+// alias; a lexical comparison silently skips main() and exits successfully.
+const invokedDirectly = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
 
 if (invokedDirectly) {
   main()
