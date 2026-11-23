@@ -192,6 +192,14 @@
           <div id="githubQueueList" class="github-queue-list">
             <p class="hint">No repository queue loaded.</p>
           </div>
+          <section class="github-action-panel" aria-label="Run independent engineering task">
+            <h4>Engineering mission</h4>
+            <p class="hint">Describe a task for the selected GitHub repository. Ryoko's agent team works in a separate checkout and can open a draft PR only. An OS confirmation is required.</p>
+            <label for="githubGoal">Engineering goal</label>
+            <textarea id="githubGoal" spellcheck="false" rows="4" maxlength="4000" placeholder="Implement a feature, fix an issue, or refactor a component..."></textarea>
+            <button id="githubStartGoal" class="button primary compact" type="button">Start engineering mission…</button>
+            <div id="githubJobHistory" class="github-job-history" aria-live="polite"></div>
+          </section>
           <section class="github-action-panel" aria-label="Propose a GitHub action">
             <h4>Propose a repository action</h4>
             <p class="hint">Ryoko never pushes a proposal automatically. Review its exact parameters below, then approve or reject.</p>
