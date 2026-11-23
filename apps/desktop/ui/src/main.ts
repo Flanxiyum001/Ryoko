@@ -89,9 +89,24 @@ interface GitHunk {
   new_lines: number;
 }
 
+interface ReviewFile {
+  path: string;
+  oldPath?: string;
+  state: string;
+  stateLabel: string;
+  editable: boolean;
+  hunkIds: number[];
+}
+
+interface ReviewActionReport {
+  action: string;
+  files: { path: string; hunkIds: number[] }[];
+}
+
 interface GitHunkSnapshot {
   patch: string;
   hunks: GitHunk[];
+  files: ReviewFile[];
 }
 
 interface ReviewFileContent {
@@ -1020,11 +1035,25 @@ async function refreshHunks(): Promise<void> {
     if (openedRoot !== state.root) return;
     gitHunks = snapshot;
     hunkList.replaceChildren();
-    hunkCount.textContent = String(snapshot.hunks.length);
+    hunkCount.textContent = String(
+      snapshot.hunks.length + snapshot.files.filter((file) => !file.editable).length,
+    );
+    for (const file of snapshot.files) {
+      if (file.editable) continue;
+      const item = document.createElement('div');
+      item.className = 'hunk-item hunk-file-lock';
+      const title = document.createElement('span');
+      title.className = 'hunk-title';
+      title.textContent = '[' + file.state + '] ' + file.path + ' — ' + file.stateLabel;
+      item.append(title);
+      hunkList.append(item);
+    }
     if (snapshot.hunks.length === 0) {
       const hint = document.createElement('p');
       hint.className = 'hint';
-      hint.textContent = 'No unstaged selectable text hunks. Binary, rename and mode changes are excluded.';
+      hint.textContent = snapshot.files.some((file) => !file.editable)
+        ? 'Only the non-editable changes above are present. Selectable text hunks appear here after refresh.'
+        : 'No unstaged selectable text hunks. Binary, rename and mode changes stay listed above.';
       hunkList.append(hint);
       return;
     }
@@ -1075,9 +1104,16 @@ async function stageSelectedHunks(): Promise<void> {
   hunkStage.disabled = true;
   const ids = chosenHunks();
   try {
-    await invoke('stage_review_hunks', { ids, expectedPatch: gitHunks.patch });
+    const report = await invoke<ReviewActionReport>('stage_review_hunks', {
+      ids,
+      expectedPatch: gitHunks.patch,
+    });
     void refreshWorkbenchChanges();
-    setStatus('Staged ' + ids.length + ' selected text hunk(s) in Git index. No commit or merge was made.');
+    const files = report.files.map((file) => file.path).join(', ');
+    setStatus(
+      'Staged ' + ids.length + ' selected text hunk(s) in Git index (files: ' + files
+      + '). No commit or merge was made.',
+    );
     await refreshHunks();
   } catch (error) {
     setStatus('Staging denied or failed: ' + (error instanceof Error ? error.message : String(error)));
@@ -1265,13 +1301,25 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
   }
   try {
     if (action === 'accept') {
-      await invoke('stage_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      const report = await invoke<ReviewActionReport>('stage_review_hunks', {
+        ids: [hunk.id],
+        expectedPatch: gitHunks.patch,
+      });
       void refreshWorkbenchChanges();
-      setStatus(`Accepted hunk #${hunk.id} into the Git index. No commit or merge was made.`);
+      setStatus(
+        `Accepted hunk #${hunk.id} in ${report.files.map((file) => file.path).join(', ') || hunk.path}`
+        + ' into the Git index. No commit or merge was made.',
+      );
     } else {
-      await invoke('reject_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      const report = await invoke<ReviewActionReport>('reject_review_hunks', {
+        ids: [hunk.id],
+        expectedPatch: gitHunks.patch,
+      });
       void refreshWorkbenchChanges();
-      setStatus(`Rejected hunk #${hunk.id}; only those working-file edits were reverted.`);
+      setStatus(
+        `Rejected hunk #${hunk.id} in ${report.files.map((file) => file.path).join(', ') || hunk.path}`
+        + '; only those working-file edits were reverted.',
+      );
     }
     await refreshHunks();
     const remaining = gitHunks?.hunks.find((item) => item.id === hunk.id);

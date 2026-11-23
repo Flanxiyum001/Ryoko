@@ -1,5 +1,12 @@
 //! Native, operator-approved selective staging of local Git text hunks.
 //! Git runs with an explicit argv, never a shell. The worktree is not edited.
+//!
+//! Every apply re-checks the reviewed snapshot against a freshly captured
+//! diff: each selected hunk must still anchor to the same file identity and
+//! line ranges, and any drift is reported per file as a stale review state
+//! instead of being overwritten. Binary files, renames, copies, deletions,
+//! mode-only and submodule changes are surfaced as explicit non-editable
+//! review states rather than being silently dropped.
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -18,6 +25,7 @@ mod hunks;
 const MAX_DIFF: usize = 1024 * 1024;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewHunkView {
     id: usize,
     path: String,
@@ -29,16 +37,48 @@ pub struct ReviewHunkView {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFileView {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_path: Option<String>,
+    /// One of `text`, `created`, `deleted`, `renamed`, `copied`, `binary`,
+    /// `mode-only`, `submodule` (see `hunks::FileReviewState::key`).
+    state: String,
+    /// Operator-facing explanation for the state.
+    state_label: String,
+    /// Whether this file supports editable per-hunk staging.
+    editable: bool,
+    hunk_ids: Vec<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSnapshot {
+    patch: String,
+    hunks: Vec<ReviewHunkView>,
+    files: Vec<ReviewFileView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFileReport {
+    path: String,
+    hunk_ids: Vec<usize>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewActionReport {
+    action: &'static str,
+    files: Vec<ReviewFileReport>,
+}
+
+#[derive(Serialize)]
 pub struct ReviewFileContent {
     path: String,
     original: String,
     modified: String,
-}
-
-#[derive(Serialize)]
-pub struct ReviewSnapshot {
-    patch: String,
-    hunks: Vec<ReviewHunkView>,
 }
 
 fn git_diff(root: &Path) -> Result<String, String> {
@@ -161,6 +201,61 @@ fn hunk_ranges(header: &str) -> (u32, u32, u32) {
     (old_start, new_start, new_lines.max(1))
 }
 
+fn file_state_label(state: hunks::FileReviewState, old_path: Option<&str>) -> String {
+    match state {
+        hunks::FileReviewState::Text => "modified — per-hunk staging enabled".to_owned(),
+        hunks::FileReviewState::Created => "new file — partial staging enabled".to_owned(),
+        hunks::FileReviewState::Deleted => {
+            "deleted file — restore or reject the whole file with Git; not editable here".to_owned()
+        }
+        hunks::FileReviewState::Renamed => match old_path {
+            Some(old) => format!(
+                "renamed from {old} — reviewed as one whole-file change; not editable here"
+            ),
+            None => "renamed — reviewed as one whole-file change; not editable here".to_owned(),
+        },
+        hunks::FileReviewState::Copied => match old_path {
+            Some(old) => format!(
+                "copied from {old} — reviewed as one whole-file change; not editable here"
+            ),
+            None => "copied — reviewed as one whole-file change; not editable here".to_owned(),
+        },
+        hunks::FileReviewState::Binary => {
+            "binary content — inspect with Git tooling; not editable in text review".to_owned()
+        }
+        hunks::FileReviewState::ModeOnly => {
+            "mode change only — no content hunks; apply with Git commands".to_owned()
+        }
+        hunks::FileReviewState::Submodule => {
+            "submodule pointer — manage the submodule with Git; not editable here".to_owned()
+        }
+    }
+}
+
+fn review_file_views(parsed: &hunks::HunkPatch) -> Vec<ReviewFileView> {
+    parsed
+        .file_reviews()
+        .into_iter()
+        .map(|review| {
+            let editable = review.state.supports_hunk_staging();
+            let old_path = review.old_path;
+            let state_label = file_state_label(review.state, old_path.as_deref());
+            ReviewFileView {
+                path: review.path,
+                old_path,
+                state: review.state.key().to_owned(),
+                state_label,
+                editable,
+                hunk_ids: if editable {
+                    review.hunk_ids
+                } else {
+                    Vec::new()
+                },
+            }
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub async fn list_review_hunks(state: State<'_, WorkspaceState>) -> Result<ReviewSnapshot, String> {
     let root = current_root(&state)?;
@@ -168,6 +263,7 @@ pub async fn list_review_hunks(state: State<'_, WorkspaceState>) -> Result<Revie
         .await
         .map_err(|_| "Git diff worker failed".to_owned())??;
     let parsed = hunks::HunkPatch::parse(&patch)?;
+    let files = review_file_views(&parsed);
     let hunks = parsed
         .hunks()
         .iter()
@@ -181,7 +277,140 @@ pub async fn list_review_hunks(state: State<'_, WorkspaceState>) -> Result<Revie
             new_lines: hunk_ranges(&hunk.header).2,
         })
         .collect();
-    Ok(ReviewSnapshot { patch, hunks })
+    Ok(ReviewSnapshot { patch, hunks, files })
+}
+
+/// Reparses the snapshot and the fresh diff, then verifies every selected
+/// hunk against the file identity and line ranges it was reviewed against.
+/// Returns the patch to apply plus the per-file post-apply plan.
+fn verified_selection(
+    expected_patch: &str,
+    current_patch: &str,
+    ids: &[usize],
+) -> Result<(String, Vec<ReviewFileReport>), String> {
+    let reviewed = hunks::HunkPatch::parse(expected_patch)?;
+    let current = hunks::HunkPatch::parse(current_patch)?;
+    let audit = reviewed.verify_selection(ids, &current)?;
+    if !audit.stale.is_empty() {
+        let details = audit
+            .stale
+            .iter()
+            .map(|stale| format!("#{} in {}: {}", stale.id, stale.path, stale.reason))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "review base is stale for the selected hunks; refresh the diff and reselect. No files were changed.\n{details}"
+        ));
+    }
+    let patch = current.select(&audit.fresh)?;
+    let mut by_path: Vec<ReviewFileReport> = Vec::new();
+    for id in &audit.fresh {
+        let path = reviewed
+            .hunks()
+            .iter()
+            .find(|hunk| hunk.id == *id)
+            .map(|hunk| hunk.path.clone())
+            .unwrap_or_else(|| "unknown".to_owned());
+        match by_path.iter_mut().find(|report| report.path == path) {
+            Some(report) => report.hunk_ids.push(*id),
+            None => by_path.push(ReviewFileReport {
+                path,
+                hunk_ids: vec![*id],
+            }),
+        }
+    }
+    Ok((patch, by_path))
+}
+
+async fn run_review_action(
+    ids: Vec<usize>,
+    expected_patch: String,
+    max_hunks_in_report: usize,
+    action: &'static str,
+    state: &State<'_, WorkspaceState>,
+    app: &AppHandle,
+) -> Result<ReviewActionReport, String> {
+    if expected_patch.len() > MAX_DIFF {
+        return Err("hunk review exceeds 1 MiB".into());
+    }
+    let root = current_root(state)?;
+    let source = root.clone();
+    let initial = tauri::async_runtime::spawn_blocking(move || git_diff(&source))
+        .await
+        .map_err(|_| "Git diff worker failed".to_owned())??;
+    verified_selection(&expected_patch, &initial, &ids)?;
+    let parsed = hunks::HunkPatch::parse(&initial)?;
+    let selected = parsed
+        .hunks()
+        .iter()
+        .filter(|hunk| ids.contains(&hunk.id))
+        .take(max_hunks_in_report)
+        .map(|hunk| format!("#{} {} {}", hunk.id, hunk.path, hunk.header))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (title, description) = if action == "stage" {
+        (
+            "Ryoko — approve Git hunk staging",
+            format!(
+                "Stage {} selected Git text hunk(s) in the current workspace index?\n\n{}\n\nThis does not edit files, commit, merge or push.",
+                ids.len(),
+                selected
+            ),
+        )
+    } else {
+        (
+            "Ryoko — reject Git hunks",
+            format!(
+                "Revert {} selected unstaged hunk(s) from the working files?\n\n{}\n\nThis deletes those edits from the workspace. It does not commit, merge or push.",
+                ids.len(),
+                selected
+            ),
+        )
+    };
+    let approved = tauri::async_runtime::spawn_blocking({
+        let title = title.to_owned();
+        move || {
+            app.dialog()
+                .message(description)
+                .title(title)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    if action == "stage" {
+                        "Stage once".to_owned()
+                    } else {
+                        "Reject hunks".to_owned()
+                    },
+                    "Cancel".to_owned(),
+                ))
+                .blocking_show()
+        }
+    })
+    .await
+    .map_err(|_| "could not display native Git staging permission".to_owned())?;
+    if !approved {
+        return Err("Git hunk action cancelled".into());
+    }
+    if current_root(state)? != root {
+        return Err("workspace changed while awaiting permission".into());
+    }
+    let target = root.clone();
+    let expected = expected_patch.clone();
+    let (applied_patch, report) = tauri::async_runtime::spawn_blocking(move || {
+        // Fail closed if a tool, extension or another process changed the
+        // unstaged diff while native approval was displayed.
+        let current = git_diff(&target)?;
+        verified_selection(&expected, &current, &ids)
+    })
+    .await
+    .map_err(|_| "Git staging worker failed".to_owned())??;
+    let target = root.clone();
+    let cached = action == "stage";
+    tauri::async_runtime::spawn_blocking(move || apply_patch(&target, &applied_patch, cached, !cached))
+        .await
+        .map_err(|_| "Git staging worker failed".to_owned())??;
+    Ok(ReviewActionReport {
+        action,
+        files: report,
+    })
 }
 
 #[tauri::command]
@@ -190,62 +419,8 @@ pub async fn stage_review_hunks(
     expected_patch: String,
     state: State<'_, WorkspaceState>,
     app: AppHandle,
-) -> Result<(), String> {
-    if expected_patch.len() > MAX_DIFF {
-        return Err("hunk review exceeds 1 MiB".into());
-    }
-    let root = current_root(&state)?;
-    let source = root.clone();
-    let current = tauri::async_runtime::spawn_blocking(move || git_diff(&source))
-        .await
-        .map_err(|_| "Git diff worker failed".to_owned())??;
-    if current != expected_patch {
-        return Err("files changed since hunk preview; refresh before staging".into());
-    }
-    let parsed = hunks::HunkPatch::parse(&current)?;
-    let patch = parsed.select(&ids)?;
-    let selected = parsed
-        .hunks()
-        .iter()
-        .filter(|hunk| ids.contains(&hunk.id))
-        .take(12)
-        .map(|hunk| format!("#{} {} {}", hunk.id, hunk.path, hunk.header))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let description = format!(
-        "Stage {} selected Git text hunk(s) in the current workspace index?\n\n{}\n\nThis does not edit files, commit, merge or push.",
-        ids.len(),
-        selected
-    );
-    let approved = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .message(description)
-            .title("Ryoko — approve Git hunk staging")
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Stage once".to_owned(),
-                "Cancel".to_owned(),
-            ))
-            .blocking_show()
-    })
-    .await
-    .map_err(|_| "could not display native Git staging permission".to_owned())?;
-    if !approved {
-        return Err("Git hunk staging cancelled".into());
-    }
-    if current_root(&state)? != root {
-        return Err("workspace changed while awaiting permission".into());
-    }
-    let target = root.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        // Fail closed if a tool, extension or another process changed the
-        // unstaged diff while native approval was displayed.
-        if git_diff(&target)? != current {
-            return Err("Git diff changed during approval; refresh and retry".into());
-        }
-        apply_patch(&target, &patch, true, false)
-    })
-    .await
-    .map_err(|_| "Git staging worker failed".to_owned())?
+) -> Result<ReviewActionReport, String> {
+    run_review_action(ids, expected_patch, 12, "stage", &state, &app).await
 }
 
 #[tauri::command]
@@ -254,60 +429,8 @@ pub async fn reject_review_hunks(
     expected_patch: String,
     state: State<'_, WorkspaceState>,
     app: AppHandle,
-) -> Result<(), String> {
-    if expected_patch.len() > MAX_DIFF {
-        return Err("hunk review exceeds 1 MiB".into());
-    }
-    let root = current_root(&state)?;
-    let source = root.clone();
-    let current = tauri::async_runtime::spawn_blocking(move || git_diff(&source))
-        .await
-        .map_err(|_| "Git diff worker failed".to_owned())??;
-    if current != expected_patch {
-        return Err("files changed since hunk preview; refresh before rejecting".into());
-    }
-    let parsed = hunks::HunkPatch::parse(&current)?;
-    let patch = parsed.select(&ids)?;
-    let selected = parsed
-        .hunks()
-        .iter()
-        .filter(|hunk| ids.contains(&hunk.id))
-        .take(12)
-        .map(|hunk| format!("#{} {} {}", hunk.id, hunk.path, hunk.header))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let description = format!(
-        "Revert {} selected unstaged hunk(s) from the working files?\n\n{}\n\nThis deletes those edits from the workspace. It does not commit, merge or push.",
-        ids.len(),
-        selected
-    );
-    let approved = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .message(description)
-            .title("Ryoko — reject Git hunks")
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "Reject hunks".to_owned(),
-                "Cancel".to_owned(),
-            ))
-            .blocking_show()
-    })
-    .await
-    .map_err(|_| "could not display native hunk rejection permission".to_owned())?;
-    if !approved {
-        return Err("Git hunk rejection cancelled".into());
-    }
-    if current_root(&state)? != root {
-        return Err("workspace changed while awaiting permission".into());
-    }
-    let target = root.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if git_diff(&target)? != current {
-            return Err("Git diff changed during approval; refresh and retry".into());
-        }
-        apply_patch(&target, &patch, false, true)
-    })
-    .await
-    .map_err(|_| "Git rejection worker failed".to_owned())?
+) -> Result<ReviewActionReport, String> {
+    run_review_action(ids, expected_patch, 12, "reject", &state, &app).await
 }
 
 #[tauri::command]
@@ -367,11 +490,75 @@ pub async fn read_review_file(
 #[cfg(test)]
 mod tests {
     use super::hunk_ranges;
+    use super::review_file_views;
+    use super::verified_selection;
 
     #[test]
     fn hunk_header_ranges_are_bounded_and_parsed() {
         assert_eq!(hunk_ranges("@@ -1,2 +10,4 @@ fn demo()"), (1, 10, 4));
         assert_eq!(hunk_ranges("@@ -5 +7 @@"), (5, 7, 1));
         assert_eq!(hunk_ranges("not a header"), (1, 1, 1));
+    }
+
+    const SNAPSHOT: &str = "diff --git a/src/main.rs b/src/main.rs\nindex 1111111..2222222 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n";
+
+    #[test]
+    fn selecting_hunks_of_an_unchanged_file_survives_unrelated_file_changes() {
+        let drifted = format!(
+            "{SNAPSHOT}diff --git a/generated.rs b/generated.rs\nindex 6666668..7777778 100644\n--- a/generated.rs\n+++ b/generated.rs\n@@ -1,1 +1,1 @@\n-a\n+b\n"
+        );
+        let (patch, report) = verified_selection(SNAPSHOT, &drifted, &[1]).unwrap();
+        assert!(patch.contains("+new"));
+        assert!(!patch.contains("generated.rs"));
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].path, "src/main.rs");
+        assert_eq!(report[0].hunk_ids, vec![1]);
+    }
+
+    #[test]
+    fn a_changed_base_is_reported_as_a_per_file_stale_conflict() {
+        let current = SNAPSHOT.replace("index 1111111", "index 9999999");
+        let error = verified_selection(SNAPSHOT, &current, &[1]).unwrap_err();
+        assert!(error.contains("review base is stale"), "{error}");
+        assert!(error.contains("index base changed"), "{error}");
+        assert!(error.contains("src/main.rs"));
+        assert!(error.contains("No files were changed"));
+    }
+
+    #[test]
+    fn a_missing_file_difference_is_reported_without_applying_anything() {
+        let error = verified_selection(&format!("{SNAPSHOT}diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"), SNAPSHOT, &[2]).unwrap_err();
+        assert!(error.contains("no longer has unstaged differences"), "{error}");
+    }
+
+    #[test]
+    fn snapshot_lists_renamed_and_binary_files_as_non_editable_states() {
+        let patch = "diff --git a/old.rs b/new.rs\nsimilarity index 70%\nrename from old.rs\nrename to new.rs\ndiff --git a/blob.bin b/blob.bin\nindex 1234567..89abcde 100644\nGIT binary patch\nliteral 4\nc2VjcmV0\n";
+        let parsed = super::hunks::HunkPatch::parse(patch).unwrap();
+        let views = review_file_views(&parsed);
+        assert_eq!(views.len(), 2);
+        let renamed = views
+            .iter()
+            .find(|view| view.path == "new.rs")
+            .expect("rename entry is listed");
+        assert_eq!(renamed.state, "renamed");
+        assert!(!renamed.editable);
+        assert_eq!(renamed.old_path.as_deref(), Some("old.rs"));
+        assert!(renamed.hunk_ids.is_empty());
+        assert!(renamed.state_label.contains("whole-file"));
+
+        let binary = views
+            .iter()
+            .find(|view| view.path == "blob.bin")
+            .expect("binary entry is listed");
+        assert_eq!(binary.state, "binary");
+        assert!(!binary.editable);
+        assert!(binary.state_label.contains("not editable"));
+
+        let text = super::hunks::HunkPatch::parse(SNAPSHOT).unwrap();
+        let views = review_file_views(&text);
+        assert_eq!(views.len(), 1);
+        assert!(views[0].editable);
+        assert_eq!(views[0].hunk_ids, vec![1]);
     }
 }

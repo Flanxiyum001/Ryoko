@@ -2851,6 +2851,21 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
                         continue;
                     }
                 };
+                for review in parsed.file_reviews() {
+                    if review.state.supports_hunk_staging() {
+                        continue;
+                    }
+                    eprintln!(
+                        "[not editable] [{}] {}{}",
+                        review.state.key(),
+                        review.path,
+                        review
+                            .old_path
+                            .as_deref()
+                            .map(|old| format!(" (from {old})"))
+                            .unwrap_or_default()
+                    );
+                }
                 if parsed.hunks().is_empty() {
                     eprintln!(
                         "No selectable text hunks; binary, rename and mode changes are excluded."

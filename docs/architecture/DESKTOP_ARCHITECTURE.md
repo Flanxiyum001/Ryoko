@@ -224,9 +224,15 @@ persisted.
 The hunk panel reads the local unstaged Git diff and opens a read-only Monaco
 diff editor. Each hunk gets inline **Accept**, **Reject** and **Ask agent to
 revise** controls. Accept stages only that hunk and Reject reverse-applies only
-that hunk to the working files; both show an OS-owned confirmation and re-check
-the full diff immediately before applying it, so a stale preview cannot touch
-changed files. Neither action commits, merges or pushes.
+that hunk to the working files; both show an OS-owned confirmation and re-verify
+the full diff immediately before applying it. Each selected hunk must still
+match the file identity, index base and line range it was reviewed against: a
+changed index base, a vanished file difference or a moved line range is
+reported per file as a stale review state and nothing is applied, instead of
+silently retrying or overwriting. Renamed, copied, binary, deleted, mode-only
+and submodule changes are shown as explicit non-editable review states rather
+than being silently dropped from the panel. Neither action commits, merges or
+pushes.
 
 A revision starts a new `ryoko run` worktree with the selected hunk preview and
 operator feedback as prompt context. The local unstaged change is **not**

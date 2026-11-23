@@ -23,5 +23,7 @@ pub use git::{
     WorktreeRecord, WorktreeSession, WorktreeState,
 };
 
-pub use hunks::{HunkGroup, HunkPatch, ReviewHunk};
+pub use hunks::{
+    FileReview, FileReviewState, HunkGroup, HunkPatch, ReviewHunk, SelectionAudit, StaleHunk,
+};
 pub use integration::IntegrationAgent;

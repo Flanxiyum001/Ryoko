@@ -120,6 +120,10 @@ button, input { font: inherit; color: inherit; }
 }
 .hunk-item input { margin: 3px 0 0; accent-color: var(--accent); }
 .hunk-title { font-size: 11px; overflow-wrap: anywhere; }
+.hunk-file-lock {
+  color: var(--muted);
+}
+.hunk-file-lock .hunk-title { font-style: italic; }
 .hunk-validation {
   max-height: 140px; margin: 6px 10px 10px; padding: 6px 7px; overflow: auto;
   color: var(--muted); background: var(--bg); border: 1px solid var(--border);
