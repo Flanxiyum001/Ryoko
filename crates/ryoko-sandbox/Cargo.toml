@@ -20,3 +20,7 @@ tempfile.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "wasm-guardrail-worker"
+path = "src/bin/wasm-guardrail-worker.rs"
