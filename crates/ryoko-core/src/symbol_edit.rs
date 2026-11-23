@@ -185,7 +185,7 @@ mod tests {
             before: "fn run() {}".into(),
             after: "fn run() { println!(\"ok\"); }".into(),
         };
-        assert!(materialize_symbol_edits(dir.path(), &[edit.clone()]).is_err());
+        assert!(materialize_symbol_edits(dir.path(), std::slice::from_ref(&edit)).is_err());
         std::fs::write(dir.path().join("lib.rs"), "fn run() { 4 }\n").unwrap();
         assert!(materialize_symbol_edits(dir.path(), &[edit]).is_err());
     }
