@@ -164,9 +164,9 @@ pub async fn agent_chat(
         .with_max_tokens(4096);
     for turn in &args.history {
         request = request.with_message(if turn.role == "user" {
-            Message::user(&turn.text)
+            Message::user(turn.text.clone())
         } else {
-            Message::assistant(&turn.text)
+            Message::assistant(turn.text.clone())
         });
     }
     request = request.with_user(prompt);
