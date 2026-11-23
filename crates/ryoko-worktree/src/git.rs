@@ -1432,6 +1432,173 @@ struct GitWorktreeLease {
     applied: Mutex<BTreeSet<String>>,
 }
 
+const MAX_BATCH_FILES: usize = 64;
+const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+
+struct PreparedWrite {
+    path: String,
+    target: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
+    existed: bool,
+}
+
+/// Preflight the *entire* proposal and stage all bytes before modifying any
+/// existing files. If a rename fails, restore prior files from backups.
+/// No shell, Git index operation or network access occurs during this stage.
+fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String>> {
+    let invalid = |message: String| CoreError::Workspace(message);
+    if changes.is_empty() || changes.len() > MAX_BATCH_FILES {
+        return Err(invalid("batch must contain 1..64 files".into()));
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| invalid(format!("invalid worktree root: {error}")))?;
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    let mut total = 0_usize;
+    for change in changes {
+        let relative = validate_relative_path(&change.path)?;
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let key = normalized.to_ascii_lowercase();
+        if !seen.insert(key.clone()) {
+            return Err(invalid(format!("duplicate proposed file path: {}", change.path)));
+        }
+        if change.content.len() > MAX_FILE_BYTES {
+            return Err(invalid(format!("proposed file exceeds 2 MiB: {}", change.path)));
+        }
+        total = total.saturating_add(change.content.len());
+        if total > MAX_BATCH_BYTES {
+            return Err(invalid("proposed batch exceeds 16 MiB".into()));
+        }
+        paths.push((key, normalized, relative));
+    }
+    for (i, (left, _, _)) in paths.iter().enumerate() {
+        for (right, _, _) in paths.iter().skip(i + 1) {
+            if left.starts_with(&format!("{right}/"))
+                || right.starts_with(&format!("{left}/"))
+            {
+                return Err(invalid("proposed file conflicts with a proposed directory".into()));
+            }
+        }
+    }
+
+    // Check parent components without following symlinks. Never use a
+    // create_dir_all traversal that might pass through an external symlink.
+    for (_, original, relative) in &paths {
+        let mut parent = root.clone();
+        if let Some(components) = relative.parent() {
+            for part in components.components() {
+                parent.push(part.as_os_str());
+                match std::fs::symlink_metadata(&parent) {
+                    Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+                        return Err(invalid(format!("unsafe parent directory for {original}")));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        std::fs::create_dir(&parent)
+                            .map_err(|error| invalid(error.to_string()))?;
+                    }
+                    Err(error) => return Err(invalid(error.to_string())),
+                }
+            }
+        }
+        if !parent.starts_with(&root) {
+            return Err(invalid(format!("path escapes worktree: {original}")));
+        }
+        let target = root.join(relative);
+        match std::fs::symlink_metadata(target) {
+            Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
+                return Err(invalid(format!("unsafe existing file: {original}")));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(invalid(error.to_string())),
+        }
+    }
+
+    let batch_id = Uuid::new_v4();
+    let mut prepared = Vec::new();
+    for (index, change) in changes.iter().enumerate() {
+        let target = root.join(&paths[index].2);
+        let parent = target.parent().ok_or_else(|| invalid("missing parent".into()))?;
+        let staged = parent.join(format!(".ryoko-stage-{batch_id}-{index}.tmp"));
+        let backup = parent.join(format!(".ryoko-backup-{batch_id}-{index}.tmp"));
+        let write = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            writer.write_all(change.content.as_bytes())?;
+            writer.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = write {
+            let _ = std::fs::remove_file(&staged);
+            for entry in &prepared {
+                let _ = std::fs::remove_file(&entry.staged);
+            }
+            return Err(invalid(format!("cannot stage {}: {error}", change.path)));
+        }
+        prepared.push(PreparedWrite {
+            path: change.path.clone(),
+            existed: target.exists(),
+            target,
+            staged,
+            backup,
+        });
+    }
+
+    let mut backed_up = vec![false; prepared.len()];
+    let mut committed = vec![false; prepared.len()];
+    let mut failure = None;
+    for (index, entry) in prepared.iter().enumerate() {
+        if entry.existed {
+            if let Err(error) = std::fs::rename(&entry.target, &entry.backup) {
+                failure = Some(format!("cannot back up {}: {error}", entry.path));
+                break;
+            }
+            backed_up[index] = true;
+        }
+        if let Err(error) = std::fs::rename(&entry.staged, &entry.target) {
+            failure = Some(format!("cannot commit {}: {error}", entry.path));
+            break;
+        }
+        committed[index] = true;
+    }
+    if let Some(error) = failure {
+        let mut rollback_errors = Vec::new();
+        for index in (0..prepared.len()).rev() {
+            let entry = &prepared[index];
+            if committed[index]
+                && let Err(restore) = std::fs::remove_file(&entry.target)
+            {
+                rollback_errors.push(restore.to_string());
+            }
+            if backed_up[index]
+                && let Err(restore) = std::fs::rename(&entry.backup, &entry.target)
+            {
+                rollback_errors.push(restore.to_string());
+            }
+            let _ = std::fs::remove_file(&entry.staged);
+        }
+        return Err(invalid(format!(
+            "{error}; rollback errors: {}",
+            if rollback_errors.is_empty() {
+                "none".to_owned()
+            } else {
+                rollback_errors.join("; ")
+            }
+        )));
+    }
+    for entry in &prepared {
+        let _ = std::fs::remove_file(&entry.backup);
+    }
+    Ok(prepared.into_iter().map(|entry| entry.path).collect())
+}
+
 #[async_trait]
 impl WorkspaceLease for GitWorktreeLease {
     fn root(&self) -> &Path {
@@ -1443,39 +1610,16 @@ impl WorkspaceLease for GitWorktreeLease {
     }
 
     async fn apply(&self, changes: &[ProposedChange]) -> CoreResult<()> {
-        for change in changes {
-            let relative = validate_relative_path(&change.path)?;
-            let target = self.root.join(&relative);
-            if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|err| CoreError::Workspace(err.to_string()))?;
-                let canonical_parent = tokio::fs::canonicalize(parent)
-                    .await
-                    .map_err(|err| CoreError::Workspace(err.to_string()))?;
-                if !canonical_parent.starts_with(&self.root) {
-                    return Err(CoreError::Workspace(format!(
-                        "path escapes worktree: {}",
-                        change.path
-                    )));
-                }
-            }
-            if let Ok(metadata) = tokio::fs::symlink_metadata(&target).await
-                && metadata.file_type().is_symlink()
-            {
-                return Err(CoreError::Workspace(format!(
-                    "refusing to write through symlink: {}",
-                    change.path
-                )));
-            }
-            tokio::fs::write(&target, &change.content)
-                .await
-                .map_err(|err| CoreError::Workspace(err.to_string()))?;
-            self.applied
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(change.path.clone());
-        }
+        let root = self.root.clone();
+        let proposal = changes.to_vec();
+        let applied = tokio::task::spawn_blocking(move || apply_batch(&root, &proposal))
+            .await
+            .map_err(|error| CoreError::Workspace(format!("batch staging task failed: {error}")))??;
+        let mut paths = self
+            .applied
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        paths.extend(applied);
         Ok(())
     }
 
@@ -1557,6 +1701,77 @@ mod tests {
         git(dir.path(), &["commit", "-m", "initial"]).await;
         let manager = GitWorktreeManager::new(dir.path());
         (dir, manager)
+    }
+
+    #[test]
+    fn multifile_batch_preflights_every_path_before_modifying_existing_content() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), "original\n").unwrap();
+        std::fs::create_dir(root.path().join("blocked.rs")).unwrap();
+
+        let result = apply_batch(
+            root.path(),
+            &[
+                ProposedChange::new("src/lib.rs", "replacement\n"),
+                ProposedChange::new("blocked.rs", "cannot replace directory"),
+            ],
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("src/lib.rs")).unwrap(),
+            "original\n"
+        );
+        let duplicate = apply_batch(
+            root.path(),
+            &[
+                ProposedChange::new("src/lib.rs", "one"),
+                ProposedChange::new("SRC/LIB.RS", "two"),
+            ],
+        );
+        assert!(duplicate.is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("src/lib.rs")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[test]
+    fn multifile_batch_commits_all_prepared_files_and_cleans_temp_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let files = [
+            ProposedChange::new("src/main.rs", "fn main() {}\n"),
+            ProposedChange::new("tests/basic.rs", "#[test]\nfn works() {}\n"),
+        ];
+        let applied = apply_batch(root.path(), &files).unwrap();
+        assert_eq!(applied, vec!["src/main.rs", "tests/basic.rs"]);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        for parent in [root.path().join("src"), root.path().join("tests")] {
+            assert!(
+                std::fs::read_dir(parent)
+                    .unwrap()
+                    .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".ryoko-"))
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multifile_batch_rejects_symlink_parent_before_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+        assert!(
+            apply_batch(
+                root.path(),
+                &[ProposedChange::new("linked/escape.rs", "unsafe")],
+            )
+            .is_err()
+        );
+        assert!(!outside.path().join("escape.rs").exists());
     }
 
     #[tokio::test]
