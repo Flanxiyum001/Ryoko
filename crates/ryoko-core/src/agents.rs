@@ -243,6 +243,22 @@ impl AgentRuntime for ModelAgent {
             .as_ref()
             .map(|lease| lease.root().to_string_lossy().into_owned())
             .unwrap_or_else(|| ctx.project.project_root.clone());
+        if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+            // A peer reviewer must see the actual validated producer commit,
+            // not just a self-reported summary. The checked-out parent is HEAD
+            // of this isolated lease; no shell or repository mutation is used.
+            let diff = match independent_review_diff(Path::new(&worktree_root)).await {
+                Ok(diff) => diff,
+                Err(error) => return Ok(TaskResult::failure(task.id, error)),
+            };
+            enriched
+                .metadata
+                .entry(CONTEXT_METADATA.to_owned())
+                .or_default()
+                .push_str(&format!(
+                    "\n<untrusted_validated_change_patch>\n{diff}\n</untrusted_validated_change_patch>\n"
+                ));
+        }
         let tools = ctx
             .mcp
             .as_ref()
@@ -402,6 +418,36 @@ impl AgentRuntime for ModelAgent {
             "model did not produce a proposal after tool use",
         ))
     }
+}
+
+/// Read the precise producer commit, never arbitrary host source. Refuse to
+/// approve partial or unavailable diffs rather than silently reviewing a
+/// truncated patch. The data remains untrusted user-message context.
+async fn independent_review_diff(root: &Path) -> Result<String, String> {
+    let output = tokio::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "-c",
+            "core.pager=cat",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=3",
+            "HEAD^",
+            "HEAD",
+            "--",
+        ])
+        .output()
+        .await
+        .map_err(|error| format!("cannot inspect producer diff: {error}"))?;
+    if !output.status.success() {
+        return Err("cannot inspect the validated producer commit for independent review".to_owned());
+    }
+    if output.stdout.is_empty() || output.stdout.len() > 64 * 1024 {
+        return Err("independent review needs a nonempty patch of at most 64 KiB".to_owned());
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| "independent review patch is not UTF-8".to_owned())
 }
 
 /// Where the verification harness writes its captures for one task. The path is
