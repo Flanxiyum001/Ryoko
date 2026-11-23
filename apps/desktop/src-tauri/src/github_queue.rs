@@ -524,7 +524,8 @@ pub async fn start_github_goal(
         .await
         .map_err(|_| "cannot inspect GitHub repository before mission approval".to_owned())?;
     let verified: VerifiedRepository = bounded_json(verified_response).await?;
-    if verified.installation_id != installation_id || verified.repo_id != repo_id
+    if verified.installation_id != installation_id
+        || verified.repo_id != repo_id
         || verified.repository.trim().is_empty()
     {
         return Err("broker returned an unexpected repository".into());
