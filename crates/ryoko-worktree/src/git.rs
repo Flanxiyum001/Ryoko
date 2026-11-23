@@ -344,11 +344,13 @@ impl GitWorktreeManager {
 
         if let Some((path, _)) = self.worktree_checkout(&session.branch_name).await? {
             // A registration whose directory was deleted is stale metadata, not
-            // a live checkout: it must not be reported as a resumed lease.
-            if path == session.path && path.exists() {
-                return Ok(session);
-            }
-            if path != session.path {
+            // a live checkout. Git cannot canonicalize a missing path, so the
+            // paths are only comparable while the checkout still exists; a stale
+            // one is pruned below and reattached at the recorded path.
+            if path.exists() {
+                if path == session.path {
+                    return Ok(session);
+                }
                 return Err(WorktreeError::TargetCheckedOut(path.display().to_string()));
             }
         }
