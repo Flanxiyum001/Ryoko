@@ -534,6 +534,33 @@ impl GitWorktreeManager {
         Ok(pull_request)
     }
 
+    async fn published_head(
+        &self,
+        session: &WorktreeSession,
+        summary: &str,
+        commit: &str,
+    ) -> Result<WorktreePullRequest, WorktreeError> {
+        if commit == session.base_commit {
+            return Err(WorktreeError::NoChanges(session.branch_name.clone()));
+        }
+        let range = format!("{}..{commit}", session.base_commit);
+        let files = self.checked("list validated files", &["diff", "--name-only", &range], &session.path).await?
+            .lines().filter(|line| !line.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+        if files.is_empty() { return Err(WorktreeError::NoChanges(session.branch_name.clone())); }
+        let patch = self.checked("render validated patch", &["diff", "--binary", &range], &session.path).await?;
+        let pr = WorktreePullRequest {
+            id: Uuid::new_v4(),
+            task_id: session.id,
+            source_branch: session.branch_name.clone(),
+            target_branch: if session.base_branch == "HEAD" { "main".to_owned() } else { session.base_branch.clone() },
+            files,
+            patch,
+            summary: summary.to_owned(),
+        };
+        self.save_published(session, &pr, commit)?;
+        Ok(pr)
+    }
+
     /// Renders the same review artifact a human would see in `git diff`:
     /// changed paths and a binary patch between the target branch and the
     /// worktree HEAD. The worktree must already be attached.
@@ -692,6 +719,7 @@ impl GitWorktreeManager {
             session,
             root,
             applied: Mutex::new(BTreeSet::new()),
+            sealed_tree: Mutex::new(None),
         }))
     }
 
@@ -1430,6 +1458,7 @@ struct GitWorktreeLease {
     session: WorktreeSession,
     root: PathBuf,
     applied: Mutex<BTreeSet<String>>,
+    sealed_tree: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -1445,31 +1474,7 @@ impl WorkspaceLease for GitWorktreeLease {
     async fn apply(&self, changes: &[ProposedChange]) -> CoreResult<()> {
         for change in changes {
             let relative = validate_relative_path(&change.path)?;
-            let target = self.root.join(&relative);
-            if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|err| CoreError::Workspace(err.to_string()))?;
-                let canonical_parent = tokio::fs::canonicalize(parent)
-                    .await
-                    .map_err(|err| CoreError::Workspace(err.to_string()))?;
-                if !canonical_parent.starts_with(&self.root) {
-                    return Err(CoreError::Workspace(format!(
-                        "path escapes worktree: {}",
-                        change.path
-                    )));
-                }
-            }
-            if let Ok(metadata) = tokio::fs::symlink_metadata(&target).await
-                && metadata.file_type().is_symlink()
-            {
-                return Err(CoreError::Workspace(format!(
-                    "refusing to write through symlink: {}",
-                    change.path
-                )));
-            }
-            tokio::fs::write(&target, &change.content)
-                .await
+            crate::confined::write(&self.root, &relative, change.content.as_bytes())
                 .map_err(|err| CoreError::Workspace(err.to_string()))?;
             self.applied
                 .lock()
@@ -1479,17 +1484,52 @@ impl WorkspaceLease for GitWorktreeLease {
         Ok(())
     }
 
+    async fn seal(&self) -> CoreResult<()> {
+        let paths: Vec<String> = self.applied.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+        if paths.is_empty() { return Err(CoreError::Workspace("no staged files to validate".to_owned())); }
+        let mut args = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.manager.checked("stage source snapshot", &args, &self.session.path).await?;
+        self.manager.checked("stage tracked source", &["add", "-u"], &self.session.path).await?;
+        let staged = self.manager.checked("inspect snapshot paths", &["diff", "--cached", "--name-only"], &self.session.path).await?;
+        if staged.lines().any(|path| !paths.iter().any(|allowed| allowed == path)) {
+            return Err(CoreError::Workspace("unproposed tracked file changed before validation".to_owned()));
+        }
+        let tree = self.manager.checked("seal source tree", &["write-tree"], &self.session.path).await?;
+        *self.sealed_tree.lock().unwrap_or_else(|e| e.into_inner()) = Some(tree);
+        Ok(())
+    }
+
+    async fn verify_seal(&self) -> CoreResult<()> {
+        let paths: Vec<String> = self.applied.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+        let mut args = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.manager.checked("inspect validated source", &args, &self.session.path).await?;
+        self.manager.checked("inspect tracked source", &["add", "-u"], &self.session.path).await?;
+        let current = self.manager.checked("inspect source tree", &["write-tree"], &self.session.path).await?;
+        let expected = self.sealed_tree.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if expected.as_deref() != Some(current.as_str()) {
+            return Err(CoreError::Workspace("source tree differs from validated snapshot".to_owned()));
+        }
+        Ok(())
+    }
+
     async fn publish(&self, task: &Task, summary: &str) -> CoreResult<PullRequest> {
-        let paths: Vec<String> = self
-            .applied
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .cloned()
-            .collect();
+        self.verify_seal().await?;
+        let tree = self.sealed_tree.lock().unwrap_or_else(|e| e.into_inner()).clone()
+            .ok_or_else(|| CoreError::Workspace("source was not sealed".to_owned()))?;
+        let commit = self.manager.checked("commit validated tree", &[
+            "-c", "commit.gpgsign=false", "commit-tree", &tree,
+            "-p", &self.session.base_commit, "-m", summary,
+        ], &self.session.path).await?;
+        // The branch now points to the immutable tree used by the validation
+        // gate. A later worktree mutation cannot change this commit object.
+        self.manager.checked("publish validated commit", &[
+            "reset", "--hard", &commit,
+        ], &self.session.path).await?;
         let pr = self
             .manager
-            .publish_worktree_inner(&self.session, summary, Some(&paths))
+            .published_head(&self.session, summary, &commit)
             .await
             .map_err(CoreError::from)?;
         self.applied
@@ -1605,6 +1645,8 @@ mod tests {
             .await
             .unwrap();
 
+        lease.seal().await.unwrap();
+        lease.verify_seal().await.unwrap();
         let pr = lease.publish(&task, "add feature").await.unwrap();
         assert_eq!(pr.files, vec!["src/feature.rs"]);
         assert!(!pr.files.iter().any(|path| path.starts_with("target/")));
@@ -1779,6 +1821,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validation_rejects_changed_source_and_publishes_sealed_bytes() {
+        let (_dir, manager) = repo().await;
+        let task = Task::new("exact source", AgentRole::SeniorDeveloper);
+        let identity = AgentIdentity::new(AgentRole::SeniorDeveloper, "dev", "developer");
+        let lease = manager.allocate(&task, &identity).await.unwrap();
+        lease.apply(&[ProposedChange::new("source.rs", "validated")]).await.unwrap();
+        lease.seal().await.unwrap();
+        tokio::fs::write(lease.root().join("source.rs"), "tampered").await.unwrap();
+        assert!(lease.verify_seal().await.is_err());
+        assert!(lease.publish(&task, "source").await.is_err());
+        tokio::fs::write(lease.root().join("source.rs"), "validated").await.unwrap();
+        lease.verify_seal().await.unwrap();
+        let pr = lease.publish(&task, "source").await.unwrap();
+        assert!(pr.patch.contains("+validated"));
+        assert!(!pr.patch.contains("tampered"));
+        lease.discard().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn agent_ids_are_sanitized() {
         assert_eq!(sanitize_agent_id("senior dev/01").unwrap(), "senior-dev-01");
         assert_eq!(sanitize_agent_id("../../etc").unwrap(), "etc");
@@ -1841,6 +1902,7 @@ mod tests {
             )])
             .await
             .unwrap();
+        lease.seal().await.unwrap();
         let pr = lease.publish(&child, "child tests").await.unwrap();
         assert_eq!(pr.files, vec!["tests/child.rs"]);
         assert!(pr.patch.contains("tests/child.rs"));
