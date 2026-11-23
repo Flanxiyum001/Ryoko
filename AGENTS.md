@@ -45,6 +45,10 @@ node --test services/github-app/test/
 Keep `Cargo.lock` committed and untouched unless a dependency change requires
 it. Do not upgrade dependencies as part of an unrelated change.
 
+The `main` branch is protected by an active GitHub repository ruleset requiring
+a pull request and green status on all 7 stable CI checks before merge. Direct
+pushes and force pushes are blocked. See `docs/decisions/016-main-branch-protection-and-maintainer-review-policy.md`.
+
 ## Layout
 
 ```text
