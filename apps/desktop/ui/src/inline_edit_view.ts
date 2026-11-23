@@ -116,6 +116,7 @@ export class InlineEditController {
       if (generation !== this.generation || file.model.isDisposed()) return;
       if (this.deps.onReview) {
         const fullText = this.contextText;
+        if (fullText === null) return;
         const startOffset = this.contextOffset;
         const endOffset = startOffset + this.contextLength;
         const path = file.path;
