@@ -741,3 +741,41 @@ pre.mission-detail-value {
   .top-actions .button { padding: 5px 7px; }
   .brand-sub, .workspace-name { display: none; }
 }
+
+
+/* Native GitHub Mission Control: reviewable writes, never implicit actions. */
+.github-action-panel {
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+.github-action-panel h4 { margin: 2px 0; font-size: 12px; }
+.github-action-panel label { font-size: 11px; color: var(--muted); }
+.github-action-panel select,
+.github-action-panel input,
+.github-action-panel textarea {
+  width: 100%; min-width: 0; padding: 7px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font: 12px/1.5 inherit;
+}
+.github-action-panel textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-height: 190px; resize: vertical;
+}
+.github-action-panel .hidden { display: none; }
+.github-queue-item { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.github-queue-item a { flex: 1 1 170px; overflow-wrap: anywhere; }
+.github-queue-item .hint { flex: 1 1 100%; margin: 0; padding: 2px 0; }
+.github-proposal {
+  margin-bottom: 8px; padding: 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.github-proposal summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
+.github-proposal-preview {
+  max-height: 200px; overflow: auto; overflow-wrap: anywhere;
+  white-space: pre-wrap; padding: 9px; font: 11px/1.5 ui-monospace, monospace;
+  background: var(--bg); border-radius: 6px;
+}
+.github-proposal-actions { display: flex; gap: 6px; flex-wrap: wrap; }
