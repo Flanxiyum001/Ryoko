@@ -1470,6 +1470,7 @@ impl WorkspaceProvider for GitWorktreeManager {
             session,
             root,
             applied: Mutex::new(BTreeSet::new()),
+            sealed_tree: Mutex::new(None),
         }))
     }
 }
