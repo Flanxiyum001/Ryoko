@@ -287,7 +287,7 @@ export class GitHubBroker {
       case 'open_pull_request': {
         const result = await this.request(root + '/pulls', token, {
           method: 'POST',
-          body: { head: safeBranch(params.head), base, title: params.title, body: params.body },
+          body: { head: safeBranch(params.head), base, title: params.title, body: params.body, draft: true },
         });
         return { action: 'pull_request_opened', number: result.number, html_url: result.html_url };
       }
