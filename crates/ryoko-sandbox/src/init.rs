@@ -1014,10 +1014,7 @@ console.log("ok");
         );
         // inspect() canonicalizes the repository root: /var and /private/var
         // refer to the same location on macOS but are not lexical prefixes.
-        assert!(
-            plan.dockerfile
-                .starts_with(dir.path().canonicalize().unwrap())
-        );
+        assert!(plan.dockerfile.starts_with(dir.path().canonicalize().unwrap()));
     }
 
     fn rust_project() -> TempDir {
