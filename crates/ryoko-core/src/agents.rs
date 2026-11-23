@@ -221,7 +221,12 @@ impl AgentRuntime for ModelAgent {
                 .and_then(|value| value.parse::<uuid::Uuid>().ok())
             {
                 Some(target) if task.dependencies.contains(&target) => target,
-                _ => return Ok(TaskResult::failure(task.id, "invalid independent review target")),
+                _ => {
+                    return Ok(TaskResult::failure(
+                        task.id,
+                        "invalid independent review target",
+                    ));
+                }
             };
             let Some(reference) = ctx.memory.get(&validation_evidence_key(target)) else {
                 return Ok(TaskResult::failure(
@@ -441,13 +446,14 @@ async fn independent_review_diff(root: &Path) -> Result<String, String> {
         .await
         .map_err(|error| format!("cannot inspect producer diff: {error}"))?;
     if !output.status.success() {
-        return Err("cannot inspect the validated producer commit for independent review".to_owned());
+        return Err(
+            "cannot inspect the validated producer commit for independent review".to_owned(),
+        );
     }
     if output.stdout.is_empty() || output.stdout.len() > 64 * 1024 {
         return Err("independent review needs a nonempty patch of at most 64 KiB".to_owned());
     }
-    String::from_utf8(output.stdout)
-        .map_err(|_| "independent review patch is not UTF-8".to_owned())
+    String::from_utf8(output.stdout).map_err(|_| "independent review patch is not UTF-8".to_owned())
 }
 
 /// Where the verification harness writes its captures for one task. The path is
@@ -507,14 +513,8 @@ fn task_result_from_critique(task_id: uuid::Uuid, text: &str) -> TaskResult {
 /// reference against trusted shared memory before accepting a passing review.
 fn task_result_from_independent_review(task_id: uuid::Uuid, text: &str) -> TaskResult {
     match ReviewRecord::parse(text) {
-        Ok(record) if record.verdict == ReviewVerdict::Pass => {
-            TaskResult::success(task_id, text)
-        }
-        Ok(record) => TaskResult::failed_with_output(
-            task_id,
-            text,
-            record.failure_feedback(),
-        ),
+        Ok(record) if record.verdict == ReviewVerdict::Pass => TaskResult::success(task_id, text),
+        Ok(record) => TaskResult::failed_with_output(task_id, text, record.failure_feedback()),
         Err(error) => TaskResult::failure(task_id, format!("invalid independent review: {error}")),
     }
 }
