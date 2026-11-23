@@ -34,7 +34,10 @@ pub fn trusted_validation_evidence(task_id: Uuid, report: &ValidationReport) -> 
     {
         return None;
     }
-    Some(format!("validator:{task_id}"))
+    // A new receipt per successful validation prevents a previous verdict
+    // from being replayed after the producer is repaired under the same task ID.
+    // This is a reference, not a cryptographic attestation of the test log.
+    Some(format!("validator:{task_id}:{}", Uuid::new_v4()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,9 +254,12 @@ mod tests {
             vec!["spec test files: src/lib.rs; command: cargo test".to_owned()],
             Duration::ZERO,
         );
-        assert_eq!(
+        let receipt = trusted_validation_evidence(task_id, &executed).unwrap();
+        assert!(receipt.starts_with(&format!("validator:{task_id}:")));
+        assert_ne!(
             trusted_validation_evidence(task_id, &executed),
-            Some(format!("validator:{task_id}"))
+            Some(receipt),
+            "each execution must issue a fresh proof reference"
         );
         let rejected = ValidationReport::failed("failed", executed.logs, Duration::ZERO);
         assert!(trusted_validation_evidence(task_id, &rejected).is_none());
