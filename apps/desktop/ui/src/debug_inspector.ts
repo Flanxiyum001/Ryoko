@@ -396,6 +396,32 @@ export function toggleVariableExpanded(
   };
 }
 
+/** Returns a bounded tree of variables reachable from a DAP scope.
+ * The response cache may include collapsed or unrelated references: never render
+ * those as additional roots. Cycle detection handles broken adapters safely.
+ */
+export function visibleVariablesForScope(
+  state: DebugState,
+  scopeReference: number,
+): Array<{ variable: DapVariable; depth: number }> {
+  const visible: Array<{ variable: DapVariable; depth: number }> = [];
+  const visit = (reference: number, depth: number, ancestors: Set<number>): void => {
+    if (ancestors.has(reference) || depth > 8 || visible.length >= 800) return;
+    const nextAncestors = new Set(ancestors);
+    nextAncestors.add(reference);
+    for (const variable of state.variables.get(reference) ?? []) {
+      if (visible.length >= 800) break;
+      visible.push({ variable, depth });
+      const childReference = variable.variablesReference;
+      if (childReference > 0 && state.expandedVarRefs.has(childReference)) {
+        visit(childReference, depth + 1, nextAncestors);
+      }
+    }
+  };
+  visit(scopeReference, 0, new Set());
+  return visible;
+}
+
 /** Toggles a breakpoint in local state and returns the updated lines for DAP `setBreakpoints`. */
 export function toggleBreakpointInState(
   state: DebugState,
