@@ -48,11 +48,20 @@ pub struct WorkspaceIndex {
 
 impl WorkspaceIndex {
     pub fn open(path: &Path) -> Result<Self, IndexError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        // SQLite's NOFOLLOW flag rejects a database path reached through a
+        // symlinked ancestor on macOS (for example /var -> /private/var).
+        // Resolve the containing directory, but never resolve the database
+        // file itself: NOFOLLOW must still reject a symlinked database.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let canonical_parent = std::fs::canonicalize(parent)?;
+        let filename = path.file_name().ok_or(IndexError::InvalidPath)?;
+        let database_path = canonical_parent.join(filename);
         let connection = Connection::open_with_flags(
-            path,
+            &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -695,6 +704,29 @@ mod tests {
             index.content_hash("src/lib.rs").unwrap(),
             Some(String::new())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opens_database_through_symlinked_ancestor_without_following_database_symlinks() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let actual_parent = directory.path().join("real");
+        std::fs::create_dir_all(&actual_parent).unwrap();
+        let alias = directory.path().join("alias");
+        std::os::unix::fs::symlink(&actual_parent, &alias).unwrap();
+
+        let path = alias.join("symbols.sqlite3");
+        let index = WorkspaceIndex::open(&path).unwrap();
+        drop(index);
+        assert!(actual_parent.join("symbols.sqlite3").is_file());
+
+        // A symlink at the final component remains forbidden, even when
+        // the containing directory itself arrived through a symlink.
+        let target = actual_parent.join("target.sqlite3");
+        std::fs::write(&target, []).unwrap();
+        let link = actual_parent.join("linked.sqlite3");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(WorkspaceIndex::open(&alias.join("linked.sqlite3")).is_err());
     }
 
     #[cfg(unix)]

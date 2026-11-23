@@ -879,6 +879,9 @@ mod tests {
 
     /// Exercises the two lifecycle guarantees that need no browser: readiness
     /// polling against a real server, and killing the whole process group.
+    /// This probes /bin/sh and POSIX negative-PID signalling; the harness is
+    /// packaged for Linux OCI containers, not native Windows process groups.
+    #[cfg(unix)]
     #[test]
     fn the_harness_waits_for_the_server_and_kills_its_process_group() {
         const DRIVER: &str = r#"
@@ -1012,7 +1015,12 @@ console.log("ok");
                 .with_file_name("Dockerfile.dockerignore")
                 .is_file()
         );
-        assert!(plan.dockerfile.starts_with(dir.path()));
+        // inspect() canonicalizes the repository root: /var and /private/var
+        // refer to the same location on macOS but are not lexical prefixes.
+        assert!(
+            plan.dockerfile
+                .starts_with(dir.path().canonicalize().unwrap())
+        );
     }
 
     fn rust_project() -> TempDir {
