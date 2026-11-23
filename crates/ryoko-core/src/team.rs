@@ -318,12 +318,31 @@ pub fn dynamic_plan_with_reviews(goal: &str, reviews: ReviewConfig) -> DynamicPl
         tasks.push(backend);
     }
 
+    // A normal worktree may inherit only one validated parent commit.
+    // A mixed UI + backend goal has two sibling producers, so combine those
+    // branches through the same audited Integrator before full-stack work.
+    let implementation_inputs = if producers.len() > 1 {
+        let mut boundary = Task::new(
+            format!(
+                "PREINTEGRATE: Combine the validated UI and Backend branches for: {goal}. Preserve both contracts and regression tests."
+            ),
+            AgentRole::Integrator,
+        );
+        for producer in &producers {
+            boundary = boundary.depends_on(producer);
+        }
+        tasks.push(boundary.clone());
+        vec![boundary]
+    } else {
+        producers
+    };
+
     let mut implementation = Task::new(
         format!("FULLSTACK: Implement the agreed contracts and regression tests for: {goal}."),
         AgentRole::SeniorDeveloper,
     )
     .with_metadata(VERIFICATION_METADATA, verification);
-    for producer in &producers {
+    for producer in &implementation_inputs {
         implementation = implementation.depends_on(producer);
     }
     tasks.push(implementation.clone());
@@ -506,6 +525,25 @@ mod tests {
     }
 
     #[test]
+    fn mixed_ui_and_backend_routes_through_a_single_integration_parent() {
+        let plan = dynamic_plan("build a responsive UI dashboard with an API endpoint");
+        let implementation = plan
+            .tasks
+            .iter()
+            .find(|task| task.assigned_to == AgentRole::SeniorDeveloper)
+            .unwrap();
+        assert_eq!(implementation.dependencies.len(), 1);
+        let integration = plan
+            .tasks
+            .iter()
+            .find(|task| task.id == implementation.dependencies[0])
+            .unwrap();
+        assert_eq!(integration.assigned_to, AgentRole::Integrator);
+        assert_eq!(integration.dependencies.len(), 2);
+        Orchestrator::validate_plan(&plan.execution_tasks()).unwrap();
+    }
+
+    #[test]
     fn execution_plan_is_an_ordered_dag_with_parallel_reviewers() {
         let tasks = engineering_execution_plan("add an endpoint");
         Orchestrator::validate_plan(&tasks).unwrap();
@@ -629,7 +667,7 @@ mod tests {
             .iter()
             .find(|task| task.assigned_to == AgentRole::Integrator)
             .unwrap();
-        assert_eq!(integrator.dependencies.len(), 2);
+        assert_eq!(integrator.dependencies.len(), 4);
         Orchestrator::validate_plan(&plan.all_tasks()).unwrap();
     }
 
