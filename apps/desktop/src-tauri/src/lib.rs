@@ -1,6 +1,7 @@
 mod code_run;
 mod completion;
 mod connectors;
+mod credential_store;
 mod debug_adapter;
 mod git_status;
 mod github_queue;
@@ -10,6 +11,7 @@ mod lsp_frame;
 mod marketplace;
 mod mission;
 mod model_runtime;
+mod onboarding;
 mod paths;
 mod review;
 mod run;
@@ -38,6 +40,10 @@ pub fn run() {
         .manage(debug_adapter::DebugState::default())
         .invoke_handler(tauri::generate_handler![
             workspace::open_workspace,
+            onboarding::onboarding_state,
+            onboarding::onboarding_configure,
+            onboarding::onboarding_remember_folder,
+            onboarding::clone_repository,
             workspace::list_files,
             workspace::read_file,
             workspace::write_file,
