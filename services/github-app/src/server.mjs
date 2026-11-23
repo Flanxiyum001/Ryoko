@@ -472,7 +472,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       const installationId = positiveId(url.searchParams.get('installationId'), 'installation');
       const repoId = positiveId(url.searchParams.get('repoId'), 'repository');
       await client.authorizedRepo(session.token, installationId, repoId);
-      return json(res, 200, { jobs: [...pipelineJobs]
+      return json(res, 200, { jobs: stateDb ? stateDb.listJobs(repoId) : [...pipelineJobs.entries()]
         .filter(([key]) => key.startsWith(repoId + ':'))
         .slice(-50).map(([key, value]) => ({ issue: Number(key.split(':')[1]), ...value })) });
     }
@@ -494,6 +494,28 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       if (!settings.agentRepoIds.includes(repoId)) throw bad('repository not allowed for agent jobs', 403);
       const issue = await client.issue(session.token, installationId, repoId, number);
       return json(res, 202, startJob(issue, false));
+    }
+    // An IDE task need not originate from a GitHub issue. A human chooses
+    // the repository and exact goal; agents still publish draft PRs only.
+    if (req.method === 'POST' && path === '/api/desktop/goals') {
+      const session = requireDesktop(req);
+      const input = await jsonBody(req);
+      const installationId = positiveId(input?.installationId, 'installation');
+      const repoId = positiveId(input?.repoId, 'repository');
+      const goal = input?.goal;
+      if (typeof goal !== 'string' || !goal.trim() || goal.length > 4000
+        || goal.includes('\0')) throw bad('invalid engineering goal');
+      if (!settings.agentRepoIds.includes(repoId)) throw bad('repository not allowed for agent jobs', 403);
+      const repo = await client.authorizedRepo(session.token, installationId, repoId);
+      const [owner, name] = String(repo.full_name || '').split('/');
+      if (!owner || !name || !repo.default_branch) throw bad('invalid repository metadata', 502);
+      const request = {
+        kind: 'goal', installationId, repoId, owner, name,
+        fullName: repo.full_name, defaultBranch: repo.default_branch,
+        title: goal.trim().replace(/\s+/g, ' ').slice(0, 120),
+        goal: goal.trim(),
+      };
+      return json(res, 202, startJob(request));
     }
     if (req.method === 'GET' && path === '/api/desktop/proposals') {
       const session = requireDesktop(req);
