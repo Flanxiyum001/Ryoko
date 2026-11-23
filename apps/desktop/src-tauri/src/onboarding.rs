@@ -27,7 +27,7 @@ pub fn provider_endpoint(id: &str) -> Option<(&'static str, &'static str)> {
     match id {
         "openai" => Some(("https://api.openai.com/v1", "openai")),
         "anthropic" => Some(("https://api.anthropic.com", "anthropic")),
-        "gemini" => Some(("https://generativelanguage.googleapis.com", "gemini")),
+        "gemini" => Some(("https://generativelanguage.googleapis.com/v1beta", "gemini")),
         "ollama" => Some(("http://127.0.0.1:11434/v1", "openai")),
         _ => None,
     }
