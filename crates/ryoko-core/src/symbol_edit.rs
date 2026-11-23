@@ -50,9 +50,7 @@ pub fn materialize_symbol_edits(
     for edit in edits {
         let relative = validate_relative_path(&edit.path).map_err(|error| error.to_string())?;
         let normalized = relative.to_string_lossy().replace('\\', "/");
-        if !groups.contains_key(&normalized)
-            && !casefold.insert(normalized.to_ascii_lowercase())
-        {
+        if !groups.contains_key(&normalized) && !casefold.insert(normalized.to_ascii_lowercase()) {
             return Err(format!("case-colliding symbol edit path: {}", edit.path));
         }
         if edit.symbol.trim().is_empty()
@@ -75,7 +73,9 @@ pub fn materialize_symbol_edits(
         let target = root.join(relative);
         let metadata = std::fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(format!("symbol edits require a regular source file: {path}"));
+            return Err(format!(
+                "symbol edits require a regular source file: {path}"
+            ));
         }
         let canonical = target.canonicalize().map_err(|error| error.to_string())?;
         if !canonical.starts_with(&root) {
@@ -95,9 +95,10 @@ pub fn materialize_symbol_edits(
             if !symbols_seen.insert(&edit.symbol) {
                 return Err(format!("duplicate symbol edit in {path}: {}", edit.symbol));
             }
-            let mut extractor = ContextExtractor::new().map_err(|error| error.to_string())?;
+            let mut extractor = ContextExtractor::new()
+                .map_err(|error| error.to_string())?
+                .with_max_snippet_bytes(MAX_SYMBOL_BYTES);
             let context = extractor
-                .with_max_snippet_bytes(MAX_SYMBOL_BYTES)
                 .extract_symbols(&path, &source, &[&edit.symbol])
                 .map_err(|error| format!("cannot parse {path}: {error}"))?;
             if context.has_syntax_errors {
@@ -122,7 +123,10 @@ pub fn materialize_symbol_edits(
             }
             let positions = source.match_indices(&edit.before).collect::<Vec<_>>();
             if positions.len() != 1 {
-                return Err(format!("declaration source is not unique: {} in {path}", edit.symbol));
+                return Err(format!(
+                    "declaration source is not unique: {} in {path}",
+                    edit.symbol
+                ));
             }
             let offset = positions[0].0;
             source.replace_range(offset..offset + edit.before.len(), &edit.after);
@@ -133,12 +137,13 @@ pub fn materialize_symbol_edits(
                 .extract(&path, &source)
                 .map_err(|error| format!("cannot parse modified {path}: {error}"))?;
             if updated.has_syntax_errors {
-                return Err(format!("symbol replacement introduces syntax errors: {path}"));
+                return Err(format!(
+                    "symbol replacement introduces syntax errors: {path}"
+                ));
             }
         }
         output.push(
-            ProposedChange::new(path, source)
-                .with_description("AST-verified symbol replacement"),
+            ProposedChange::new(path, source).with_description("AST-verified symbol replacement"),
         );
     }
     Ok(output)
@@ -163,7 +168,10 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert!(changes[0].content.contains("fn alpha() -> i32 { 3 }"));
         assert!(changes[0].content.contains("fn beta() -> i32 { 2 }"));
-        assert_eq!(std::fs::read_to_string(dir.path().join("lib.rs")).unwrap(), source);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("lib.rs")).unwrap(),
+            source
+        );
     }
 
     #[test]
@@ -200,8 +208,14 @@ mod tests {
             after: "fn two( {".into(),
         };
         assert!(materialize_symbol_edits(dir.path(), &[valid, invalid]).is_err());
-        assert_eq!(std::fs::read_to_string(dir.path().join("one.rs")).unwrap(), "fn one() {}\n");
-        assert_eq!(std::fs::read_to_string(dir.path().join("two.rs")).unwrap(), "fn two() {}\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("one.rs")).unwrap(),
+            "fn one() {}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("two.rs")).unwrap(),
+            "fn two() {}\n"
+        );
     }
 
     #[cfg(unix)]
