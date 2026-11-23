@@ -680,7 +680,7 @@ pre.mission-detail-value {
   cursor: pointer; font-size: 12px;
 }
 .command-center #workspaceName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.command-center kbd { font: 10px inherit; white-space: nowrap; color: #929292; }
+.command-center kbd { font-family: inherit; font-size: 10px; white-space: nowrap; color: #929292; }
 .top-actions { margin-left: 0; gap: 5px; }
 .button { border-radius: 4px; padding: 5px 10px; }
 .button.primary { background: #286496; border-color: #357aac; color: #fff; }
@@ -726,7 +726,7 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--accent); ou
 .active-path { font-size: 11px; color: #aaa; }
 .tabbar .button { padding: 3px 7px; font-size: 10px; }
 .statusbar { background: #181818; font-size: 11px; }
-.empty-editor { background: #1e1e1e; padding: 40px; overflow: auto; align-items: stretch; text-align: left; }
+.empty-editor { display: flex; flex-direction: column; background: #1e1e1e; padding: 40px; overflow: auto; align-items: stretch; text-align: left; }
 .welcome-content { width: min(760px, 100%); margin: auto; }
 .welcome-heading { display: flex; align-items: center; gap: 22px; margin-bottom: 42px; }
 .empty-mark { color: #6d93b4; font: 600 64px 'Segoe UI', sans-serif; opacity: 1; }

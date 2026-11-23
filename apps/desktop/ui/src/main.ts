@@ -879,6 +879,7 @@ async function openFolder(): Promise<void> {
     const info = await invoke<WorkspaceInfo>('open_workspace', { path: selected });
     // Open the new workspace successfully before discarding any old editor
     // buffers. Changing a folder must not erase unsaved content on failure.
+    inlineEdit.reject();
     await lsp.stop();
     quickOpen.close();
     await stopTerminal();
@@ -1706,6 +1707,7 @@ function selectOpenFile(path: string): void {
   const file = [...openFiles.values()].find((candidate) => candidate.path === path);
   if (!file) return;
   fileOpenGeneration += 1;
+  if (state.current && state.current !== file) inlineEdit.reject();
   if (state.current) state.current.viewState = editor.saveViewState();
   if (!diffReview.classList.contains('hidden')) closeDiffReview();
   state.current = file;
@@ -1739,6 +1741,7 @@ function closeOpenFile(path: string): void {
   lsp.close(file.uri);
   openFiles.delete(file.uri);
   if (wasActive) {
+    inlineEdit.reject();
     hideFim();
     state.current = null;
     editor.setModel(null);
