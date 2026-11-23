@@ -1,7 +1,7 @@
 import { createHmac, sign, timingSafeEqual } from 'node:crypto';
 
 export const READ_PERMISSIONS = Object.freeze({
-  contents: 'read', issues: 'read', pull_requests: 'read', checks: 'read', actions: 'read',
+  contents: 'read', issues: 'read', pull_requests: 'read', checks: 'read', actions: 'read', statuses: 'read',
 });
 export const WRITE_PERMISSIONS = Object.freeze({ contents: 'write' });
 export const PR_PERMISSIONS = Object.freeze({ pull_requests: 'write' });
@@ -114,6 +114,9 @@ export function validateProposal(input) {
         body: typeof params.body === 'string' && params.body.length <= 12_000
           ? params.body : (() => { throw unsafe('invalid pull request body'); })(),
       };
+      break;
+    case 'mark_ready_for_review':
+      validated = { number: positiveId(params.number, 'pull request number') };
       break;
     case 'review_comment':
       validated = {
