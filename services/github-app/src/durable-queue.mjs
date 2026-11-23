@@ -87,10 +87,18 @@ export class BotJobStore {
   }
 
   recordDelivery(id) {
+    if (!/^[A-Za-z0-9-]{16,80}$/.test(id)) throw new Error('invalid delivery ID');
     if (this.deliveries.has(id)) return false;
-    if (this.deliveries.size >= 1000) this.deliveries.delete(this.deliveries.keys().next().value);
+    const oldest = this.deliveries.size >= 1000 ? this.deliveries.entries().next().value : null;
+    if (oldest) this.deliveries.delete(oldest[0]);
     this.deliveries.set(id, Date.now());
-    this.flush();
+    try {
+      this.flush();
+    } catch (error) {
+      this.deliveries.delete(id);
+      if (oldest) this.deliveries.set(oldest[0], oldest[1]);
+      throw error;
+    }
     return true;
   }
 
