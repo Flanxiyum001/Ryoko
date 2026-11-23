@@ -80,9 +80,11 @@ provider responds, or a sandbox isolates.
 
 ## Authorship
 
-This repository is solely authored and maintained by Pourush Nair
-<pourushnair6@gmail.com>, GitHub `Flanxiyum001`. Every commit is authored and
-committed under that identity.
+Ryoko is maintained by Pourush Nair <pourushnair6@gmail.com>,
+GitHub `Flanxiyum001`. Contributions by other people must preserve the
+actual contributor's Git authorship; never impersonate the maintainer.
+Changes made by an authorized assistant on the maintainer's behalf must
+follow the maintainer's configured Git identity.
 
 No AI attribution anywhere in this repository:
 
