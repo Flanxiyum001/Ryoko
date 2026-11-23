@@ -249,6 +249,17 @@ impl std::fmt::Debug for PluginHost {
 }
 
 impl PluginHost {
+    /// Wasmtime 26 guest traps may abort the Windows host process. Refuse
+    /// in-process plugins rather than putting the user's IDE at risk until
+    /// plugin execution is isolated in a monitored subprocess.
+    #[cfg(windows)]
+    pub fn new(_max_limits: PluginLimits) -> Result<Self, PluginError> {
+        Err(PluginError::Compile(
+            "native Windows WASI plugin execution unavailable pending isolated worker".into(),
+        ))
+    }
+
+    #[cfg(not(windows))]
     pub fn new(max_limits: PluginLimits) -> Result<Self, PluginError> {
         let mut config = Config::new();
         config.consume_fuel(true);
@@ -591,6 +602,16 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_wasi_plugin_execution_fails_closed() {
+        assert!(matches!(
+            PluginHost::new(PluginLimits::default()),
+            Err(PluginError::Compile(_))
+        ));
+    }
+
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn runs_a_context_plugin_over_wasi_stdio() {
         let output = r#"{"schema":1,"result":{"type":"context","outline":"fn main() {}","symbols":["main"]}}"#;
@@ -604,6 +625,7 @@ pub(crate) mod tests {
         assert_eq!(context.symbols, vec!["main"]);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn runs_a_linter_plugin() {
         let output = r#"{"schema":1,"result":{"type":"lint","diagnostics":[{"line":2,"column":1,"severity":"warning","message":"avoid this"}]}}"#;
@@ -619,6 +641,7 @@ pub(crate) mod tests {
         assert_eq!(diagnostics[0].severity, crate::types::LintSeverity::Warning);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn policy_denies_unknown_ids_before_execution() {
         let output = r#"{"schema":1,"result":{"type":"context","outline":"","symbols":[]}}"#;
@@ -632,6 +655,7 @@ pub(crate) mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn plugin_kind_cannot_be_used_for_another_operation() {
         let output = r#"{"schema":1,"result":{"type":"context","outline":"","symbols":[]}}"#;
@@ -647,6 +671,7 @@ pub(crate) mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn malformed_or_truncated_output_is_rejected() {
         let fixture = fixture(PluginKind::Context, "not json", PluginLimits::default());
@@ -661,6 +686,7 @@ pub(crate) mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn output_cap_is_enforced() {
         let output = format!(
@@ -686,6 +712,7 @@ pub(crate) mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn fuel_and_memory_limits_stop_hostile_modules() {
         let dir = tempfile::tempdir().unwrap();
