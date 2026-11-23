@@ -70,6 +70,16 @@ Each task gets a dedicated worktree and branch, a scoped file policy, a tool
 allowlist, a resource budget, a task log and an execution identifier. Agents do not
 share writable workspaces by default.
 
+Integration is the only step that touches the user's checkout, and it refuses
+rather than overwrite. A merge is rejected while the target branch has tracked
+or unmerged changes, while it is checked out in another worktree, when the agent
+branch conflicts, or when an untracked or ignored file occupies a path the merge
+writes (the checkout sync would replace it). The target ref moves through a compare-and-swap
+against the observed tip, so a commit that lands concurrently is never dropped;
+the loser fails cleanly and can retry. A merge interrupted after the ref update is
+reconciled on retry instead of producing a second merge commit, and a stale
+`.git/worktrees` registration left by a crash is pruned before a lease is resumed.
+
 ## Team planning
 
 Do not spawn the full roster for every request. The planner weighs complexity,

@@ -195,7 +195,7 @@ jobs:
         with:
           subject-path: dist/*
 
-      - name: Publish strictly prerelease assets
+      - name: Publish preview release assets
         id: publish
         shell: bash
         env:
@@ -248,10 +248,11 @@ jobs:
           are included. These previews are not production releases.
           NOTES
           printf '\nBuilt from commit: `%s`\n' "$GITHUB_SHA" >> "$RUNNER_TEMP/release-notes.md"
+          # Published as the repository's Latest release by policy, even for
+          # alpha tags; the notes still describe the build as pre-alpha.
           gh release create "$TAG" \
             "${TAG_FLAGS[@]}" \
-            --prerelease \
-            --latest=false \
+            --latest \
             --title "Ryoko Desktop $TAG (Alpha Testing)" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             "${INSTALLERS[@]}" dist/SHA256SUMS.txt
