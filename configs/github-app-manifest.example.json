@@ -18,7 +18,8 @@
     "pull_requests": "write",
     "issues": "write",
     "actions": "read",
-    "checks": "read"
+    "checks": "read",
+    "statuses": "read"
   },
   "default_events": [
     "installation",
