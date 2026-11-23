@@ -120,6 +120,10 @@ button, input { font: inherit; color: inherit; }
 }
 .hunk-item input { margin: 3px 0 0; accent-color: var(--accent); }
 .hunk-title { font-size: 11px; overflow-wrap: anywhere; }
+.hunk-file-lock {
+  color: var(--muted);
+}
+.hunk-file-lock .hunk-title { font-style: italic; }
 .hunk-validation {
   max-height: 140px; margin: 6px 10px 10px; padding: 6px 7px; overflow: auto;
   color: var(--muted); background: var(--bg); border: 1px solid var(--border);
@@ -449,6 +453,89 @@ pre.mission-detail-value {
   font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* DAP Workbench & Inspector: Stack, Variables, Breakpoints, and Log */
+.debug-workbench {
+  display: flex; flex: 1; min-height: 0; overflow-x: auto;
+  border-top: 1px solid var(--border); background: var(--bg);
+}
+.debug-pane {
+  display: flex; flex-direction: column; min-height: 0;
+  min-width: 170px; flex: 1; border-right: 1px solid var(--border);
+}
+.debug-pane:last-child { border-right: none; }
+.debug-pane-stack { flex: 1.1; min-width: 190px; }
+.debug-pane-variables { flex: 1.3; min-width: 210px; }
+.debug-pane-breakpoints { flex: 0.9; min-width: 160px; }
+.debug-pane-log { flex: 1.2; min-width: 200px; }
+.debug-pane-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 9px; background: var(--panel); border-bottom: 1px solid var(--border);
+  font-size: 10px; letter-spacing: 0.12em; color: var(--muted); user-select: none;
+}
+.debug-clear-btn {
+  padding: 1px 6px; font-size: 9.5px; height: 18px; line-height: 1;
+}
+.debug-list {
+  flex: 1; min-height: 0; overflow: auto; padding: 3px 0;
+}
+.debug-list:focus { outline: none; }
+.debug-list .hint {
+  padding: 8px 10px; margin: 0; font-size: 10.5px; color: var(--muted);
+}
+.debug-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px; margin: 1px 3px; border-radius: 4px;
+  font-size: 11px; cursor: pointer; user-select: none;
+}
+.debug-item:hover, .debug-item:focus {
+  background: var(--panel-raised); outline: none;
+}
+.debug-item.active {
+  background: var(--accent-soft); color: var(--text);
+}
+.debug-frame-name {
+  font-weight: 500; color: var(--text);
+}
+.debug-frame-loc {
+  margin-left: auto; color: var(--muted); font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.debug-var-toggle {
+  color: var(--muted); font-size: 9px; width: 12px; display: inline-block;
+}
+.debug-var-name {
+  color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.debug-var-value {
+  color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.debug-var-type {
+  color: var(--muted); font-size: 10px;
+}
+.debug-var-child {
+  padding-left: 20px;
+}
+.debug-bp-indicator {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.debug-bp-indicator.verified {
+  background: #4ade80;
+}
+.debug-bp-indicator.pending {
+  background: var(--warning);
+}
+.debug-bp-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; flex: 1;
+}
+.debug-bp-remove {
+  padding: 0 4px; height: 16px; font-size: 12px; line-height: 1;
+  color: var(--muted); border-radius: 3px;
+}
+.debug-bp-remove:hover {
+  color: var(--danger); background: transparent;
+}
 /* Connector catalog: presets, active connectors and per-connector tool lists. */
 .connectors { border-top: 1px solid var(--border); }
 .connectors-toolbar {
@@ -769,3 +856,30 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--accent); ou
   .welcome-columns { grid-template-columns: 1fr; }
   .welcome-heading { margin-bottom: 24px; }
 }
+
+
+/* Polyglot run-task panel: readable output, controls stay accessible. */
+.task-controls {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 7px 9px; border-bottom: 1px solid var(--border);
+}
+.task-controls label { color: var(--muted); font-size: 10px; }
+.task-controls input {
+  min-width: 100px; flex: 1 1 130px; padding: 5px 7px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.task-controls input:focus { border-color: var(--accent); outline: none; }
+.code-task-panel > .hint { margin: 5px 9px; font-size: 10.5px; }
+.task-output {
+  flex: 1; min-height: 0; overflow: auto; margin: 0;
+  padding: 9px 11px; background: var(--bg); color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#languageMode {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text); border-radius: 4px; padding: 2px 4px;
+  font: inherit; max-width: 145px; cursor: pointer;
+}
+#languageMode:focus-visible { outline: 1px solid var(--accent); }

@@ -69,6 +69,37 @@ pub fn shutdown(state: &DebugState) {
     stop_session(state);
 }
 
+pub fn validate_adapter(adapter: &str) -> Result<String, String> {
+    let trimmed = adapter.trim().to_owned();
+    if trimmed.is_empty() || trimmed.len() > 300 || trimmed.chars().any(char::is_control) {
+        return Err("invalid debug adapter executable".to_owned());
+    }
+    Ok(trimmed)
+}
+
+pub fn validate_args(args: &[String]) -> Result<(), String> {
+    if args.len() > MAX_ARGS
+        || args
+            .iter()
+            .any(|argument| argument.len() > 1_000 || argument.chars().any(char::is_control))
+    {
+        return Err("invalid debug adapter arguments".to_owned());
+    }
+    Ok(())
+}
+
+pub fn validate_message(message: &str) -> Result<(), String> {
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err("debug adapter message exceeds 1 MiB".to_owned());
+    }
+    let value: serde_json::Value = serde_json::from_str(message)
+        .map_err(|error| format!("invalid debug adapter message: {error}"))?;
+    if !value.is_object() {
+        return Err("debug adapter message must be a JSON object".to_owned());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn dap_start(
     app: AppHandle,
@@ -79,18 +110,9 @@ pub fn dap_start(
 ) -> Result<DapStatus, String> {
     stop_session(&state);
     let root = current_root(&workspace)?;
-    let adapter = adapter.trim().to_owned();
-    if adapter.is_empty() || adapter.len() > 300 || adapter.chars().any(char::is_control) {
-        return Err("invalid debug adapter executable".to_owned());
-    }
+    let adapter = validate_adapter(&adapter)?;
     let args = args.unwrap_or_default();
-    if args.len() > MAX_ARGS
-        || args
-            .iter()
-            .any(|argument| argument.len() > 1_000 || argument.chars().any(char::is_control))
-    {
-        return Err("invalid debug adapter arguments".to_owned());
-    }
+    validate_args(&args)?;
     let mut child = Command::new(&adapter)
         .args(&args)
         .current_dir(root)
@@ -227,14 +249,7 @@ pub fn dap_start(
 
 #[tauri::command]
 pub fn dap_send(message: String, state: State<'_, DebugState>) -> Result<(), String> {
-    if message.len() > MAX_MESSAGE_BYTES {
-        return Err("debug adapter message exceeds 1 MiB".to_owned());
-    }
-    let value: serde_json::Value = serde_json::from_str(&message)
-        .map_err(|error| format!("invalid debug adapter message: {error}"))?;
-    if !value.is_object() {
-        return Err("debug adapter message must be a JSON object".to_owned());
-    }
+    validate_message(&message)?;
     let bytes = frame(&message);
     if bytes.len() > MAX_FRAME_BYTES {
         return Err("debug adapter frame exceeds the limit".to_owned());
@@ -287,4 +302,65 @@ pub fn dap_status(state: State<'_, DebugState>) -> Result<DapStatus, String> {
 pub fn dap_stop(state: State<'_, DebugState>) -> Result<(), String> {
     stop_session(&state);
     Ok(())
+}
+
+#[tauri::command]
+pub fn dap_restart(
+    app: AppHandle,
+    state: State<'_, DebugState>,
+    workspace: State<'_, WorkspaceState>,
+    adapter: String,
+    args: Option<Vec<String>>,
+) -> Result<DapStatus, String> {
+    dap_start(app, state, workspace, adapter, args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_adapter() {
+        assert!(validate_adapter("dlv").is_ok());
+        assert!(validate_adapter("  python3  ").is_ok());
+        assert_eq!(validate_adapter("  python3  ").unwrap(), "python3");
+
+        assert!(validate_adapter("").is_err());
+        assert!(validate_adapter("   ").is_err());
+        assert!(validate_adapter(&"a".repeat(301)).is_err());
+        assert!(validate_adapter("adapter\nwith\nnewline").is_err());
+        assert!(validate_adapter("adapter\0null").is_err());
+    }
+
+    #[test]
+    fn test_validate_args() {
+        assert!(validate_args(&[]).is_ok());
+        assert!(validate_args(&["dap".to_owned(), "--log".to_owned()]).is_ok());
+
+        let too_many: Vec<String> = (0..33).map(|i| format!("arg{i}")).collect();
+        assert!(validate_args(&too_many).is_err());
+
+        let long_arg = vec!["x".repeat(1001)];
+        assert!(validate_args(&long_arg).is_err());
+
+        let ctrl_arg = vec!["arg\nwith\nnewline".to_owned()];
+        assert!(validate_args(&ctrl_arg).is_err());
+    }
+
+    #[test]
+    fn test_validate_message() {
+        assert!(validate_message(r#"{"type":"request","command":"initialize"}"#).is_ok());
+
+        assert!(validate_message("").is_err());
+        assert!(validate_message("not json").is_err());
+        assert!(validate_message("42").is_err());
+        assert!(validate_message(r#"["array"]"#).is_err());
+    }
+
+    #[test]
+    fn test_initial_debug_state() {
+        let state = DebugState::default();
+        let guard = state.session.lock().unwrap();
+        assert!(guard.is_none());
+    }
 }

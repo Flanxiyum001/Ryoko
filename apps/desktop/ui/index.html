@@ -47,6 +47,7 @@
           <span id="activePath" class="active-path">No file open</span>
           <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
           <span class="status-spacer"></span>
+          <button id="runActiveFile" class="button primary compact" type="button" disabled>Run file</button>
           <button id="toggleTerminal" class="button ghost compact" type="button">Terminal</button>
           <button id="toggleDebug" class="button ghost compact" type="button">Debug</button>
         </div>
@@ -82,11 +83,24 @@
         <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
           <div class="bottom-tabs">
             <button id="terminalTab" class="bottom-tab active" type="button">TERMINAL</button>
+            <button id="taskTab" class="bottom-tab" type="button">OUTPUT</button>
             <button id="searchTab" class="bottom-tab" type="button">SEARCH</button>
             <button id="debugTab" class="bottom-tab" type="button">DEBUG</button>
             <span id="bottomStatus" class="hint"></span>
             <span class="status-spacer"></span>
             <button id="bottomClose" class="button ghost compact" type="button">Hide</button>
+          </div>
+          <div id="taskPanel" class="bottom-content code-task-panel hidden" aria-label="Code task output">
+            <div class="task-controls">
+              <label for="taskProgram">Executable</label>
+              <input id="taskProgram" spellcheck="false" autocomplete="off" placeholder="python3">
+              <label for="taskArgs">Arguments</label>
+              <input id="taskArgs" spellcheck="false" autocomplete="off" placeholder="-u {file}">
+              <button id="taskRun" type="button" class="button primary compact">Run task…</button>
+              <button id="taskStop" type="button" class="button ghost compact" disabled>Stop</button>
+            </div>
+            <p class="hint" id="taskLabel">Choose a source file. Tasks run locally after your approval. Use {file} or {workspace} as an argument.</p>
+            <pre id="taskOutput" class="task-output" role="log" aria-live="polite"></pre>
           </div>
           <div id="terminalPanel" class="bottom-content terminal-panel">
             <div class="terminal-toolbar">
@@ -108,7 +122,7 @@
               <p class="hint">Searches the open workspace with the Rust regex engine.</p>
             </div>
           </div>
-<div id="debugPanel" class="bottom-content debug-panel hidden">
+          <div id="debugPanel" class="bottom-content debug-panel hidden">
             <div class="debug-toolbar">
               <label for="debugAdapter">Adapter</label>
               <input id="debugAdapter" type="text" spellcheck="false" placeholder="dlv">
@@ -118,16 +132,52 @@
               <input id="debugProgram" type="text" spellcheck="false" placeholder="path/to/program">
               <button id="debugStart" class="button primary compact" type="button">Start</button>
               <button id="debugStop" class="button ghost compact" type="button" disabled>Stop</button>
+              <button id="debugRestart" class="button ghost compact" type="button" disabled title="Restart debug session (Mod+Shift+F5)">Restart</button>
             </div>
             <div class="debug-toolbar">
-              <button id="debugContinue" class="button ghost compact" type="button" disabled>Continue</button>
-              <button id="debugNext" class="button ghost compact" type="button" disabled>Step over</button>
-              <button id="debugStepIn" class="button ghost compact" type="button" disabled>Step in</button>
-              <button id="debugStepOut" class="button ghost compact" type="button" disabled>Step out</button>
-              <button id="debugBreakpoint" class="button ghost compact" type="button" disabled>Toggle breakpoint</button>
+              <button id="debugContinue" class="button ghost compact" type="button" disabled title="Continue (F5)">Continue</button>
+              <button id="debugNext" class="button ghost compact" type="button" disabled title="Step over (F10)">Step over</button>
+              <button id="debugStepIn" class="button ghost compact" type="button" disabled title="Step in (F11)">Step in</button>
+              <button id="debugStepOut" class="button ghost compact" type="button" disabled title="Step out (Shift+F11)">Step out</button>
+              <button id="debugBreakpoint" class="button ghost compact" type="button" disabled title="Toggle breakpoint (F9)">Toggle breakpoint</button>
               <span id="debugStatus" class="hint">Start a DAP adapter over stdio. No debugger is emulated.</span>
             </div>
-            <pre id="debugLog" class="debug-log" aria-live="polite"></pre>
+            <div class="debug-workbench" id="debugWorkbench">
+              <div class="debug-pane debug-pane-stack" id="debugPaneStack">
+                <div class="debug-pane-header">
+                  <span>CALL STACK</span>
+                  <span id="debugStackCount" class="counter">0 frames</span>
+                </div>
+                <div id="debugStackList" class="debug-list" role="list" aria-label="Call stack frames" tabindex="0">
+                  <p class="hint">Not paused.</p>
+                </div>
+              </div>
+              <div class="debug-pane debug-pane-variables" id="debugPaneVariables">
+                <div class="debug-pane-header">
+                  <span>VARIABLES</span>
+                  <span id="debugVariablesCount" class="counter">0 vars</span>
+                </div>
+                <div id="debugVariablesList" class="debug-list debug-variables-tree" role="tree" aria-label="Variables tree" tabindex="0">
+                  <p class="hint">No variables.</p>
+                </div>
+              </div>
+              <div class="debug-pane debug-pane-breakpoints" id="debugPaneBreakpoints">
+                <div class="debug-pane-header">
+                  <span>BREAKPOINTS</span>
+                  <span id="debugBreakpointsCount" class="counter">0</span>
+                </div>
+                <div id="debugBreakpointsList" class="debug-list" role="list" aria-label="Breakpoints list" tabindex="0">
+                  <p class="hint">No breakpoints set.</p>
+                </div>
+              </div>
+              <div class="debug-pane debug-pane-log" id="debugPaneLog">
+                <div class="debug-pane-header">
+                  <span>OUTPUT</span>
+                  <button id="debugClearLog" class="button ghost compact debug-clear-btn" type="button">Clear</button>
+                </div>
+                <pre id="debugLog" class="debug-log" aria-live="polite"></pre>
+              </div>
+            </div>
           </div>
         </section>
       </main>
@@ -243,7 +293,7 @@
       <span id="editorStatus" class="status-message" role="status" aria-live="polite">Ready</span>
       <span class="status-spacer"></span>
       <span id="cursorPos">Ln 1, Col 1</span>
-      <span id="languageMode">plaintext</span>
+      <label class="sr-only" for="languageMode">Language mode</label><select id="languageMode" aria-label="Language mode" title="Change this file’s language mode"></select>
       <span>UTF-8</span>
     </footer>
   </div>
