@@ -101,6 +101,54 @@ struct LedgerInner {
     by_model: BTreeMap<String, UsageTotals>,
     by_task: BTreeMap<String, UsageTotals>,
     task_started: BTreeMap<String, Instant>,
+    reservations: BTreeMap<u64, (Option<String>, f64, u64)>,
+    next_reservation: u64,
+}
+
+/// A pending call owns its allowance until usage is recorded or the stream is
+/// dropped. Clones of the ledger see the same pending reservations.
+pub struct Reservation {
+    ledger: UsageLedger,
+    id: u64,
+    settled: bool,
+}
+
+impl Reservation {
+    pub fn settle(mut self, provider: &str, model: &str, usage: Usage, pricing: Option<Pricing>) {
+        let mut inner = self.ledger.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let scope = inner.reservations.remove(&self.id).and_then(|(scope, _, _)| scope);
+        record_locked(&mut inner, scope.as_deref(), provider, model, usage, pricing);
+        self.settled = true;
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if !self.settled {
+            let mut inner = self.ledger.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((scope, cost, tokens)) = inner.reservations.remove(&self.id) {
+                // An interrupted provider may still bill without sending a
+                // usage event. Consume its whole allowance conservatively.
+                let estimated = Usage::new(tokens, 0);
+                inner.total.add_usage(estimated, cost);
+                if let Some(scope) = scope {
+                    inner.by_task.entry(scope).or_default().add_usage(estimated, cost);
+                }
+            }
+        }
+    }
+}
+
+fn record_locked(inner: &mut LedgerInner, scope: Option<&str>, provider: &str, model: &str, usage: Usage, pricing: Option<Pricing>) -> f64 {
+    let cost = pricing.map(|p| p.cost_usd(&usage)).unwrap_or(0.0);
+    inner.by_provider.entry(provider.to_owned()).or_default().add_usage(usage, cost);
+    inner.by_model.entry(model.to_owned()).or_default().add_usage(usage, cost);
+    inner.total.add_usage(usage, cost);
+    if let Some(scope) = scope {
+        inner.by_task.entry(scope.to_owned()).or_default().add_usage(usage, cost);
+        inner.task_started.entry(scope.to_owned()).or_insert_with(Instant::now);
+    }
+    cost
 }
 
 /// Single source of truth for token expenditure across every agent in a run.
@@ -153,31 +201,46 @@ impl UsageLedger {
         usage: Usage,
         pricing: Option<Pricing>,
     ) -> f64 {
-        let cost = pricing.map(|p| p.cost_usd(&usage)).unwrap_or(0.0);
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner
-            .by_provider
-            .entry(provider.to_owned())
-            .or_default()
-            .add_usage(usage, cost);
-        inner
-            .by_model
-            .entry(model.to_owned())
-            .or_default()
-            .add_usage(usage, cost);
-        inner.total.add_usage(usage, cost);
-        if let Some(scope) = scope {
-            inner
-                .by_task
-                .entry(scope.to_owned())
-                .or_default()
-                .add_usage(usage, cost);
-            inner
-                .task_started
-                .entry(scope.to_owned())
-                .or_insert_with(Instant::now);
+        record_locked(&mut inner, scope, provider, model, usage, pricing)
+    }
+
+    /// Atomically reserve the maximum allowed cost and tokens before dispatch.
+    /// Calls without a finite price or output cap cannot be admitted under a
+    /// bounded budget.
+    pub fn reserve(&self, scope: Option<&str>, cost: f64, tokens: u64) -> Result<Option<Reservation>, ModelError> {
+        let Some(budget) = self.budget else { return Ok(None) };
+        self.check_budget_for(scope)?;
+        if !cost.is_finite() || cost < 0.0 || tokens == 0 {
+            return Err(ModelError::Configuration("cannot reserve an unbounded model call".to_owned()));
         }
-        cost
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let (pending_usd, pending_tokens) = inner.reservations.values().fold((0.0, 0u64), |(usd, tokens), (_, cost, count)| (usd + cost, tokens.saturating_add(*count)));
+        let projected = inner.total.cost_usd + pending_usd + cost;
+        if projected > budget.limit_usd {
+            return Err(ModelError::BudgetExceeded { budget_usd: budget.limit_usd, spent_usd: projected });
+        }
+        if let Some(limit) = budget.limit_tokens {
+            let projected = inner.total.usage.total_tokens().saturating_add(pending_tokens).saturating_add(tokens);
+            if projected > limit { return Err(ModelError::TokenBudgetExceeded { budget_tokens: limit, spent_tokens: projected }); }
+        }
+        if let Some(scope) = scope {
+            let (pending_usd, pending_tokens) = inner.reservations.values().filter(|(task, _, _)| task.as_deref() == Some(scope))
+                .fold((0.0, 0u64), |(usd, tokens), (_, cost, count)| (usd + cost, tokens.saturating_add(*count)));
+            let spent = inner.by_task.get(scope).cloned().unwrap_or_default();
+            let projected = spent.cost_usd + pending_usd + cost;
+            if let Some(limit) = budget.task_limit_usd && projected > limit {
+                return Err(ModelError::TaskBudgetExceeded { task: scope.to_owned(), budget_usd: limit, spent_usd: projected });
+            }
+            if let Some(limit) = budget.task_limit_tokens {
+                let projected = spent.usage.total_tokens().saturating_add(pending_tokens).saturating_add(tokens);
+                if projected > limit { return Err(ModelError::TaskTokenBudgetExceeded { task: scope.to_owned(), budget_tokens: limit, spent_tokens: projected }); }
+            }
+        }
+        inner.next_reservation = inner.next_reservation.checked_add(1).ok_or_else(|| ModelError::Configuration("reservation counter exhausted".to_owned()))?;
+        let id = inner.next_reservation;
+        inner.reservations.insert(id, (scope.map(str::to_owned), cost, tokens));
+        Ok(Some(Reservation { ledger: self.clone(), id, settled: false }))
     }
 
     pub fn spent_usd(&self) -> f64 {
@@ -377,6 +440,47 @@ impl UsageLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_reservations_cannot_overbook_run_or_task() {
+        let ledger = UsageLedger::new(Some(Budget::new(1.0).with_task_usd_limit(0.6)));
+        let first = ledger.reserve(Some("a"), 0.5, 100).unwrap().unwrap();
+        assert!(matches!(ledger.reserve(Some("a"), 0.2, 100), Err(ModelError::TaskBudgetExceeded { .. })));
+        let second = ledger.reserve(Some("b"), 0.5, 100).unwrap().unwrap();
+        assert!(matches!(ledger.reserve(Some("c"), 0.1, 100), Err(ModelError::BudgetExceeded { .. })));
+        first.settle("mock", "model", Usage::new(100, 0), Some(Pricing::new(0.0, 0.0)));
+        second.settle("mock", "model", Usage::new(100, 0), Some(Pricing::new(1.0, 1.0)));
+        assert!(ledger.reserve(Some("a"), 0.5, 100).is_ok());
+        assert_eq!(ledger.snapshot().by_task["b"].requests, 1);
+    }
+
+    #[test]
+    fn missing_usage_conservatively_consumes_allowance() {
+        let ledger = UsageLedger::new(Some(Budget::unlimited().with_token_limit(100)));
+        let first = ledger.reserve(None, 0.0, 70).unwrap().unwrap();
+        assert!(matches!(ledger.reserve(None, 0.0, 40), Err(ModelError::TokenBudgetExceeded { .. })));
+        drop(first);
+        assert!(matches!(ledger.reserve(None, 0.0, 40), Err(ModelError::TokenBudgetExceeded { .. })));
+    }
+
+    #[test]
+    fn parallel_admission_is_atomic() {
+        let ledger = UsageLedger::with_budget(1.0);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles = (0..2).map(|_| {
+            let ledger = ledger.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let reservation = ledger.reserve(None, 0.7, 100);
+                barrier.wait();
+                reservation.is_ok()
+            })
+        }).collect::<Vec<_>>();
+        barrier.wait();
+        barrier.wait();
+        assert_eq!(handles.into_iter().filter(|handle| handle.join().unwrap()).count(), 1);
+    }
 
     #[test]
     fn accumulates_cost_per_provider_and_model() {
