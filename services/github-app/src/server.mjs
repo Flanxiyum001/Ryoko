@@ -512,19 +512,25 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       // was valid when queued. Ownership and authorization are checked anew.
       await client.authorizedRepo(session.token,
         item.proposal.installationId, item.proposal.repoId);
+      // Authorization may yield while another request approves the same
+      // proposal. Re-read the CURRENT record before the one-shot transition.
+      const current = proposals.get(item.id);
+      if (!current || current.status !== 'pending' || Date.now() > current.expires) {
+        throw bad('proposal already decided or expired', 409);
+      }
       if (desktopDecision[2] === 'reject') {
-        const rejected = approvalStore.save({ ...item, status: 'rejected' });
+        const rejected = approvalStore.save({ ...current, status: 'rejected' });
         return json(res, 200, { id: rejected.id, status: rejected.status });
       }
-      approvalStore.save({ ...item, status: 'executing' }); // persist before any remote mutation
+      approvalStore.save({ ...current, status: 'executing' }); // persist before any remote mutation
       try {
-        const result = item.proposal.operation === 'clone_repository'
-          ? await client.clone(session.token, item.proposal, settings.projectsRoot)
-          : await client.execute(session.token, item.proposal);
-        approvalStore.save({ ...item, status: 'completed', result });
-        return json(res, 200, { id: item.id, status: 'completed', result });
+        const result = current.proposal.operation === 'clone_repository'
+          ? await client.clone(session.token, current.proposal, settings.projectsRoot)
+          : await client.execute(session.token, current.proposal);
+        approvalStore.save({ ...current, status: 'completed', result });
+        return json(res, 200, { id: current.id, status: 'completed', result });
       } catch (error) {
-        approvalStore.save({ ...item, status: 'failed', error: safeError(error).message });
+        approvalStore.save({ ...current, status: 'failed', error: safeError(error).message });
         throw error;
       }
     }
