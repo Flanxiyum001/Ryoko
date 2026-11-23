@@ -1327,7 +1327,10 @@ fn git_path_argument(path: &Path) -> String {
             return format!(r"\\{}", unc);
         }
         if let Some(drive) = raw.strip_prefix(r"\\?\") {
-            if matches!(drive.as_bytes(), [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic()) {
+            if matches!(
+                drive.as_bytes(),
+                [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic()
+            ) {
                 return drive.to_owned();
             }
         }
