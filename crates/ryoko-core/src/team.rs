@@ -158,7 +158,22 @@ impl GoalSignals {
     /// design and operations stay off unless the goal names them.
     pub fn from_goal(goal: &str) -> Self {
         let lower = goal.to_ascii_lowercase();
-        let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+        let has = |needles: &[&str]| {
+            needles.iter().any(|needle| {
+                // Two-letter abbreviations must be standalone words. "ui"
+                // inside "build" previously activated the UI team for every
+                // ordinary "build a ..." backend request.
+                if needle.len() > 2 {
+                    return lower.contains(needle);
+                }
+                lower.match_indices(needle).any(|(index, _)| {
+                    let before = lower[..index].chars().next_back();
+                    let after = lower[index + needle.len()..].chars().next();
+                    before.is_none_or(|char| !char.is_ascii_alphanumeric())
+                        && after.is_none_or(|char| !char.is_ascii_alphanumeric())
+                })
+            })
+        };
         let needs_design = has(&[
             "ui",
             "ux",
@@ -481,6 +496,15 @@ mod tests {
         assert_eq!(tasks.len(), 8);
         assert!(tasks.iter().all(|t| roles.contains(&t.assigned_to)));
         Orchestrator::validate_plan(&tasks).unwrap();
+    }
+
+    #[test]
+    fn goal_routing_does_not_confuse_build_with_ui() {
+        let plain = GoalSignals::from_goal("build a database service");
+        assert!(!plain.needs_design);
+        assert!(plain.needs_backend);
+        assert!(GoalSignals::from_goal("build a UI/dashboard").needs_design);
+        assert!(GoalSignals::from_goal("improve UX for onboarding").needs_design);
     }
 
     #[test]
