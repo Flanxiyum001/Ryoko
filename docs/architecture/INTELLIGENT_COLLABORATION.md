@@ -35,7 +35,7 @@ Each independent review is a **single JSON object**:
 {
   "verdict": "fail",
   "summary": "One confirmed high-severity correctness defect",
-  "evidence_refs": ["validator:<reviewed-task-uuid>"],
+  "evidence_refs": ["validator:<reviewed-task-uuid>:<execution-receipt>"],
   "findings": [
     {
       "code": "RYOKO-001",
@@ -44,7 +44,7 @@ Each independent review is a **single JSON object**:
       "line": 42,
       "message": "Error path returns success",
       "recommendation": "Propagate the failed parse and add a regression test",
-      "evidence_ref": "validator:<reviewed-task-uuid>"
+      "evidence_ref": "validator:<reviewed-task-uuid>:<execution-receipt>"
     }
   ]
 }
@@ -56,7 +56,9 @@ validation reference. External repository content is treated as untrusted
 data, never elevated to the system prompt.
 
 Only the orchestrator can publish the reference after the producer has
-successfully run and published a validated change. The reference is created
+successfully run and published a validated change. It generates a fresh,
+random receipt for each successful validation, so old reviewer verdicts cannot
+be replayed after a producer repair. The reference is created
 only for a passing `CommandValidator` report with an executed spec/test
 command recorded in its logs. The permissive `AllowAllValidator`, missing
 logs, unsuccessful validation, and an invented model citation cannot produce
