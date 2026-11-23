@@ -89,7 +89,7 @@ fn prepare_argv(
     }
     let mut result = Vec::with_capacity(args.len());
     for arg in args {
-        if arg.len() > MAX_ARG_BYTES || arg.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+        if arg.len() > MAX_ARG_BYTES || arg.chars().any(char::is_control) {
             return Err("invalid task argument (maximum 2048 bytes, no line breaks)".to_owned());
         }
         result.push(match arg.as_str() {
@@ -348,5 +348,6 @@ mod tests {
         assert!(prepare_argv("", &[], path, path).is_err());
         assert!(prepare_argv("python", &vec!["x".to_owned(); 33], path, path).is_err());
         assert!(prepare_argv("python", &["bad\0value".to_owned()], path, path).is_err());
+        assert!(prepare_argv("python", &["\u{1b}[2Jspoof".to_owned()], path, path).is_err());
     }
 }
