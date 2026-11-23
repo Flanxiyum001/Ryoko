@@ -42,7 +42,7 @@ test('first launch configures a local provider, opens a folder and prepares a re
   await wizard.getByRole('button', { name: 'Save & continue' }).click();
   await expect(wizard.getByText('Provider configured')).toBeVisible();
   await wizard.getByRole('button', { name: 'Open a folder…' }).click();
-  await expect(wizard.getByText('Your first agent task')).toBeVisible();
+  await expect(wizard.getByText('Your first agent task', { exact: true })).toBeVisible();
   await wizard.getByRole('button', { name: 'Prepare my first task' }).click();
   await expect(wizard).not.toBeVisible();
   await expect(page.locator('#runGoal')).toHaveValue(/Review this repository/);
