@@ -1261,7 +1261,13 @@ impl GitWorktreeManager {
             } else if line == format!("branch {target}")
                 && let Some(path) = path.take()
             {
-                return Ok(Some((path, branch.to_owned())));
+                // Git for Windows prints C:/... while Rust's canonical
+                // checkout path uses the verbatim \\?\\ form. Compare the
+                // resolved physical paths, not those different spellings.
+                // A missing checkout remains untrusted and cannot be
+                // mistaken for an existing managed checkout.
+                let physical = path.canonicalize().unwrap_or(path);
+                return Ok(Some((physical, branch.to_owned())));
             } else if line.trim().is_empty() {
                 path = None;
             }
@@ -2184,6 +2190,23 @@ mod tests {
             .await
             .unwrap();
         assert!(branches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn git_worktree_list_returns_the_managed_checkout_path() {
+        let (_dir, manager) = repo().await;
+        let session = manager
+            .create_worktree("path-test", Uuid::new_v4())
+            .await
+            .unwrap();
+        let checkout = manager
+            .worktree_checkout(&session.branch_name)
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(checkout, session.path.canonicalize().unwrap());
+        manager.abandon_worktree(&session).await.unwrap();
     }
 
     #[tokio::test]
