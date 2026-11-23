@@ -1076,6 +1076,79 @@ function renderAgentSessions(): void {
   }
 }
 
+interface AgentCandidate {
+  path: string;
+  branch: string;
+  content: string;
+}
+
+function renderReviewInbox(): void {
+  reviewInboxList.replaceChildren();
+  const published = agentSessions.filter((session) => session.state === 'published');
+  const count = published.reduce((sum, session) => sum + session.files.length, 0);
+  reviewInboxCount.textContent = String(count);
+  if (count === 0) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'Published agent branches awaiting review will appear here. Nothing is merged automatically.';
+    reviewInboxList.append(hint);
+    return;
+  }
+  for (const session of published) {
+    const item = document.createElement('article');
+    item.className = 'review-inbox-item';
+    const title = document.createElement('p');
+    title.className = 'review-inbox-heading';
+    title.textContent = `${session.agent} · ${session.branch}`;
+    item.append(title);
+    for (const path of session.files) {
+      const row = document.createElement('div');
+      row.className = 'review-inbox-path';
+      const label = document.createElement('code');
+      label.textContent = path;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'button ghost compact';
+      button.textContent = 'Review diff';
+      button.addEventListener('click', () => void previewAgentCandidate(session, path));
+      row.append(label, button);
+      item.append(row);
+    }
+    reviewInboxList.append(item);
+  }
+}
+
+async function previewAgentCandidate(session: AgentSession, path: string): Promise<void> {
+  if (!state.root) return;
+  const root = state.root;
+  try {
+    const candidate = await invoke<AgentCandidate>('read_agent_candidate', {
+      taskId: session.id, path,
+    });
+    if (root !== state.root) return;
+    if (!state.files.includes(path)) {
+      setStatus('New agent-created files require Git review; only existing files can be applied through the editor.');
+      return;
+    }
+    await openFile(path);
+    const file = state.current;
+    if (root !== state.root || !file || file.path !== path) return;
+    const original = file.model.getValue();
+    openSuggestedReview({
+      context: {
+        path,
+        text: original,
+        fullText: original,
+        startOffset: 0,
+        endOffset: original.length,
+      },
+      replacement: candidate.content,
+    });
+  } catch (error) {
+    setStatus('Agent proposal review failed: ' + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
 async function refreshAgentSessions(): Promise<void> {
   if (!state.root || agentSessionPolling) return;
   const openedRoot = state.root;
@@ -1207,7 +1280,103 @@ async function stageSelectedHunks(): Promise<void> {
   }
 }
 
+function openSuggestedReview(suggestion: CodeSuggestion): void {
+  const { context, replacement } = suggestion;
+  const file = state.current;
+  if (!file || file.path !== context.path || file.model.getValue() !== context.fullText
+    || context.fullText.slice(context.startOffset, context.endOffset) !== context.text) {
+    setStatus('Proposal is stale or its source file changed. Reopen the edit instead.');
+    return;
+  }
+  if (replacement.length > 256 * 1024 || context.fullText.length > 256 * 1024) {
+    setStatus('Proposal exceeds the 256 KiB diff review limit.');
+    return;
+  }
+  const hunks = proposalHunks(context.text, replacement);
+  if (!hunks.length) {
+    setStatus('The suggestion does not change the selected code.');
+    return;
+  }
+  clearDiffEditor();
+  pendingProposal = { context, hunks, accepted: new Set(hunks.map((hunk) => hunk.id)) };
+  const suffix = encodeURIComponent(context.path).replaceAll('%', '_');
+  diffOriginalModel = monaco.editor.createModel(
+    context.fullText, file.languageId, monaco.Uri.parse(`ryoko-proposal://base/${suffix}`),
+  );
+  diffModifiedModel = monaco.editor.createModel(
+    previewAccepted(context.fullText, context.startOffset, context.endOffset, hunks, pendingProposal.accepted),
+    file.languageId, monaco.Uri.parse(`ryoko-proposal://suggested/${suffix}`),
+  );
+  diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
+  proposalToolbar.classList.remove('hidden');
+  proposalHunksNode.replaceChildren();
+  for (const hunk of hunks) {
+    const item = document.createElement('div');
+    item.className = 'proposal-hunk';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = true;
+    checkbox.id = 'proposal-hunk-' + hunk.id;
+    const label = document.createElement('label');
+    label.htmlFor = checkbox.id;
+    label.textContent = `Hunk ${hunk.id}: -${hunk.before.split('\n').filter(Boolean).length} +${hunk.after.split('\n').filter(Boolean).length}`;
+    checkbox.addEventListener('change', () => {
+      if (!pendingProposal) return;
+      if (checkbox.checked) pendingProposal.accepted.add(hunk.id);
+      else pendingProposal.accepted.delete(hunk.id);
+      proposalApply.disabled = pendingProposal.accepted.size === 0;
+      try {
+        diffModifiedModel?.setValue(previewAccepted(
+          context.fullText, context.startOffset, context.endOffset,
+          pendingProposal.hunks, pendingProposal.accepted,
+        ));
+      } catch (error) { setStatus(String(error)); }
+    });
+    item.append(checkbox, label);
+    proposalHunksNode.append(item);
+  }
+  proposalApply.disabled = false;
+  diffReviewPath.textContent = `${context.path} · proposed code (not applied)`;
+  diffReview.classList.remove('hidden');
+  editorHost.classList.add('hidden');
+  emptyEditor.classList.add('hidden');
+  diffEditor.layout();
+  setStatus(`Review ${hunks.length} suggested hunk(s). Uncheck any changes you reject.`);
+}
+
+function applyApprovedProposal(): void {
+  const proposal = pendingProposal;
+  const file = state.current;
+  if (!proposal || !file || file.path !== proposal.context.path
+    || file.model.getValue() !== proposal.context.fullText) {
+    setStatus('The editor changed after review began; proposed code was not applied.');
+    closeDiffReview();
+    return;
+  }
+  if (!proposal.accepted.size) return;
+  let updated: string;
+  try {
+    updated = previewAccepted(proposal.context.fullText, proposal.context.startOffset,
+      proposal.context.endOffset, proposal.hunks, proposal.accepted);
+  } catch (error) {
+    setStatus('Unsafe or stale diff: ' + String(error));
+    return;
+  }
+  file.model.pushEditOperations(
+    [],
+    [{ range: file.model.getFullModelRange(), text: updated }],
+    () => null,
+  );
+  const count = proposal.accepted.size;
+  closeDiffReview();
+  setStatus(`Applied ${count} approved hunk(s) to the editor buffer only. Save explicitly to write to disk.`);
+}
+
 function clearDiffEditor(): void {
+  pendingProposal = null;
+  proposalToolbar.classList.add('hidden');
+  proposalHunksNode.replaceChildren();
+  proposalApply.disabled = true;
   const modified = diffEditor.getModifiedEditor();
   for (const widget of diffWidgets) modified.removeContentWidget(widget);
   diffWidgets = [];
@@ -2100,6 +2269,11 @@ hunkStage.addEventListener('click', () => {
   void stageSelectedHunks();
 });
 diffReviewClose.addEventListener('click', closeDiffReview);
+proposalApply.addEventListener('click', applyApprovedProposal);
+proposalDiscard.addEventListener('click', () => {
+  closeDiffReview();
+  setStatus('Discarded agent proposal without changing the editor.');
+});
 runBudget.addEventListener('input', updateRunLabels);
 sandboxInit.addEventListener('click', () => {
   void initializeSandbox();
