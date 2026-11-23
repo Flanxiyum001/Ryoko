@@ -8,6 +8,7 @@
 //! a patch, and merging requires a passed validation report.
 
 pub mod attestation;
+mod confined;
 pub mod git;
 pub mod hunks;
 pub mod integration;
