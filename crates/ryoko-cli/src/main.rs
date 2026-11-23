@@ -1934,7 +1934,11 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
     let pinned = if args.no_build {
         None
     } else {
-        Some(BuildSandbox::new(backend, None).image_id(&plan.image).await?)
+        Some(
+            BuildSandbox::new(backend, None)
+                .image_id(&plan.image)
+                .await?,
+        )
     };
     if args.json {
         println!(
@@ -1967,7 +1971,9 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 plan.image
             );
         } else if args.no_build {
-            println!("Skipped the image build; resolve its local sha256 image ID before using --sandbox-image.");
+            println!(
+                "Skipped the image build; resolve its local sha256 image ID before using --sandbox-image."
+            );
         } else {
             println!(
                 "Built {} and cached its dependencies for offline validation.",
