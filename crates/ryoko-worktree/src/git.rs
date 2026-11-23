@@ -534,6 +534,54 @@ impl GitWorktreeManager {
         Ok(pull_request)
     }
 
+    async fn published_head(
+        &self,
+        session: &WorktreeSession,
+        summary: &str,
+        commit: &str,
+    ) -> Result<WorktreePullRequest, WorktreeError> {
+        if commit == session.base_commit {
+            return Err(WorktreeError::NoChanges(session.branch_name.clone()));
+        }
+        let range = format!("{}..{commit}", session.base_commit);
+        let files = self
+            .checked(
+                "list validated files",
+                &["diff", "--name-only", &range],
+                &session.path,
+            )
+            .await?
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            return Err(WorktreeError::NoChanges(session.branch_name.clone()));
+        }
+        let patch = self
+            .checked(
+                "render validated patch",
+                &["diff", "--binary", &range],
+                &session.path,
+            )
+            .await?;
+        let pr = WorktreePullRequest {
+            id: Uuid::new_v4(),
+            task_id: session.id,
+            source_branch: session.branch_name.clone(),
+            target_branch: if session.base_branch == "HEAD" {
+                "main".to_owned()
+            } else {
+                session.base_branch.clone()
+            },
+            files,
+            patch,
+            summary: summary.to_owned(),
+        };
+        self.save_published(session, &pr, commit)?;
+        Ok(pr)
+    }
+
     /// Renders the same review artifact a human would see in `git diff`:
     /// changed paths and a binary patch between the target branch and the
     /// worktree HEAD. The worktree must already be attached.
@@ -692,6 +740,8 @@ impl GitWorktreeManager {
             session,
             root,
             applied: Mutex::new(BTreeSet::new()),
+            sealed_tree: Mutex::new(None),
+            validation_checkout: Mutex::new(None),
         }))
     }
 
@@ -1421,6 +1471,8 @@ impl WorkspaceProvider for GitWorktreeManager {
             session,
             root,
             applied: Mutex::new(BTreeSet::new()),
+            sealed_tree: Mutex::new(None),
+            validation_checkout: Mutex::new(None),
         }))
     }
 }
@@ -1430,6 +1482,8 @@ struct GitWorktreeLease {
     session: WorktreeSession,
     root: PathBuf,
     applied: Mutex<BTreeSet<String>>,
+    sealed_tree: Mutex<Option<String>>,
+    validation_checkout: Mutex<Option<(PathBuf, String)>>,
 }
 
 const MAX_BATCH_FILES: usize = 64;
@@ -1438,9 +1492,10 @@ const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
 struct PreparedWrite {
     path: String,
-    target: PathBuf,
-    staged: PathBuf,
-    backup: PathBuf,
+    parent: cap_std::fs::Dir,
+    name: std::ffi::OsString,
+    staged: String,
+    backup: String,
     existed: bool,
 }
 
@@ -1455,6 +1510,8 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     let root = root
         .canonicalize()
         .map_err(|error| invalid(format!("invalid worktree root: {error}")))?;
+    let directory = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
+        .map_err(|error| invalid(error.to_string()))?;
     let mut seen = BTreeSet::new();
     let mut paths = Vec::new();
     let mut total = 0_usize;
@@ -1493,27 +1550,25 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     // Check parent components without following symlinks. Never use a
     // create_dir_all traversal that might pass through an external symlink.
     for (_, original, relative) in &paths {
-        let mut parent = root.clone();
+        let mut parent = PathBuf::new();
         if let Some(components) = relative.parent() {
             for part in components.components() {
                 parent.push(part.as_os_str());
-                match std::fs::symlink_metadata(&parent) {
+                match directory.symlink_metadata(&parent) {
                     Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
                         return Err(invalid(format!("unsafe parent directory for {original}")));
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        std::fs::create_dir(&parent).map_err(|error| invalid(error.to_string()))?;
+                        directory
+                            .create_dir(&parent)
+                            .map_err(|error| invalid(error.to_string()))?;
                     }
                     Err(error) => return Err(invalid(error.to_string())),
                 }
             }
         }
-        if !parent.starts_with(&root) {
-            return Err(invalid(format!("path escapes worktree: {original}")));
-        }
-        let target = root.join(relative);
-        match std::fs::symlink_metadata(target) {
+        match directory.symlink_metadata(relative) {
             Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => {
                 return Err(invalid(format!("unsafe existing file: {original}")));
             }
@@ -1526,37 +1581,46 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     let batch_id = Uuid::new_v4();
     let mut prepared: Vec<PreparedWrite> = Vec::new();
     for (index, change) in changes.iter().enumerate() {
-        let target = root.join(&paths[index].2);
-        let parent = target
+        let relative = &paths[index].2;
+        let parent = relative
             .parent()
-            .ok_or_else(|| invalid("missing parent".into()))?;
-        let staged = parent.join(format!(".ryoko-stage-{batch_id}-{index}.tmp"));
-        let backup = parent.join(format!(".ryoko-backup-{batch_id}-{index}.tmp"));
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent_dir = directory
+            .open_dir(parent)
+            .map_err(|error| invalid(error.to_string()))?;
+        let name = relative
+            .file_name()
+            .ok_or_else(|| invalid("missing file name".into()))?
+            .to_os_string();
+        let staged = format!(".ryoko-stage-{batch_id}-{index}.tmp");
+        let backup = format!(".ryoko-backup-{batch_id}-{index}.tmp");
         let write = (|| -> std::io::Result<()> {
             use std::io::Write;
-            let mut writer = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staged)?;
+            let mut writer = parent_dir.open_with(
+                &staged,
+                cap_std::fs::OpenOptions::new().write(true).create_new(true),
+            )?;
             writer.write_all(change.content.as_bytes())?;
             writer.sync_all()?;
             // Replacing an existing executable must preserve its permission bits.
-            if let Ok(existing) = std::fs::metadata(&target) {
-                std::fs::set_permissions(&staged, existing.permissions())?;
+            if let Ok(existing) = parent_dir.metadata(&name) {
+                writer.set_permissions(existing.permissions())?;
             }
             Ok(())
         })();
         if let Err(error) = write {
-            let _ = std::fs::remove_file(&staged);
+            let _ = parent_dir.remove_file(&staged);
             for entry in &prepared {
-                let _ = std::fs::remove_file(&entry.staged);
+                let _ = entry.parent.remove_file(&entry.staged);
             }
             return Err(invalid(format!("cannot stage {}: {error}", change.path)));
         }
         prepared.push(PreparedWrite {
             path: change.path.clone(),
-            existed: target.exists(),
-            target,
+            existed: parent_dir.symlink_metadata(&name).is_ok(),
+            parent: parent_dir,
+            name,
             staged,
             backup,
         });
@@ -1567,13 +1631,19 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     let mut failure = None;
     for (index, entry) in prepared.iter().enumerate() {
         if entry.existed {
-            if let Err(error) = std::fs::rename(&entry.target, &entry.backup) {
+            if let Err(error) = entry
+                .parent
+                .rename(&entry.name, &entry.parent, &entry.backup)
+            {
                 failure = Some(format!("cannot back up {}: {error}", entry.path));
                 break;
             }
             backed_up[index] = true;
         }
-        if let Err(error) = std::fs::rename(&entry.staged, &entry.target) {
+        if let Err(error) = entry
+            .parent
+            .rename(&entry.staged, &entry.parent, &entry.name)
+        {
             failure = Some(format!("cannot commit {}: {error}", entry.path));
             break;
         }
@@ -1584,16 +1654,18 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
         for index in (0..prepared.len()).rev() {
             let entry = &prepared[index];
             if committed[index]
-                && let Err(restore) = std::fs::remove_file(&entry.target)
+                && let Err(restore) = entry.parent.remove_file(&entry.name)
             {
                 rollback_errors.push(restore.to_string());
             }
             if backed_up[index]
-                && let Err(restore) = std::fs::rename(&entry.backup, &entry.target)
+                && let Err(restore) = entry
+                    .parent
+                    .rename(&entry.backup, &entry.parent, &entry.name)
             {
                 rollback_errors.push(restore.to_string());
             }
-            let _ = std::fs::remove_file(&entry.staged);
+            let _ = entry.parent.remove_file(&entry.staged);
         }
         return Err(invalid(format!(
             "{error}; rollback errors: {}",
@@ -1605,7 +1677,7 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
         )));
     }
     for entry in &prepared {
-        let _ = std::fs::remove_file(&entry.backup);
+        let _ = entry.parent.remove_file(&entry.backup);
     }
     Ok(prepared.into_iter().map(|entry| entry.path).collect())
 }
@@ -1614,6 +1686,15 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
 impl WorkspaceLease for GitWorktreeLease {
     fn root(&self) -> &Path {
         &self.root
+    }
+
+    fn validation_root(&self) -> PathBuf {
+        self.validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(path, _): &(PathBuf, String)| path.clone())
+            .unwrap_or_else(|| self.root.clone())
     }
 
     fn branch(&self) -> &str {
@@ -1636,17 +1717,148 @@ impl WorkspaceLease for GitWorktreeLease {
         Ok(())
     }
 
-    async fn publish(&self, task: &Task, summary: &str) -> CoreResult<PullRequest> {
+    async fn seal(&self) -> CoreResult<()> {
         let paths: Vec<String> = self
             .applied
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .cloned()
             .collect();
+        if paths.is_empty() {
+            return Err(CoreError::Workspace(
+                "no staged files to validate".to_owned(),
+            ));
+        }
+        let mut args = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.manager
+            .checked("stage source snapshot", &args, &self.session.path)
+            .await?;
+        self.manager
+            .checked("stage tracked source", &["add", "-u"], &self.session.path)
+            .await?;
+        let staged = self
+            .manager
+            .checked(
+                "inspect snapshot paths",
+                &["diff", "--cached", "--name-only"],
+                &self.session.path,
+            )
+            .await?;
+        if staged
+            .lines()
+            .any(|path| !paths.iter().any(|allowed| allowed == path))
+        {
+            return Err(CoreError::Workspace(
+                "unproposed tracked file changed before validation".to_owned(),
+            ));
+        }
+        let tree = self
+            .manager
+            .checked("seal source tree", &["write-tree"], &self.session.path)
+            .await?;
+        let commit = self
+            .manager
+            .checked(
+                "commit source snapshot",
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &self.session.base_commit,
+                    "-m",
+                    "Ryoko validation snapshot",
+                ],
+                &self.session.path,
+            )
+            .await?;
+        let checkout = self
+            .manager
+            .base_project_path()
+            .join(".ryoko/validation")
+            .join(self.session.id.to_string());
+        tokio::fs::create_dir_all(checkout.parent().expect("validation path has parent"))
+            .await
+            .map_err(|error| CoreError::Workspace(error.to_string()))?;
+        let checkout_arg = checkout.to_string_lossy().to_string();
+        self.manager
+            .checked(
+                "materialize validation snapshot",
+                &["worktree", "add", "--detach", &checkout_arg, &commit],
+                self.manager.base_project_path(),
+            )
+            .await?;
+        *self.sealed_tree.lock().unwrap_or_else(|e| e.into_inner()) = Some(tree);
+        *self
+            .validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((checkout, commit));
+        Ok(())
+    }
+
+    async fn verify_seal(&self) -> CoreResult<()> {
+        let root = self.validation_root();
+        if root == self.root {
+            return Err(CoreError::Workspace(
+                "validation snapshot is missing".to_owned(),
+            ));
+        }
+        let paths: Vec<String> = self
+            .applied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        let mut args = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.manager
+            .checked("inspect validated source", &args, &root)
+            .await?;
+        self.manager
+            .checked("inspect tracked source", &["add", "-u"], &root)
+            .await?;
+        let current = self
+            .manager
+            .checked("inspect source tree", &["write-tree"], &root)
+            .await?;
+        let expected = self
+            .sealed_tree
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if expected.as_deref() != Some(current.as_str()) {
+            return Err(CoreError::Workspace(
+                "source tree differs from validated snapshot".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn publish(&self, task: &Task, summary: &str) -> CoreResult<PullRequest> {
+        self.verify_seal().await?;
+        let commit = self
+            .validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(_, commit)| commit.clone())
+            .ok_or_else(|| CoreError::Workspace("validation snapshot is missing".to_owned()))?;
+        // The branch now points to the immutable tree used by the validation
+        // gate. A later worktree mutation cannot change this commit object.
+        self.manager
+            .checked(
+                "publish validated commit",
+                &["reset", "--hard", &commit],
+                &self.session.path,
+            )
+            .await?;
         let pr = self
             .manager
-            .publish_worktree_inner(&self.session, summary, Some(&paths))
+            .published_head(&self.session, summary, &commit)
             .await
             .map_err(CoreError::from)?;
         self.applied
@@ -1665,6 +1877,21 @@ impl WorkspaceLease for GitWorktreeLease {
     }
 
     async fn discard(&self) -> CoreResult<()> {
+        let checkout = self
+            .validation_checkout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((checkout, _)) = checkout {
+            let path = checkout.to_string_lossy().to_string();
+            self.manager
+                .checked(
+                    "remove validation snapshot",
+                    &["worktree", "remove", "--force", &path],
+                    self.manager.base_project_path(),
+                )
+                .await?;
+        }
         self.manager
             .clean_worktree(&self.session)
             .await
@@ -1807,6 +2034,31 @@ mod tests {
         assert!(!outside.path().join("escape.rs").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn multifile_batch_parent_swap_never_writes_outside() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let parent = root.path().join("src");
+        let outside_path = outside.path().to_path_buf();
+        let attacker = std::thread::spawn(move || {
+            for _ in 0..300 {
+                let _ = std::fs::remove_dir(&parent);
+                let _ = std::os::unix::fs::symlink(&outside_path, &parent);
+                let _ = std::fs::remove_file(&parent);
+                let _ = std::fs::create_dir(&parent);
+            }
+        });
+        for _ in 0..300 {
+            let _ = apply_batch(
+                root.path(),
+                &[ProposedChange::new("src/escape.rs", "payload")],
+            );
+        }
+        attacker.join().unwrap();
+        assert!(!outside.path().join("escape.rs").exists());
+    }
+
     #[tokio::test]
     async fn rejects_multiple_dependencies_for_non_integrators() {
         let (_dir, manager) = repo().await;
@@ -1853,6 +2105,8 @@ mod tests {
             .await
             .unwrap();
 
+        lease.seal().await.unwrap();
+        lease.verify_seal().await.unwrap();
         let pr = lease.publish(&task, "add feature").await.unwrap();
         assert_eq!(pr.files, vec!["src/feature.rs"]);
         assert!(!pr.files.iter().any(|path| path.starts_with("target/")));
@@ -2027,6 +2281,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validation_rejects_changed_source_and_publishes_sealed_bytes() {
+        let (_dir, manager) = repo().await;
+        let task = Task::new("exact source", AgentRole::SeniorDeveloper);
+        let identity = AgentIdentity::new(AgentRole::SeniorDeveloper, "dev", "developer");
+        let lease = manager.allocate(&task, &identity).await.unwrap();
+        lease
+            .apply(&[ProposedChange::new("source.rs", "validated")])
+            .await
+            .unwrap();
+        lease.seal().await.unwrap();
+        tokio::fs::write(lease.root().join("source.rs"), "tampered")
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(lease.validation_root().join("source.rs"))
+                .await
+                .unwrap(),
+            "validated"
+        );
+        lease.verify_seal().await.unwrap();
+        tokio::fs::write(lease.validation_root().join("source.rs"), "tampered")
+            .await
+            .unwrap();
+        assert!(lease.verify_seal().await.is_err());
+        assert!(lease.publish(&task, "source").await.is_err());
+        tokio::fs::write(lease.validation_root().join("source.rs"), "validated")
+            .await
+            .unwrap();
+        lease.verify_seal().await.unwrap();
+        let pr = lease.publish(&task, "source").await.unwrap();
+        assert!(pr.patch.contains("+validated"));
+        assert!(!pr.patch.contains("tampered"));
+        lease.discard().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn agent_ids_are_sanitized() {
         assert_eq!(sanitize_agent_id("senior dev/01").unwrap(), "senior-dev-01");
         assert_eq!(sanitize_agent_id("../../etc").unwrap(), "etc");
@@ -2089,6 +2379,7 @@ mod tests {
             )])
             .await
             .unwrap();
+        lease.seal().await.unwrap();
         let pr = lease.publish(&child, "child tests").await.unwrap();
         assert_eq!(pr.files, vec!["tests/child.rs"]);
         assert!(pr.patch.contains("tests/child.rs"));

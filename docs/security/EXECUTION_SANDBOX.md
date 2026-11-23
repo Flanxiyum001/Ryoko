@@ -71,6 +71,24 @@ For reproducibility, pin the exact image digest and project lockfiles. Absent
 dependencies make the check fail; the pre-flight runner never enables network
 access to fetch them.
 
+Container execution now requires a full local `sha256:<64 hex>` image ID or a
+repository reference ending in `@sha256:<64 hex>`. The runner inspects the local
+image immediately before execution, verifies the ID or repository digest and
+passes the pinned reference to `run --pull=never`. `sandbox init --json` reports
+the local image ID as `image` after a successful build and keeps the mutable
+tag separately as `image_tag`. `--no-build` reports the tag only; it cannot be
+used to run a check until the operator resolves a local image ID.
+
+Git worktree proposals use capability-relative temporary writes and atomic
+rename. The orchestrator seals a Git tree, checks out that commit into a
+separate validation worktree, rejects changes to its tracked source while
+tests run, and publishes only the sealed commit. Changes to the agent's
+worktree cannot affect validation or the published bytes. Generated untracked
+test artifacts are excluded from the sealed tree. Another process with access
+to the validation checkout could still change and restore a file during a
+check; a read-only mount plus separate writable build overlay is required to
+exclude that adversary.
+
 ## Current guardrail
 
 - Fresh wasmtime store per artifact.
