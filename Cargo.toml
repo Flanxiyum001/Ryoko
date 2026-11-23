@@ -59,7 +59,7 @@ tree-sitter-sequel = "0.3"
 tree-sitter-swift = "0.7"
 tree-sitter-typescript = "0.23"
 uuid = { version = "1", features = ["serde", "v4"] }
-wasmtime = { version = "26.0", default-features = false, features = ["cranelift", "pulley", "runtime", "std", "wat"] }
+wasmtime = { version = "26.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
 wasmtime-wasi = { version = "26.0", features = ["preview1"] }
 
 [profile.release]
