@@ -66,6 +66,7 @@ terminal_resize(rows, cols)     resize the PTY and xterm viewport
 terminal_status()               running state and session id
 terminal_stop()                 terminate the shell
 dap_start(adapter, args)       spawn a user-selected DAP adapter over stdio
+dap_restart(adapter, args)     terminate active adapter and spawn a fresh session
 dap_send(message)              validate JSON and write one framed DAP request
 dap_status() / dap_stop()      inspect or terminate the adapter
 ```
@@ -132,9 +133,12 @@ capped. The shell receives no agent/model input and no extra privileges.
 The **Debug** tab starts a user-supplied DAP adapter such as `dlv dap` with an
 explicit argv and no shell. Ryoko forwards Content-Length framed JSON both ways,
 sends `initialize`, `launch` and `configurationDone`, and exposes continue,
-step-over, step-in, step-out and line-breakpoint controls. Adapter responses and
-events are shown verbatim in a bounded log. Ryoko does not implement a debugger
-or synthesize stack/variable state.
+step-over, step-in, step-out, restart and line-breakpoint controls. When paused,
+Ryoko inspects stack frames, variables and breakpoint verification status from
+validated DAP messages, with keyboard-operable frame navigation and expandable
+variable trees. Adapter responses, events and bounded stderr are logged in an
+accessible output pane. Ryoko does not emulate a debugger or execute adapters
+automatically from agent output.
 
 ## Verification
 

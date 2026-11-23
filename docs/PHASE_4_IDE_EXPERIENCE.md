@@ -12,7 +12,7 @@ Ryoko should feel like an excellent editor even when no model is connected. Code
 | Difference review | Monaco side-by-side diff; staged hunk actions and validation gates | No change to merge permissions or review semantics in this increment | Inline/side-by-side toggle, clear stage/unstage/restore, review comments linked to exact lines, binary/rename handling, stale-base detection |
 | Inline agent interaction | Cmd/Ctrl+K inline-edit request, proposed changes and acceptance | Preserve the existing explicit acceptance boundary | Context scope UI, progress/cancel, targeted edits, rebase-safe preview and undo with no silent overwrites |
 | Persistent sessions | SQLite-backed worktree leases; read-only Active/Published panel | Recent-file navigation remembered per workspace (not dirty-buffer persistence) | Restore editor tabs/layout safely, crash recovery for unsaved edits, session resume with verified process state and consent, cross-version migrations |
-| Terminal and debug | Explicit PTY shell; user-selected DAP adapter | Incremental UTF-8 PTY output, process-exit status reconciliation, bounded DAP stderr, session-scoped events, stop on workspace switch | Multiple PTYs, robust session UX, DAP stack/variables/breakpoints UI, cross-platform stress tests |
+| Terminal and debug | Explicit PTY shell; user-selected DAP adapter | Incremental UTF-8 PTY output, process-exit status reconciliation, bounded DAP stderr, session-scoped events, stop on workspace switch, DAP stack/variables/breakpoints inspector, restart lifecycle | Multiple PTYs, cross-platform stress tests |
 
 ## Mandatory engineering rules
 
@@ -50,9 +50,18 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
 The Tauri tests also require platform-native prerequisites. After CI, run interactive smoke tests with a disposable workspace and a user-selected debug adapter on each target OS. Passing CI does **not** substitute for interactive manual verification.
 
+### DAP Inspector manual smoke checklist
+1. **Adapter start & initialize:** Enter `python3` with args `tests/fixtures/fake_dap_adapter.py`, click Start. Verify status updates to "Adapter initialized" and execution controls (Continue, Next, Step in, Step out) are available.
+2. **Breakpoints:** Toggle breakpoint on current line via F9 or button. Verify breakpoint appears in the Breakpoints list with file, line, and verified badge. Clicking breakpoint navigates editor to file:line.
+3. **Call Stack navigation:** When paused, verify paused stack frames populate the Call Stack list with function name and `source:line:col`. Selecting frames with arrow keys / Enter navigates the editor and loads frame scopes.
+4. **Variables inspection:** Verify local variables appear in the Variables tree. Expanding nested variables (`variablesReference > 0`) fetches child properties without freezing UI.
+5. **Restart & Stop:** Click Restart; verify previous session terminates cleanly and new session starts without duplicate logs or leaked child processes. Click Stop; verify controls reset to idle state and "Not paused" is displayed.
+6. **Workspace switch:** Switch workspace while debugging; verify active adapter process is killed, all session frames/variables are cleared, and no stale data persists.
+7. **Resilience:** Provide invalid adapter command or non-existent path; verify bounded error message appears in status/output without hanging the webview.
+
 ## Recommended sequencing
 
-1. Navigation and terminal/debug lifecycle hardening (current first increment).
+1. Navigation and terminal/debug lifecycle hardening (current increment).
 2. Complete diff review UX and protected review history.
 3. Inline agent workflow with cancellation, provenance and conflict-aware previews.
 4. Durable editor state and opt-in recovery/resume semantics.
