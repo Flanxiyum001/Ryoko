@@ -284,8 +284,11 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       botState.recordDelivery(delivery);
       if (allowed.includes(type) && payload.installation?.id) emit(summarizeWebhook(type, payload));
       const command = issueBotCommand(type, payload, settings.allowedUsers);
+      const labelRequest = issueAgentRequest(type, payload);
+      const trustedLabel = labelRequest && settings.allowedUsers.includes(
+        String(payload.sender?.login || '').toLowerCase()) ? labelRequest : null;
       const pipelineRequest = command?.command === 'status'
-        ? null : (command || issueAgentRequest(type, payload));
+        ? null : (command || trustedLabel);
       if (command?.command === 'status' && settings.agentRepoIds.includes(command.repoId)) {
         void notifyIssue(command, botStatus(command, pipelineJobs.get(jobKey(command))));
       }
