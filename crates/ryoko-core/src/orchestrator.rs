@@ -1247,7 +1247,10 @@ fn prioritized_repair_feedback(
         .map(|file| file.path.as_str())
         .collect::<Vec<_>>();
     if !paths.is_empty() {
-        output.push_str(&format!("Files from the rejected attempt: {}\n", paths.join(", ")));
+        output.push_str(&format!(
+            "Files from the rejected attempt: {}\n",
+            paths.join(", ")
+        ));
     }
     let important = logs
         .iter()
@@ -1307,7 +1310,10 @@ mod tests {
         let mut logs = vec!["building dependency".repeat(200); 100];
         logs.push("error[E0425]: cannot find function verifyPayment".to_owned());
         logs.push("test payment_regression FAILED".to_owned());
-        let proposal = vec![ProposedChange::new("src/payment.rs", "fn verifyPayment() {}")];
+        let proposal = vec![ProposedChange::new(
+            "src/payment.rs",
+            "fn verifyPayment() {}",
+        )];
         let feedback = prioritized_repair_feedback("validation rejected changes", &logs, &proposal);
         assert!(feedback.contains("verifyPayment"));
         assert!(feedback.contains("payment_regression FAILED"));
