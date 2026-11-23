@@ -13,7 +13,7 @@ Visit GitHub Settings → Developer settings → GitHub Apps → New GitHub App.
 - OAuth callback URL: https://YOUR_HOST/auth/github/callback
 - Webhook URL: https://YOUR_HOST/webhooks/github, with a strong random secret.
 - Installation: select only the repositories Ryoko needs.
-- Repository permissions: Contents read/write, Pull requests read/write, Issues read/write, Actions read, Checks read, Metadata read.
+- Repository permissions: Contents read/write, Pull requests read/write, Issues read/write, Actions read, Checks read, **Commit statuses read**, Metadata read.
 - No Workflows or Administration permissions.
 - Webhook subscriptions: installation, installation_repositories, pull_request, pull_request_review, issues, issue_comment, check_run, check_suite, workflow_run, push.
 
@@ -181,7 +181,75 @@ The web shell provides repository installation selection, read-only file browser
 
 **Still required for the full product:** native desktop packaging, LSP/Monaco editor, terminal, live per-agent inference events, durable audit/job queue, native OAuth token refresh, a first-party Rust agent bridge submitting proposals, bulk patch staging, and staged deployment with proper production controls.
 
-## 7. Tests and release gates
+## 7. Native desktop Mission Control (stacked prototype)
+
+The Tauri IDE's **GitHub Mission Control** panel can now do more than
+read-only browsing. First launch the Node broker on the **same trusted
+machine**, sign in with an allowlisted GitHub user in the browser workbench,
+and use **Pair native desktop** to generate a single-use pairing code.
+Paste this code in Ryoko's native GitHub panel. The OAuth, App key and
+installation credentials remain entirely in the Node broker; the 30-minute
+paired bearer token is held only inside Rust, never the webview.
+
+In the native panel you can:
+
+- Browse an authorized repository's issues and PRs and inspect fresh PR CI.
+- Explicitly start an issue engineering job with **Run agent** (only for
+  repository IDs in `RYOKO_AGENT_ALLOWED_REPO_IDS`).
+- Queue safe `ryoko/` branch creation, UTF-8 file commits, **draft** PR
+  creation and review comments, or promote a draft PR to Ready for review.
+- Inspect the **full parameters** of pending proposals (including trusted
+  agent proposals) and deliberately **Approve write** or **Reject**. Merely
+  queuing never executes a GitHub mutation; approvals are one-shot and
+  re-authorize the repository at execution time.
+
+The `mark_ready_for_review` operation fails closed unless the draft PR
+belongs to the selected repository, its head branch starts with `ryoko/`,
+all GitHub check runs and commit statuses for the current HEAD are complete
+and passing, at least one check has succeeded, and the HEAD is unchanged
+on immediate reinspection. Status data is advisory and potentially
+time-sensitive; **GitHub branch rulesets must still enforce checks and
+reviews on the default branch**. Ryoko never merges PRs or bypasses rulesets.
+
+### Durable bot job ledger
+
+For any real bot installation configure a private persistent file on a
+single trusted host:
+
+    mkdir -p /srv/ryoko/private
+    chmod 700 /srv/ryoko/private
+    export RYOKO_BOT_STATE_FILE="/srv/ryoko/private/github-bot.json"
+
+The broker writes owner-only JSON snapshots atomically (0600 mode).
+It records verified webhook delivery IDs and per-issue job states.
+When restarted, previously running jobs become `interrupted`. Ryoko
+**never automatically retries ambiguous remote writes**, even after
+failure; inspect any pushed branch or draft PR before the explicit
+`/ryoko retry` command. An operator can also inspect jobs from the IDE.
+
+This ledger is **single-process only**. Multiple broker replicas, network
+filesystems, or automated crash recovery are not supported. A full
+production service needs transactional storage, worker leasing, outcome
+reconciliation and durable approval queues. Desktop approval proposals,
+OAuth sessions and bearer pairings are still in process memory. Never put
+the ledger or GitHub credentials in the repository.
+
+### Registration and staging checklist
+
+1. Register the GitHub App using the manifest template; install it on **only
+   a disposable test repository** first. Enable Commit statuses: read.
+2. Supply the backend private key, OAuth, webhook secret, owner allowlist,
+   repository ID allowlist, model provider config, local Ryoko CLI and
+   sandbox image. Keep these variables outside the UI and repository.
+3. Configure the private ledger path, start a **single** broker, sign in
+   and pair the native desktop.
+4. Try a read, a rejected proposal, a branch proposal and an explicitly
+   approved draft PR. Verify the CI gate blocks a pending or failing commit.
+5. Start a small issue job, inspect its progress and verify the draft PR
+   never merges. Restart the broker mid-job and ensure it reports
+   `interrupted`, with no automatic second run.
+
+## 8. Tests and release gates
 
 CI runs Rust workspace formatting/Clippy/tests and the Node workbench syntax/security tests. Locally:
 
