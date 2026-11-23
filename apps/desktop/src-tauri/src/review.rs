@@ -209,15 +209,15 @@ fn file_state_label(state: hunks::FileReviewState, old_path: Option<&str>) -> St
             "deleted file — restore or reject the whole file with Git; not editable here".to_owned()
         }
         hunks::FileReviewState::Renamed => match old_path {
-            Some(old) => format!(
-                "renamed from {old} — reviewed as one whole-file change; not editable here"
-            ),
+            Some(old) => {
+                format!("renamed from {old} — reviewed as one whole-file change; not editable here")
+            }
             None => "renamed — reviewed as one whole-file change; not editable here".to_owned(),
         },
         hunks::FileReviewState::Copied => match old_path {
-            Some(old) => format!(
-                "copied from {old} — reviewed as one whole-file change; not editable here"
-            ),
+            Some(old) => {
+                format!("copied from {old} — reviewed as one whole-file change; not editable here")
+            }
             None => "copied — reviewed as one whole-file change; not editable here".to_owned(),
         },
         hunks::FileReviewState::Binary => {
@@ -277,7 +277,11 @@ pub async fn list_review_hunks(state: State<'_, WorkspaceState>) -> Result<Revie
             new_lines: hunk_ranges(&hunk.header).2,
         })
         .collect();
-    Ok(ReviewSnapshot { patch, hunks, files })
+    Ok(ReviewSnapshot {
+        patch,
+        hunks,
+        files,
+    })
 }
 
 /// Reparses the snapshot and the fresh diff, then verifies every selected
@@ -404,9 +408,11 @@ async fn run_review_action(
     .map_err(|_| "Git staging worker failed".to_owned())??;
     let target = root.clone();
     let cached = action == "stage";
-    tauri::async_runtime::spawn_blocking(move || apply_patch(&target, &applied_patch, cached, !cached))
-        .await
-        .map_err(|_| "Git staging worker failed".to_owned())??;
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_patch(&target, &applied_patch, cached, !cached)
+    })
+    .await
+    .map_err(|_| "Git staging worker failed".to_owned())??;
     Ok(ReviewActionReport {
         action,
         files: report,
@@ -528,7 +534,10 @@ mod tests {
     #[test]
     fn a_missing_file_difference_is_reported_without_applying_anything() {
         let error = verified_selection(&format!("{SNAPSHOT}diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"), SNAPSHOT, &[2]).unwrap_err();
-        assert!(error.contains("no longer has unstaged differences"), "{error}");
+        assert!(
+            error.contains("no longer has unstaged differences"),
+            "{error}"
+        );
     }
 
     #[test]
