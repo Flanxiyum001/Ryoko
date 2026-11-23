@@ -63,7 +63,7 @@ pub use memory::SharedMemory;
 pub use model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
 pub use orchestrator::{
     HumanReview, OrchestrationReport, Orchestrator, OrchestratorConfig, RepairCycle, SkippedTask,
-    TaskFailure, TaskSuccess,
+    TaskFailure, TaskSuccess, ReviewOutcome,
 };
 pub use project_memory::{MemoryEntry, MemoryKind, ProjectMemory};
 pub use review::{
