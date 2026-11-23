@@ -20,10 +20,11 @@ describe('native GitHub queue links', () => {
 
 describe('native GitHub approval parameters', () => {
   const input = {
-    branch: ' ryoko/editor-fix ', path: ' src/main.ts ', message: ' fix ', number: '17',
+    projectName: ' new-project ', branch: ' ryoko/editor-fix ', path: ' src/main.ts ', message: ' fix ', number: '17',
     title: ' New editor ', content: 'complete content',
   };
   it('sends only the fields required for the reviewed operation', () => {
+    expect(proposalParams('clone_repository', input)).toEqual({ projectName: 'new-project' });
     expect(proposalParams('create_branch', input)).toEqual({ branch: 'ryoko/editor-fix' });
     expect(proposalParams('commit_file', input)).toEqual({
       branch: 'ryoko/editor-fix', path: 'src/main.ts',
