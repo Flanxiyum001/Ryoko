@@ -16,5 +16,5 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["vite/client"]
   },
-  "include": ["ui/src"]
+  "include": ["ui/src", "ui/bench"]
 }
