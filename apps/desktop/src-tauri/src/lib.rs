@@ -8,6 +8,7 @@ mod inline_edit;
 mod lsp;
 mod lsp_frame;
 mod marketplace;
+mod menu;
 mod mission;
 mod model_runtime;
 mod paths;
@@ -26,7 +27,12 @@ mod workspace;
 use tauri::Manager;
 
 pub fn run() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(|handle| menu::build(handle))
+        .on_menu_event(|handle, event| menu::forward(handle, event.id().as_ref()));
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
         .manage(workspace::WorkspaceState::default())
         .manage(github_queue::GitHubQueueState::default())

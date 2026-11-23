@@ -10,6 +10,7 @@
   <div id="app">
     <header class="topbar">
       <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
+      <div id="menuBar" class="menu-bar"></div>
       <button id="quickOpenButton" class="command-center" type="button" title="Quick open file (Ctrl+P / Cmd+P)"><span aria-hidden="true">⌕</span><span id="workspaceName">Search files in workspace</span><kbd>Ctrl / ⌘ P</kbd></button>
       <div class="top-actions">
         <button id="openFolder" class="button primary" type="button">Open folder…</button>
@@ -32,6 +33,7 @@
         <button class="rail-button rail-bottom" type="button" data-view="settings" aria-label="Open settings" title="Settings"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg><span class="rail-label">Setup</span></button>
       </nav>
       <aside class="explorer" id="explorerPane" aria-label="Workspace explorer">
+        <div id="sidebarSash" class="sash sash-vertical sash-right" role="separator" aria-orientation="vertical" aria-label="Resize side bar" tabindex="0" title="Drag to resize. Double-click to reset."></div>
         <div class="panel-head"><span>EXPLORER</span><button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files">↻</button></div>
         <div class="explorer-summary"><span id="fileCount" class="counter">0 files</span><span>WORKSPACE</span></div>
         <label class="sr-only" for="fileFilter">Filter files</label>
@@ -44,7 +46,8 @@
       <main class="editor-column" aria-label="Code editor">
         <div id="editorTabs" class="editor-tabs"></div>
         <div class="tabbar">
-          <span id="activePath" class="active-path">No file open</span>
+          <span id="activePath" class="active-path sr-only">No file open</span>
+          <nav id="breadcrumbs" class="breadcrumbs" aria-label="Breadcrumbs"></nav>
           <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
           <span class="status-spacer"></span>
           <button id="runActiveFile" class="button primary compact" type="button" disabled>Run file</button>
@@ -81,6 +84,7 @@
           </div>
         </div>
         <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
+          <div id="panelSash" class="sash sash-horizontal" role="separator" aria-orientation="horizontal" aria-label="Resize panel" tabindex="0" title="Drag to resize. Double-click to reset."></div>
           <div class="bottom-tabs">
             <button id="terminalTab" class="bottom-tab active" type="button">TERMINAL</button>
             <button id="taskTab" class="bottom-tab" type="button">OUTPUT</button>
@@ -183,6 +187,7 @@
       </main>
 
       <aside class="problems" id="inspectorPane" aria-label="Mission Control and diagnostics">
+        <div id="inspectorSash" class="sash sash-vertical sash-left" role="separator" aria-orientation="vertical" aria-label="Resize inspector" tabindex="0" title="Drag to resize. Double-click to reset."></div>
         <section class="agent-sessions" aria-label="Agent sessions">
           <div class="panel-head"><span>AGENT SESSIONS</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
           <div class="agent-session-toolbar">
@@ -319,6 +324,12 @@
           <button id="settingsAddServer" class="button ghost compact" type="button">Add server</button>
           <button id="settingsSaveServers" class="button primary compact" type="button">Validate &amp; save</button>
         </div>
+      </section>
+      <section class="settings-section">
+        <h2>Color theme</h2>
+        <p class="hint">Changes the workbench and the editor together. Also available from View › Color Theme.</p>
+        <label class="sr-only" for="settingsTheme">Color theme</label>
+        <select id="settingsTheme" class="settings-theme"></select>
       </section>
       <section class="settings-section">
         <h2>Keybindings</h2>

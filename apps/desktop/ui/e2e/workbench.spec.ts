@@ -124,3 +124,63 @@ test('narrow layout opens files from the explorer without clipping', async ({ pa
   expect(overflow).toBe(false);
   await page.screenshot({ path: info.outputPath('narrow.png') });
 });
+
+test('command palette lists commands with shortcuts and runs them', async ({ page }) => {
+  await page.goto('/');
+  await page.keyboard.press('Control+Shift+P');
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await page.keyboard.type('toggle side bar');
+  const option = palette.getByRole('option').first();
+  await expect(option).toContainText('View: Toggle Primary Side Bar');
+  await expect(option).toContainText('Ctrl+B');
+  await page.keyboard.press('Enter');
+  await expect(palette).toBeHidden();
+  await expect(page.locator('#explorerPane')).toBeHidden();
+  await page.keyboard.press('Control+B');
+  await expect(page.locator('#explorerPane')).toBeVisible();
+});
+
+test('menu bar opens with the keyboard and runs actions', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#menu-view').click();
+  const viewMenu = page.getByRole('menu', { name: 'View' });
+  await expect(viewMenu).toBeVisible();
+  await expect(viewMenu.getByRole('menuitem', { name: /Command Palette/ })).toContainText('Ctrl+Shift+P');
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('menu', { name: 'Run' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu', { name: 'Run' })).toBeHidden();
+  await page.locator('#menu-file').click();
+  await page.getByRole('menuitem', { name: /Open Folder/ }).click();
+  await expect(page.locator('#workspaceName')).toHaveText('workspace');
+});
+
+test('theme and layout choices persist across reloads', async ({ page }) => {
+  await page.goto('/');
+  await page.keyboard.press('Control+Shift+P');
+  await page.keyboard.type('theme light');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  const sash = page.locator('#sidebarSash');
+  const box = (await sash.boundingBox())!;
+  await page.mouse.move(box.x + 2, box.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 82, box.y + 200, { steps: 4 });
+  await page.mouse.up();
+  const width = await page.locator('#explorerPane').evaluate((pane) => pane.getBoundingClientRect().width);
+  expect(width).toBeGreaterThan(320);
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  const restored = await page.locator('#explorerPane').evaluate((pane) => pane.getBoundingClientRect().width);
+  expect(Math.abs(restored - width)).toBeLessThan(2);
+});
+
+test('explorer shows file-type icons and breadcrumbs for the active file', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#openFolder').click();
+  await expect(page.locator('.file-link').filter({ hasText: 'main.ts' }).locator('.file-icon')).toHaveText('TS');
+  await page.locator('.file-link').filter({ hasText: 'main.ts' }).click();
+  await expect(page.getByRole('tab', { name: 'main.ts', exact: true }).locator('.file-icon')).toHaveText('TS');
+  await expect(page.getByRole('navigation', { name: 'Breadcrumbs' })).toContainText('main.ts');
+});
