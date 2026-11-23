@@ -273,7 +273,7 @@ pub async fn list_github_proposals(
         .await
         .map_err(|_| "cannot reach local GitHub App".to_owned())?;
     let list: ProposalList = bounded_json(response).await?;
-    if list.proposals.len() > 2 {
+    if list.proposals.len() > 50 {
         return Err("broker returned too many review proposals".into());
     }
     Ok(list.proposals)
