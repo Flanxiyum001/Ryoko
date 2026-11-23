@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import {
-  createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID,
+  createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID,
 } from 'node:crypto';
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
@@ -157,6 +157,9 @@ export class ProductionState {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;`);
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS meta(
+        key TEXT PRIMARY KEY, value TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS secrets(
         kind TEXT NOT NULL, key_hash TEXT NOT NULL, value TEXT NOT NULL,
         expires INTEGER NOT NULL, PRIMARY KEY(kind,key_hash)
@@ -184,6 +187,19 @@ export class ProductionState {
       CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(status,created_at);
       CREATE INDEX IF NOT EXISTS jobs_repo ON jobs(repo_id,created_at);
     `);
+    const version = this.db.prepare('PRAGMA user_version').get().user_version;
+    if (version > 1) throw new Error('database schema is newer than this broker');
+    const verifier = createHmac('sha256', this.vault.key)
+      .update('ryoko-state-key-verifier-v1').digest('hex');
+    this.transaction(() => {
+      const stored = this.db.prepare("SELECT value FROM meta WHERE key='state_key_check'").get();
+      if (stored && stored.value !== verifier) {
+        throw new Error('RYOKO_STATE_KEY does not match the existing encrypted database');
+      }
+      if (!stored) this.db.prepare('INSERT INTO meta(key,value) VALUES(?,?)')
+        .run('state_key_check', verifier);
+      if (version === 0) this.db.exec('PRAGMA user_version=1');
+    });
     this.sessions = new DurableMap(this, 'session');
     this.desktopPairings = new DurableMap(this, 'pairing');
     this.desktopSessions = new DurableMap(this, 'desktop');
