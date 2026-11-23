@@ -26,6 +26,11 @@ export interface InlineEditDeps {
   languageId: () => string;
   setStatus: (message: string) => void;
   onSaveAfterApply: () => Promise<void>;
+  /** Prefer a read-only Monaco diff before any buffer mutation. */
+  onReview?: (suggestion: {
+    context: { path: string; text: string; fullText: string; startOffset: number; endOffset: number };
+    replacement: string;
+  }) => void;
 }
 
 const PENDING_CLASS = 'inline-edit-pending';
@@ -109,6 +114,18 @@ export class InlineEditController {
         } satisfies InlineEditArgs,
       });
       if (generation !== this.generation || file.model.isDisposed()) return;
+      if (this.deps.onReview) {
+        const fullText = this.contextText;
+        const startOffset = this.contextOffset;
+        const endOffset = startOffset + this.contextLength;
+        const path = file.path;
+        this.reject('Inline edit generated; open review to approve individual hunks.');
+        this.deps.onReview({
+          context: { path, text: context.selected, fullText, startOffset, endOffset },
+          replacement: reply.replacement,
+        });
+        return;
+      }
       this.replacement = reply.replacement;
       this.decoratedFile = file;
       this.decorate(file);
