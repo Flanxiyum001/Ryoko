@@ -349,5 +349,26 @@ mod tests {
         assert!(prepare_argv("python", &vec!["x".to_owned(); 33], path, path).is_err());
         assert!(prepare_argv("python", &["bad\0value".to_owned()], path, path).is_err());
         assert!(prepare_argv("python", &["\u{1b}[2Jspoof".to_owned()], path, path).is_err());
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_workspace_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ryoko-run-target-{}-{suffix}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, "print('hello')").unwrap();
+        symlink(&outside, root.join("escape.py")).unwrap();
+        assert!(target_file(&root, "escape.py").is_err());
+        assert!(target_file(&root, "../escape.py").is_err());
+        std::fs::remove_file(root.join("escape.py")).unwrap();
+        std::fs::remove_file(outside).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
     }
 }
