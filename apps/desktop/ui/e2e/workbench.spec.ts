@@ -168,12 +168,18 @@ test('theme and layout choices persist across reloads', async ({ page }) => {
   await page.mouse.down();
   await page.mouse.move(box.x + 82, box.y + 200, { steps: 4 });
   await page.mouse.up();
+  // The workbench now animates panel resizing; measure only the settled width.
+  await page.locator('.layout').evaluate(async (layout) => {
+    await Promise.all(layout.getAnimations().map((animation) => animation.finished.catch(() => {})));
+  });
   const width = await page.locator('#explorerPane').evaluate((pane) => pane.getBoundingClientRect().width);
   expect(width).toBeGreaterThan(320);
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  const restored = await page.locator('#explorerPane').evaluate((pane) => pane.getBoundingClientRect().width);
-  expect(Math.abs(restored - width)).toBeLessThan(2);
+  await expect.poll(async () => {
+    const restored = await page.locator('#explorerPane').evaluate((pane) => pane.getBoundingClientRect().width);
+    return Math.abs(restored - width);
+  }).toBeLessThan(2);
 });
 
 test('explorer shows file-type icons and breadcrumbs for the active file', async ({ page }) => {
