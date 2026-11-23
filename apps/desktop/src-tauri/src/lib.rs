@@ -1,3 +1,5 @@
+mod agent_chat;
+mod agent_review;
 mod code_run;
 mod completion;
 mod connectors;
@@ -29,6 +31,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(workspace::WorkspaceState::default())
+        .manage(agent_chat::AgentChatState::default())
         .manage(github_queue::GitHubQueueState::default())
         .manage(lsp::LspState::default())
         .manage(run::RunState::default())
@@ -41,6 +44,9 @@ pub fn run() {
             workspace::list_files,
             workspace::read_file,
             workspace::write_file,
+            agent_chat::agent_chat,
+            agent_chat::agent_chat_cancel,
+            agent_review::read_agent_candidate,
             workbench::git_changes,
             workbench::workspace_search,
             workbench::workspace_replace_preview,
