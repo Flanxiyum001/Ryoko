@@ -302,6 +302,30 @@ single-host production candidate pending real GitHub staging, backup,
 observability and recovery validation—not a certification of
 multi-region production readiness.
 
+### Encrypted online backups and restore drill
+
+While API/worker processes are running, a privileged operator can make a
+SQLite-consistent online snapshot (including WAL transactions):
+
+```sh
+node services/github-app/src/backup-state.mjs \
+  /srv/ryoko/private/backup-$(date +%Y%m%d).sqlite3
+```
+
+The command requires `RYOKO_STATE_DB` and `RYOKO_STATE_KEY` in the
+operator's environment, refuses overwrite or an insecure directory,
+validates the key/schema before backup, then checks database integrity.
+Backups are still sensitive; store them with mode 0600, rotate them and
+copy encrypted snapshots to independently protected offline storage.
+Keep the **separate encryption key** safe, too.
+
+To test restoration, **stop all API and worker processes first**, place
+a backup into a new private test directory, and verify it can be opened
+with the same key. Reconcile interrupted jobs and remote PRs before
+bringing workers back online. Never perform a live restore over a database
+still in use, and never merely copy the main SQLite file while its WAL
+may contain uncheckpointed transactions.
+
 Before cutover, archive any previous JSON ledger files outside the
 active service and review all pending approvals/branches manually.
 There is intentionally **no automatic migration or replay** from the
