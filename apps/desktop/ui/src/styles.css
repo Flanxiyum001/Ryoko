@@ -1085,3 +1085,7 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
   .layout, .layout.hide-explorer, .layout.hide-inspector, .layout.hide-explorer.hide-inspector { grid-template-columns: 48px minmax(0, 1fr); }
   .sash { display: none; }
 }
+
+/* Brand: the dragon logo (ui/public/ryoko-logo.png). */
+img.brand-mark { width: 22px; height: 22px; padding: 0; border-radius: 5px; background: none; object-fit: cover; }
+img.empty-mark { width: 112px; height: 112px; border-radius: 22px; object-fit: cover; box-shadow: 0 8px 30px rgb(255 40 40 / 18%); }
