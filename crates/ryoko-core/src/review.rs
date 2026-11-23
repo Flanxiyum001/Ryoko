@@ -21,10 +21,7 @@ pub fn validation_evidence_key(task_id: Uuid) -> String {
 
 /// Only a successful execution gate with a recorded command produces a proof.
 /// In particular, AllowAllValidator and a model's assertion of success do not.
-pub fn trusted_validation_evidence(
-    task_id: Uuid,
-    report: &ValidationReport,
-) -> Option<String> {
+pub fn trusted_validation_evidence(task_id: Uuid, report: &ValidationReport) -> Option<String> {
     if !report.passed
         || !report
             .logs
@@ -254,11 +251,7 @@ mod tests {
             trusted_validation_evidence(task_id, &executed),
             Some(format!("validator:{task_id}"))
         );
-        let rejected = ValidationReport::failed(
-            "failed",
-            executed.logs,
-            Duration::ZERO,
-        );
+        let rejected = ValidationReport::failed("failed", executed.logs, Duration::ZERO);
         assert!(trusted_validation_evidence(task_id, &rejected).is_none());
     }
 
@@ -268,7 +261,11 @@ mod tests {
         let proof = format!("validator:{}", task.dependencies[0]);
         assert!(passing(&proof).verify(&task, Some(&proof)).is_ok());
         assert!(passing(&proof).verify(&task, None).is_err());
-        assert!(passing("validator:other").verify(&task, Some(&proof)).is_err());
+        assert!(
+            passing("validator:other")
+                .verify(&task, Some(&proof))
+                .is_err()
+        );
         let mut unbound = task.clone();
         unbound.dependencies.clear();
         assert!(passing(&proof).verify(&unbound, Some(&proof)).is_err());
@@ -300,9 +297,11 @@ mod tests {
     fn rejects_malformed_or_unbounded_model_output() {
         assert!(ReviewRecord::parse("not json").is_err());
         assert!(ReviewRecord::parse(&"x".repeat(65_537)).is_err());
-        assert!(ReviewRecord::parse(
-            r#"{"verdict":"pass","summary":"ok","findings":[],"evidence_refs":[],"files":[]}"#
-        )
-        .is_err());
+        assert!(
+            ReviewRecord::parse(
+                r#"{"verdict":"pass","summary":"ok","findings":[],"evidence_refs":[],"files":[]}"#
+            )
+            .is_err()
+        );
     }
 }
