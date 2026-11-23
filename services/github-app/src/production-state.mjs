@@ -191,15 +191,20 @@ export class ProductionState {
     if (version > 1) throw new Error('database schema is newer than this broker');
     const verifier = createHmac('sha256', this.vault.key)
       .update('ryoko-state-key-verifier-v1').digest('hex');
-    this.transaction(() => {
-      const stored = this.db.prepare("SELECT value FROM meta WHERE key='state_key_check'").get();
-      if (stored && stored.value !== verifier) {
-        throw new Error('RYOKO_STATE_KEY does not match the existing encrypted database');
-      }
-      if (!stored) this.db.prepare('INSERT INTO meta(key,value) VALUES(?,?)')
-        .run('state_key_check', verifier);
-      if (version === 0) this.db.exec('PRAGMA user_version=1');
-    });
+    try {
+      this.transaction(() => {
+        const stored = this.db.prepare("SELECT value FROM meta WHERE key='state_key_check'").get();
+        if (stored && stored.value !== verifier) {
+          throw new Error('RYOKO_STATE_KEY does not match the existing encrypted database');
+        }
+        if (!stored) this.db.prepare('INSERT INTO meta(key,value) VALUES(?,?)')
+          .run('state_key_check', verifier);
+        if (version === 0) this.db.exec('PRAGMA user_version=1');
+      });
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
     this.sessions = new DurableMap(this, 'session');
     this.desktopPairings = new DurableMap(this, 'pairing');
     this.desktopSessions = new DurableMap(this, 'desktop');
