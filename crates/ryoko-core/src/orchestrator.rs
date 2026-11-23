@@ -1669,13 +1669,17 @@ mod tests {
             self.identity.clone()
         }
 
-        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+        async fn execute_task(&self, ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
             let target = task.dependencies[0];
+            let evidence = ctx
+                .memory
+                .get(&validation_evidence_key(target))
+                .unwrap_or_else(|| format!("validator:{target}:unverified"));
             let output = serde_json::json!({
                 "verdict": "pass",
                 "summary": "reviewed compiled source and regression evidence",
                 "findings": [],
-                "evidence_refs": [format!("validator:{target}")],
+                "evidence_refs": [evidence],
             })
             .to_string();
             let mut result = TaskResult::success(task.id, output);
