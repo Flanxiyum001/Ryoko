@@ -56,11 +56,11 @@ Do not assume every contributor can run every platform-specific packaging or int
 
 ## Submit a pull request
 
-1. Commit to your branch and push to your fork or permitted repository branch.
+1. Commit to your branch and push to your fork or permitted repository branch. Direct pushes and force pushes to `main` are disallowed by an active repository ruleset.
 2. Open a PR targeting `main`; complete the [PR template](.github/PULL_REQUEST_TEMPLATE.md), including the verification results and any security considerations.
 3. Reference the relevant issue (e.g. `Fixes #123` when appropriate). Include screenshots or a short recording for visible UI changes.
-4. Respond to review feedback. CI success is necessary where checks apply, but it does not replace human review or prove security.
-5. Maintainers decide whether and when to accept changes. **Do not merge, release, or deploy without explicit authorization.**
+4. Verify required CI checks pass. The ruleset requires all 7 stable CI checks to be green (`Rust`, `Desktop UI / Tauri shell`, `Tauri shell`, `GitHub App / Desktop Workbench`, and `Native tests` on Ubuntu, Windows, and macOS).
+5. Maintainers decide whether and when to accept changes. **Do not merge, release, or deploy without explicit authorization.** Auto-merge is disabled. In this single-maintainer repository, PR authors cannot approve their own PRs on GitHub; the maintainer explicitly reviews all external contributions and authorizes final merges. See [ADR-016](docs/decisions/016-main-branch-protection-and-maintainer-review-policy.md) for repository governance details.
 
 ## Licensing and contributions
 
