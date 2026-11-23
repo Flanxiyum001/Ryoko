@@ -99,8 +99,9 @@ The broker blocks workflow edits, Git metadata changes, credential files, defaul
 
 ## 5. Issue-to-PR agent pipeline
 
-A signed webhook for an issue labeled `ryoko-fix` (or the older `ryoko:agent`)
-can start the full team pipeline. The repository must be listed in
+A signed GitHub `issues.labeled` webhook for the **newly applied** `ryoko-fix` label
+(or the older `ryoko:agent`) can start the full team pipeline. An unrelated label
+change or an issue-open event does **not** authorize an agent run. The repository must be listed in
 `RYOKO_AGENT_ALLOWED_REPO_IDS`, and the server also needs the CLI and clone root:
 
     export RYOKO_CLI_BIN="/absolute/path/to/ryoko"
@@ -116,6 +117,39 @@ The broker then:
 4. pushes that branch with a separate contents-write token; and
 5. opens a **draft** pull request whose body embeds the token ledger, the
    pre-merge security audit and the validation evidence.
+
+### Ryoko GitHub bot commands (experimental)
+
+Once you **register and install the GitHub App** and configure the trusted
+broker, an authorized maintainer can comment on an **issue** with one command
+on its own line:
+
+| Command | Behavior |
+| --- | --- |
+| `/ryoko run` | Start one issue-to-draft-PR job, unless this issue already has a recorded job |
+| `/ryoko status` | Ask the bot to comment with its in-memory running/completed/failed status |
+| `/ryoko retry` | Explicitly rerun a failed job after investigating any partial GitHub writes |
+
+For safety, the command parser accepts only exact commands on `issue_comment.created`
+events, **not** pull request comments or edited comments. The webhook must have a
+valid HMAC, the GitHub event `sender.login` must match the comment author, and
+the account must be in `RYOKO_ALLOWED_USERS`. This is a hard operator allowlist,
+not permission for anyone who can comment in the repo. Only repository IDs in
+`RYOKO_AGENT_ALLOWED_REPO_IDS` can run or get status responses.
+
+The bot posts a start comment, then either a draft PR link or a generic failure
+message to the issue. It obtains a **separate installation token scoped to that
+repository with only `issues:write`** for comments; the pipeline continues to
+use separately scoped clone, contents and PR tokens. The bot never merges,
+approves, deploys, writes directly to the default branch or edits GitHub workflows.
+
+**Operational limitation:** jobs and delivery deduplication are held in process
+memory. Restarting the broker loses job history, and multiple replicas can
+double-run requests. Do **not** enable this on valuable production repositories
+until a durable single-consumer queue and reconciliation/idempotency for partially
+pushed branches and PRs are implemented. A failed job may already have pushed a
+branch before it failed; inspect GitHub before using `/ryoko retry`. Run staging
+against a disposable repository first.
 
 ### MCP tools in the pipeline
 
@@ -155,6 +189,6 @@ CI runs Rust workspace formatting/Clippy/tests and the Node workbench syntax/sec
     npm run check
     npm test
 
-Automated coverage includes webhook HMAC and replay defense, RS256 App JWT, scoped tokens, OAuth state and account allowlists, CSRF, operation path restrictions, one-time approval, and secret-free Git clone arguments.
+Automated coverage includes webhook HMAC and replay defense, RS256 App JWT, scoped tokens, OAuth state and account allowlists, CSRF, exact maintainer-only issue bot commands, webhook job deduplication, operation path restrictions, one-time approval, and secret-free Git clone arguments.
 
 After registering the real App, perform manual staging integration against a disposable repository: OAuth login, selected repo read, clone, branch, commit, PR, CI read and webhook delivery. Do not approve production access before this is complete.
