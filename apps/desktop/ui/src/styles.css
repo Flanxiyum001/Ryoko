@@ -1113,3 +1113,63 @@ img.empty-mark { width: 112px; height: 112px; border-radius: 22px; object-fit: c
 .update-close { position: absolute; top: 8px; right: 8px; border: 0; background: none; color: var(--muted); font-size: 16px; cursor: pointer; }
 .update-close:hover { color: var(--text-strong); }
 .settings-updates { font-size: 12px; margin-right: 10px; }
+
+
+/* Chat is a first-class right-hand inspector panel, not a modal or CLI wrapper. */
+.agent-chat, .review-inbox {
+  display: flex; flex-direction: column; flex: none;
+  border-bottom: 1px solid var(--border); min-width: 0;
+}
+.agent-chat .panel-head, .review-inbox .panel-head { background: #252a32; }
+.chat-history {
+  height: clamp(160px, 29vh, 380px); overflow-y: auto;
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 10px;
+  scrollbar-width: thin;
+}
+.chat-history > .hint { margin: 0; }
+.chat-turn { border: 1px solid var(--border); border-radius: 7px; padding: 8px; background: #20262e; min-width: 0; }
+.chat-user { background: #263549; border-color: #314a64; }
+.chat-turn strong { color: var(--accent); font-size: 10px; letter-spacing: .02em; }
+.chat-turn-body {
+  margin: 6px 0 0; color: var(--text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere; white-space: pre-wrap; max-height: 260px; overflow-y: auto;
+}
+.chat-error { color: var(--danger); font-size: 11px; overflow-wrap: anywhere; }
+.chat-turn > button { margin-top: 9px; }
+.chat-compose { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.chat-compose textarea, .chat-file-row input {
+  width: 100%; min-width: 0; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; padding: 7px;
+  font: 12px/1.4 inherit; resize: vertical;
+}
+.chat-compose textarea:focus, .chat-file-row input:focus { outline: 1px solid var(--accent); }
+.chat-attachments { display: flex; gap: 4px; flex-wrap: wrap; }
+.chat-attachments:empty { display: none; }
+.chat-chip {
+  background: #253849; border: 1px solid #375370; color: #c8e5ff;
+  padding: 2px 6px; border-radius: 4px; cursor: pointer; font: 10px ui-monospace, monospace;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-file-row, .chat-compose-actions { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.chat-file-row input { flex: 1; }
+.chat-compose-actions .hint { padding: 0; margin-right: auto; font-size: 10px; flex: 1; }
+.chat-compose-actions button { flex: none; }
+.review-inbox-list { max-height: 230px; overflow-y: auto; padding: 4px 10px 8px; }
+.review-inbox-item { border-bottom: 1px solid var(--border); padding: 7px 0; }
+.review-inbox-item:last-child { border-bottom: 0; }
+.review-inbox-heading { font-size: 11px; font-weight: 600; margin: 0 0 4px; overflow-wrap: anywhere; }
+.review-inbox-path { display: flex; align-items: center; gap: 7px; margin-top: 5px; }
+.review-inbox-path code { min-width: 0; flex: 1; font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+.proposal-toolbar { padding: 7px 10px; border-bottom: 1px solid var(--border); max-height: 220px; overflow: auto; background: var(--panel); }
+.proposal-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; }
+.proposal-hunks { display: flex; gap: 5px; flex-wrap: wrap; padding-top: 8px; }
+.proposal-hunk { display: flex; gap: 5px; align-items: center; padding: 4px 6px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel-raised); }
+.proposal-hunk label { font-size: 11px; cursor: pointer; }
+.proposal-hunk input { accent-color: var(--accent); }
+.usage-meter { color: #b4d4eb; font-size: 10px; white-space: nowrap; border-left: 1px solid var(--border); padding-left: 8px; }
+.mission-node-usage { font: 9px ui-monospace, monospace; color: #b4d4eb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 960px) {
+  .usage-meter { display: none; }
+  .layout { grid-template-columns: 56px 220px minmax(0, 1fr) 315px; }
+  .layout.hide-explorer { grid-template-columns: 56px minmax(0, 1fr) 315px; }
+}
