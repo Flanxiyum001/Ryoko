@@ -202,8 +202,13 @@ struct ProposalList {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubJob {
+    #[serde(default)]
     issue: u64,
     status: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default)]
     number: Option<u64>,
 }
@@ -488,4 +493,49 @@ mod tests {
     fn bridge_server_is_fixed_to_localhost() {
         assert_eq!(BROKER, "http://127.0.0.1:4173");
     }
+}
+
+#[tauri::command]
+pub async fn start_github_goal(
+    installation_id: u64,
+    repo_id: u64,
+    goal: String,
+    state: State<'_, GitHubQueueState>,
+    app: AppHandle,
+) -> Result<GitHubJob, String> {
+    checked_repo(installation_id, repo_id)?;
+    if goal.trim().is_empty() || goal.len() > 4000 || goal.contains('\0') {
+        return Err("engineering goal must contain 1–4000 safe characters".into());
+    }
+    let preview = goal.chars().take(450).collect::<String>();
+    let description = format!(
+        "Start an autonomous Ryoko engineering job for repository ID {repo_id} (installation {installation_id})?\n\nGoal:\n{preview}\n\nThis may incur model costs and publish a DRAFT PR. No merges or default-branch changes are allowed."
+    );
+    let confirmed = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(description)
+            .title("Ryoko — authorize independent engineering goal")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Run agents".to_owned(),
+                "Deny".to_owned(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "could not display OS engineering approval".to_owned())?;
+    if !confirmed {
+        return Err("engineering goal denied in OS confirmation".into());
+    }
+    let response = client()?
+        .post(format!("{BROKER}/api/desktop/goals"))
+        .bearer_auth(token(&state)?)
+        .json(&serde_json::json!({
+            "installationId": installation_id,
+            "repoId": repo_id,
+            "goal": goal,
+        }))
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    bounded_json(response).await
 }
