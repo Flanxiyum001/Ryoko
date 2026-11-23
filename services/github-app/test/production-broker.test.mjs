@@ -76,6 +76,12 @@ test('separate HTTP brokers share OAuth, one-shot desktop pairing, webhooks and 
     assert.equal((await post(baseA + '/api/desktop/exchange', { code })).status, 401);
     const headers = { Authorization: 'Bearer ' + token };
 
+    const verifiedRepo = await fetch(
+      baseB + '/api/desktop/authorized-repository?installationId=17&repoId=41',
+      { headers },
+    );
+    assert.equal(verifiedRepo.status, 200);
+    assert.equal((await verifiedRepo.json()).repository, 'approved-owner/repo');
     const goal = await post(baseA + '/api/desktop/goals', {
       installationId: 17, repoId: 41, goal: 'Implement better tests for the editor',
     }, headers);
