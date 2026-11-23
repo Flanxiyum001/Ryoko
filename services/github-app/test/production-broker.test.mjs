@@ -118,6 +118,8 @@ test('separate HTTP brokers share OAuth, one-shot desktop pairing, webhooks and 
     assert.equal((await duplicate.json()).duplicate, true);
     assert.equal(stateA.jobs.get('41:9').status, 'queued');
 
+    assert.equal((await fetch(baseA + '/ready')).status, 503,
+      'API liveness is not worker readiness');
     const executions = [];
     const runner = async ({ request }) => {
       executions.push(request.kind || 'issue');
@@ -125,6 +127,10 @@ test('separate HTTP brokers share OAuth, one-shot desktop pairing, webhooks and 
     };
     w1 = startGithubWorker({ store: stateA, broker, settings, runPipeline: runner, pollMs: 15 });
     w2 = startGithubWorker({ store: stateB, broker, settings, runPipeline: runner, pollMs: 15 });
+    for (let i = 0; i < 30 && (await fetch(baseB + '/ready')).status !== 200; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal((await fetch(baseA + '/ready')).status, 200);
     for (let i = 0; i < 100 && stateA.listJobs(41).some((job) => job.status !== 'completed'); i++) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
