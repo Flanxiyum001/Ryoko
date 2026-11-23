@@ -103,7 +103,7 @@ fn load_context(root: &std::path::Path, files: &[String]) -> Result<String, Stri
         let content = fs::read_to_string(&canonical)
             .map_err(|error| format!("cannot attach {path} as UTF-8: {error}"))?;
         context.push_str("\n<workspace-file path=\"");
-        context.push_str(&path.replace(['<', '>', '\"'], "_"));
+        context.push_str(&path.replace('<', "_").replace('>', "_").replace('"', "_"));
         context.push_str("\">\n");
         context.push_str(&content);
         context.push_str("\n</workspace-file>\n");
@@ -151,7 +151,7 @@ pub async fn agent_chat(
         prompt.push_str("\n\n<editor-selection");
         if let Some(path) = args.active_path.as_deref() {
             prompt.push_str(" path=\"");
-            prompt.push_str(&path.chars().take(240).collect::<String>().replace(['<', '>', '\"'], "_"));
+            prompt.push_str(&path.chars().take(240).collect::<String>().replace('<', "_").replace('>', "_").replace('"', "_"));
             prompt.push('\"');
         }
         prompt.push_str(">\n");
