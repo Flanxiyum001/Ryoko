@@ -1540,6 +1540,10 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
                 .open(&staged)?;
             writer.write_all(change.content.as_bytes())?;
             writer.sync_all()?;
+            // Replacing an existing executable must preserve its permission bits.
+            if let Ok(existing) = std::fs::metadata(&target) {
+                std::fs::set_permissions(&staged, existing.permissions())?;
+            }
             Ok(())
         })();
         if let Err(error) = write {
@@ -1767,6 +1771,24 @@ mod tests {
                     .starts_with(".ryoko-")
             }));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multifile_batch_preserves_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("run.sh");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        apply_batch(
+            root.path(),
+            &[ProposedChange::new("run.sh", "#!/bin/sh\nexit 1\n")],
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&executable).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
     }
 
     #[cfg(unix)]
