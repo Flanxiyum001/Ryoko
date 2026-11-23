@@ -137,21 +137,6 @@ interface TerminalStatus {
   sessionId: number | null;
 }
 
-interface DapMessage {
-  sessionId: number;
-  message: string;
-}
-
-interface DapLog {
-  sessionId: number;
-  message: string;
-}
-
-interface DapStatus {
-  running: boolean;
-  sessionId: number | null;
-}
-
 interface SandboxInitResult {
   image: string;
   dockerfile: string;
