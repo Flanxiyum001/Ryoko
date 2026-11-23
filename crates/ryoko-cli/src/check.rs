@@ -49,8 +49,8 @@ impl CommandValidator {
     /// Run a compilation/static build before expensive full-suite tests.
     /// Both commands execute through the same isolated build sandbox.
     pub fn with_compilation_gate(mut self, command: Option<String>) -> Self {
-        self.compilation = command
-            .filter(|value| !value.trim().is_empty() && value != &self.command);
+        self.compilation =
+            command.filter(|value| !value.trim().is_empty() && value != &self.command);
         self
     }
 
@@ -233,7 +233,10 @@ impl ChangeValidator for CommandValidator {
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "signal".to_owned());
             Ok(ValidationReport::failed(
-                format!("regression verification failed: {} (exit {status})", self.command),
+                format!(
+                    "regression verification failed: {} (exit {status})",
+                    self.command
+                ),
                 logs,
                 started.elapsed(),
             ))
@@ -356,7 +359,9 @@ mod tests {
             Duration::from_secs(5),
         )
         .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None))
-        .with_compilation_gate(Some("echo 'error[E0425]: unresolved name' >&2; exit 9".into()));
+        .with_compilation_gate(Some(
+            "echo 'error[E0425]: unresolved name' >&2; exit 9".into(),
+        ));
         let report = validator
             .validate(&changes(dir.path(), true))
             .await
@@ -383,7 +388,12 @@ mod tests {
             .unwrap();
         assert!(!report.passed);
         assert!(report.summary.contains("regression verification failed"));
-        assert!(report.logs.iter().any(|line| line.contains("compilation passed")));
+        assert!(
+            report
+                .logs
+                .iter()
+                .any(|line| line.contains("compilation passed"))
+        );
         assert!(report.logs.iter().any(|line| line.contains("payment_flow")));
     }
 
@@ -391,8 +401,11 @@ mod tests {
     fn detects_compile_command_only_for_supported_manifests() {
         let root = TempDir::new().unwrap();
         assert_eq!(detect_compile_command(root.path()), None);
-        std::fs::write(root.path().join("package.json"), r#"{"scripts":{"test":"vitest"}}"#)
-            .unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"test":"vitest"}}"#,
+        )
+        .unwrap();
         assert_eq!(detect_compile_command(root.path()), None);
         std::fs::write(
             root.path().join("package.json"),
