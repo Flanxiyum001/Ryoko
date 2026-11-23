@@ -86,11 +86,4 @@ actual contributor's Git authorship; never impersonate the maintainer.
 Changes made by an authorized assistant on the maintainer's behalf must
 follow the maintainer's configured Git identity.
 
-No AI attribution anywhere in this repository:
-
-- no `Co-Authored-By` trailers naming an AI tool, model or agent;
-- no "Generated with" or "Made with" footer in commit messages;
-- no attribution lines, badges or notes in source comments, docs, README files
-  or release notes.
-
 Commit messages end at their own last line. Do not add a trailer of any kind.
