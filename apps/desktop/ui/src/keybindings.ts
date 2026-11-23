@@ -11,7 +11,10 @@ export interface Keybinding {
 }
 
 export const DEFAULT_KEYBINDINGS: readonly Keybinding[] = [
+  { action: 'workbench.commandPalette', chord: 'MOD+SHIFT+P', title: 'Show all commands' },
   { action: 'workbench.quickOpen', chord: 'MOD+P', title: 'Quick open file' },
+  { action: 'view.toggleSidebar', chord: 'MOD+B', title: 'Toggle primary side bar' },
+  { action: 'view.togglePanel', chord: 'MOD+J', title: 'Toggle bottom panel' },
   { action: 'workbench.search', chord: 'MOD+SHIFT+F', title: 'Search workspace' },
   { action: 'workbench.replace', chord: 'MOD+SHIFT+R', title: 'Search and replace' },
   { action: 'workbench.changes', chord: 'MOD+SHIFT+G', title: 'Toggle change drawer' },

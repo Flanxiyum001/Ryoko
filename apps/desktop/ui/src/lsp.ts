@@ -139,6 +139,7 @@ export class LspClient {
             completion: { completionItem: { snippetSupport: true } },
             hover: { contentFormat: ['markdown', 'plaintext'] },
             definition: {},
+            documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           },
           workspace: { workspaceFolders: true, configuration: true },
         },
