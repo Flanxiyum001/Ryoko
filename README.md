@@ -344,5 +344,5 @@ Requirements: Node.js 22+, Git for server-side clones. After configuring environ
 
     node services/github-app/src/index.mjs
 
-Open http://127.0.0.1:4173 and connect your GitHub App installation. **This separate GitHub App workbench** is a browser shell, not the Tauri/Monaco desktop IDE described above. The packaged desktop has an experimental, read-only GitHub queue bridge to the local broker; the broker is not embedded in the installer. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
+Open http://127.0.0.1:4173 and connect your GitHub App installation. **This separate GitHub App workbench** is a browser shell, not the Tauri/Monaco desktop IDE described above. The packaged desktop now has an experimental GitHub Mission Control bridge to the local broker: it can start allowlisted issue jobs, inspect CI, queue branch/commit/draft-PR/review actions and explicitly approve or reject them. The broker is not embedded in the installer. For safer single-process recovery, configure the private \`RYOKO_BOT_STATE_FILE\` ledger. Nothing auto-merges or deploys. Git clone and existing Rust pre-flight commands should only run inside trusted, properly sandboxed environments.
 
