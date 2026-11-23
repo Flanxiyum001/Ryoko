@@ -727,6 +727,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
   });
   const worker = stateDb && ['worker','all'].includes(settings.workerMode)
     ? startGithubWorker({ store: stateDb, broker: client, settings, runPipeline }) : null;
+  server.stopGithubWorker = () => worker ? worker.stop() : Promise.resolve();
   server.on('close', () => { if (worker) void worker.stop(); });
   return server;
 }
