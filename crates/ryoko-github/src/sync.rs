@@ -550,6 +550,15 @@ mod tests {
         path
     }
 
+    /// Reads a file out of a Git checkout. A host whose Git config converts line
+    /// endings on checkout (`core.autocrlf`) hands back CRLF, so the comparison
+    /// is made on the content the remote carried, not on the host's EOL policy.
+    fn checkout_text(path: &Path) -> String {
+        std::fs::read_to_string(path)
+            .expect("checkout reads")
+            .replace("\r\n", "\n")
+    }
+
     fn git_in(dir: &Path, args: &[&str]) {
         let status = StdCommand::new("git")
             .current_dir(dir)
@@ -705,10 +714,7 @@ mod tests {
         assert_eq!(status(&work).await.unwrap().behind, 1);
         let pulled = run(&work, SyncAction::Pull, None).await.unwrap();
         assert!(pulled.up_to_date);
-        assert_eq!(
-            std::fs::read_to_string(work.join("README.md")).unwrap(),
-            "three\n"
-        );
+        assert_eq!(checkout_text(&work.join("README.md")), "three\n");
     }
 
     #[tokio::test]
@@ -744,10 +750,7 @@ mod tests {
         let error = run(&work, SyncAction::Pull, None).await.unwrap_err();
         assert!(error.to_string().contains("fast-forward"));
         // The local commit is intact: nothing was rewritten or merged.
-        assert_eq!(
-            std::fs::read_to_string(work.join("README.md")).unwrap(),
-            "local\n"
-        );
+        assert_eq!(checkout_text(&work.join("README.md")), "local\n");
     }
 
     #[tokio::test]
