@@ -16,6 +16,7 @@
 | [security/EXECUTION_SANDBOX.md](security/EXECUTION_SANDBOX.md) | Restricted project execution |
 | [product/UX_SPECIFICATION.md](product/UX_SPECIFICATION.md) | Layout, modes, interaction |
 | [releases/RELEASE_CRITERIA.md](releases/RELEASE_CRITERIA.md) | Gates and evidence |
+| [performance/QUICK_OPEN_BENCHMARK.md](performance/QUICK_OPEN_BENCHMARK.md) | Quick-open 10k fixture, p50/p95 method and recorded results |
 
 Existing project documents:
 
