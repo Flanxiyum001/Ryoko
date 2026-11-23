@@ -428,8 +428,8 @@ export interface MissionLayout {
   edges: { from: PositionedTask; to: PositionedTask }[];
 }
 
-const NODE_WIDTH = 154;
-const NODE_HEIGHT = 56;
+const NODE_WIDTH = 180;
+const NODE_HEIGHT = 92;
 const X_GAP = 42;
 const Y_GAP = 20;
 const PADDING = 18;

@@ -111,12 +111,30 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          # In-app updates (docs/decisions/017-in-app-updates.md). The public
+          # key is a repository variable; the private key is a secret that only
+          # the Tauri CLI reads. Without both, builds ship without the updater.
+          RYOKO_UPDATER_PUBKEY: ${{ vars.RYOKO_UPDATER_PUBKEY }}
+          RYOKO_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/desktop-updates/latest.json
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ -n "$RYOKO_UPDATER_PUBKEY" ] && [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::RYOKO_UPDATER_PUBKEY is set but the TAURI_SIGNING_PRIVATE_KEY secret is missing."
+            exit 1
+          fi
+          if [ -z "$RYOKO_UPDATER_PUBKEY" ]; then
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          fi
+          # Every published build gets an increasing version, matching its
+          # release tag, so installed apps can tell when they are out of date.
+          VERSION="$(node --input-type=module -e "import { releaseVersionFromRef } from './scripts/updater/release_config.mjs'; console.log(releaseVersionFromRef(process.env.GITHUB_REF, process.env.GITHUB_RUN_NUMBER));")"
+          node scripts/updater/release_config.mjs src-tauri/preview-bundle.json "$VERSION" "$RUNNER_TEMP/release-config.json"
           # The override includes the CLI engine; production signing settings
           # are deliberately not changed by this testing workflow.
           npm run tauri build -- --target "$TARGET" \
-            --config src-tauri/preview-bundle.json
+            --config "$RUNNER_TEMP/release-config.json"
 
       - name: Verify expected installers exist
         shell: bash
@@ -160,6 +178,10 @@ jobs:
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe.sig
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.sig
 
   preview-release:
     name: Publish desktop prerelease and checksums
@@ -210,6 +232,8 @@ jobs:
           mapfile -d '' INSTALLERS < <(find dist -type f \
             \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \
                -o -name '*.deb' -o -name '*.AppImage' \) -print0)
+          mapfile -d '' UPDATER_ASSETS < <(find dist -type f \
+            \( -name '*.sig' -o -name '*.app.tar.gz' \) -print0)
           if [ "${#INSTALLERS[@]}" -lt 3 ]; then
             echo "::error::Missing platform installers, refusing to publish."
             exit 1
@@ -248,8 +272,10 @@ jobs:
 
           GitHub Packages (CLI-only): `ghcr.io/flanxiyum001/ryoko-cli:preview`
 
-          No automatic updater, paid model credits, or signing certificates
-          are included. These previews are not production releases.
+          Installed builds can show "New update available" and update
+          themselves once the maintainer has configured an update signing
+          key. No paid model credits or OS signing certificates are included.
+          These previews are not production releases.
           NOTES
           printf '\nBuilt from commit: `%s`\n' "$GITHUB_SHA" >> "$RUNNER_TEMP/release-notes.md"
           # Published as the repository's Latest release by policy, even for
@@ -259,8 +285,39 @@ jobs:
             --latest \
             --title "Ryoko Desktop $TAG (Alpha Testing)" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
-            "${INSTALLERS[@]}" dist/SHA256SUMS.txt
+            "${INSTALLERS[@]}" "${UPDATER_ASSETS[@]}" dist/SHA256SUMS.txt
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout updater scripts
+        if: vars.RYOKO_UPDATER_PUBKEY != ''
+        uses: actions/checkout@v5
+        with:
+          path: source
+          sparse-checkout: apps/desktop/scripts/updater
+
+      - name: Publish in-app update manifest
+        if: vars.RYOKO_UPDATER_PUBKEY != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.publish.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#desktop-preview-v}"
+          printf 'Ryoko Desktop %s.\n\nSee https://github.com/%s/releases/tag/%s for details.\n' \
+            "$VERSION" "$GH_REPO" "$TAG" > "$RUNNER_TEMP/update-notes.txt"
+          node source/apps/desktop/scripts/updater/update_manifest.mjs \
+            dist "$TAG" "$VERSION" "$GH_REPO" "$RUNNER_TEMP/update-notes.txt" "$RUNNER_TEMP/latest.json"
+          # The manifest lives on one fixed prerelease so its URL never changes
+          # and it never becomes the repository's Latest release. Installed apps
+          # verify each artifact's signature before installing it.
+          if ! gh release view desktop-updates > /dev/null 2>&1; then
+            gh release create desktop-updates --prerelease --latest=false \
+              --target "$GITHUB_SHA" --title "Ryoko Desktop update manifest" \
+              --notes "Machine-readable manifest for Ryoko's in-app updater. Download installers from the versioned releases instead."
+          fi
+          gh release upload desktop-updates "$RUNNER_TEMP/latest.json" --clobber
 
   publish-cli-package:
     name: Publish Ryoko CLI to GitHub Packages (GHCR)
