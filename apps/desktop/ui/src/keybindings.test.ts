@@ -20,7 +20,9 @@ describe('resolveKeybindings', () => {
     const resolved = resolveKeybindings();
     expect(resolved.byAction.get('editor.inlineEdit')).toBe('MOD+K');
     expect(resolved.byAction.get('workbench.quickOpen')).toBe('MOD+P');
+    expect(resolved.byAction.get('workbench.debug')).toBe('MOD+SHIFT+D');
     expect(resolved.byChord.get('MOD+P')).toBe('workbench.quickOpen');
+    expect(resolved.byChord.get('MOD+SHIFT+D')).toBe('workbench.debug');
     expect(resolved.byChord.get('MOD+K')).toBe('editor.inlineEdit');
   });
 

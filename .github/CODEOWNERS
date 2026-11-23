@@ -1,0 +1,4 @@
+# Repository ownership and review routing.
+# GitHub requests code-owner review on outside contributions when enabled.
+# This file does NOT enforce approvals or stop merges without a branch ruleset.
+* @Flanxiyum001

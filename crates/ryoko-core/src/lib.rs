@@ -15,6 +15,7 @@ pub mod context;
 pub mod diagnostic;
 pub mod encoding;
 pub mod error;
+pub mod eval;
 pub mod event;
 pub mod iacp;
 pub mod index;
@@ -48,6 +49,11 @@ pub use context::{
 };
 pub use diagnostic::{DiagnosticLevel, TaskDiagnostic, TaskDiagnosticSink};
 pub use error::{CoreError, CoreResult};
+pub use eval::{
+    EvaluationConfig, EvaluationFixture, EvaluationMode, EvaluationReport, EvaluationResult,
+    EvaluationSummary, EvaluationTaskType, ExpectedOutcome, FailureClassification,
+    builtin_evaluation_fixtures, run_evaluation_fixture, run_evaluation_suite,
+};
 pub use event::{EventSink, OrchestratorEvent};
 pub use iacp::{
     AuditEntry, IacpEnvelope, IacpError, IacpPayload, IacpPolicy, IacpRouter, IacpService,
