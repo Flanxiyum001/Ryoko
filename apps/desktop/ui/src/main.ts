@@ -19,6 +19,8 @@ import {
   type ChangesSnapshot,
 } from './changes_view';
 import { mountSettingsDialog } from './settings_view';
+import { mountOnboarding } from './onboarding';
+import { createNotifier } from './toasts';
 import { InlineEditController } from './inline_edit_view';
 import { DebugViewController } from './debug_view';
 import {
@@ -232,7 +234,7 @@ const lspStatus = element('lspStatus');
 const lspPills = element('lspPills');
 const changesSummary = element('changesSummary');
 const changesList = element('changesList');
-const editorStatus = element('editorStatus');
+const notify = createNotifier();
 const cursorPos = element('cursorPos');
 const languageMode = element<HTMLSelectElement>('languageMode');
 const runActiveFile = element<HTMLButtonElement>('runActiveFile');
@@ -507,7 +509,7 @@ const inlineEdit = new InlineEditController({
 });
 
 function setStatus(message: string): void {
-  editorStatus.textContent = message;
+  notify(message);
 }
 
 function showBottom(panel: 'terminal' | 'debug' | 'search' | 'task'): void {
@@ -864,14 +866,16 @@ async function loadFiles(): Promise<void> {
   renderFiles();
 }
 
-async function openFolder(): Promise<void> {
+let onboarding: ReturnType<typeof mountOnboarding> | null = null;
+
+async function openFolder(selectedPath?: string): Promise<void> {
   if (workspaceSwitching || savingFiles.size) {
     setStatus('Wait for the current workspace operation to finish.');
     return;
   }
   workspaceSwitching = true;
   try {
-    const selected = await open({ directory: true, multiple: false });
+    const selected = selectedPath ?? await open({ directory: true, multiple: false });
     if (typeof selected !== 'string') return;
     if ([...openFiles.values()].some((file) => file.dirty)
       && !window.confirm('Switch workspaces and discard unsaved edits?')) {
@@ -891,6 +895,8 @@ async function openFolder(): Promise<void> {
     }
     fileOpenGeneration += 1;
     const info = await invoke<WorkspaceInfo>('open_workspace', { path: selected });
+    onboarding?.workspaceOpened(info.root);
+    void invoke('onboarding_remember_folder', { path: info.root }).catch(() => undefined);
     // Open the new workspace successfully before discarding any old editor
     // buffers. Changing a folder must not erase unsaved content on failure.
     inlineEdit.reject();
@@ -980,7 +986,7 @@ function renderAgentSessions(): void {
   if (agentSessions.length === 0) {
     const hint = document.createElement('p');
     hint.className = 'hint';
-    hint.textContent = 'No active or published worktree sessions. Start one with ryoko run.';
+    hint.textContent = 'No agent sessions yet. Open Mission Control, describe a goal and choose Run.';
     agentSessionList.append(hint);
     return;
   }
@@ -2246,6 +2252,14 @@ mountConnectors(setStatus);
 mountMarketplaceBrowser(setStatus);
 mountSearchPanel({ openFile, setStatus });
 mountSettingsDialog({ setStatus });
+onboarding = mountOnboarding({
+  openFolder: () => openFolder(),
+  openFolderPath: (path) => openFolder(path),
+  openMission: () => activateView('mission'),
+  hasWorkspace: () => Boolean(state.root),
+  prepareTask: (goal) => { runGoal.value = goal; },
+  notify: setStatus,
+});
 const registeredLanguages = new Set(monaco.languages.getLanguages().map((language) => language.id));
 for (const language of LANGUAGE_IDS) {
   if (!registeredLanguages.has(language)) monaco.languages.register({ id: language });
