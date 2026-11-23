@@ -118,7 +118,7 @@ impl SpecDrift {
     }
 
     pub fn describe(&self) -> String {
-        let spec = self.spec.display();
+        let spec = portable_path(&self.spec);
         if self.unrecorded {
             return format!("{spec}: no recorded baseline");
         }
@@ -142,10 +142,16 @@ impl SpecDrift {
     }
 }
 
+// Persist and display relative repository paths with portable separators.
+// Windows PathBuf::display() renders backslashes even for an unchanged file.
+fn portable_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn join(paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(|path| path.display().to_string())
+        .map(|path| portable_path(path))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -347,19 +353,16 @@ impl SpecIndex {
     /// number of specs recorded.
     pub fn record(&mut self, root: &Path) -> CoreResult<usize> {
         let links = discover(root)?;
-        self.specs.retain(|spec, _| {
-            links
-                .iter()
-                .any(|link| link.spec.to_string_lossy() == *spec)
-        });
+        self.specs
+            .retain(|spec, _| links.iter().any(|link| portable_path(&link.spec) == *spec));
         for link in &links {
-            let key = link.spec.to_string_lossy().to_string();
+            let key = portable_path(&link.spec);
             let digest = spec_digest(root, &link.spec).unwrap_or(0);
             let files = link
                 .files
                 .iter()
                 .map(|file| {
-                    let key = file.to_string_lossy().to_string();
+                    let key = portable_path(file);
                     let digest = read_digest(root, file).unwrap_or(0);
                     (key, digest)
                 })
@@ -373,12 +376,9 @@ impl SpecIndex {
     pub fn drift(&self, root: &Path) -> CoreResult<Vec<SpecDrift>> {
         let mut drift = Vec::new();
         for link in discover(root)? {
-            let key = link.spec.to_string_lossy().to_string();
-            let current: BTreeSet<String> = link
-                .files
-                .iter()
-                .map(|file| file.to_string_lossy().to_string())
-                .collect();
+            let key = portable_path(&link.spec);
+            let current: BTreeSet<String> =
+                link.files.iter().map(|file| portable_path(file)).collect();
             let Some(record) = self.specs.get(&key) else {
                 drift.push(SpecDrift {
                     spec: link.spec,
@@ -435,9 +435,10 @@ impl SpecIndex {
 
     /// Reverse lookup: which specs claim this file.
     pub fn specs_for(&self, file: &str) -> Vec<&str> {
+        let file = file.replace('\\', "/");
         self.specs
             .iter()
-            .filter(|(_, record)| record.files.contains_key(file))
+            .filter(|(_, record)| record.files.contains_key(&file))
             .map(|(spec, _)| spec.as_str())
             .collect()
     }
@@ -455,11 +456,11 @@ pub fn drift_tasks(drift: &[SpecDrift], role: AgentRole) -> Vec<Task> {
                     Task::new(
                         format!(
                             "Review spec {} and confirm its linked code is up to date",
-                            entry.spec.display()
+                            portable_path(&entry.spec)
                         ),
                         role.clone(),
                     )
-                    .with_metadata(SPEC_METADATA, entry.spec.to_string_lossy().to_string())
+                    .with_metadata(SPEC_METADATA, portable_path(&entry.spec))
                     .with_metadata(KIND_METADATA, DRIFT_KIND),
                 );
             }
@@ -468,17 +469,17 @@ pub fn drift_tasks(drift: &[SpecDrift], role: AgentRole) -> Vec<Task> {
         let description = format!(
             "Bring {} in line with spec {} ({})",
             join(&files),
-            entry.spec.display(),
+            portable_path(&entry.spec),
             entry.describe()
         );
         tasks.push(
             Task::new(description, role.clone())
-                .with_metadata(SPEC_METADATA, entry.spec.to_string_lossy().to_string())
+                .with_metadata(SPEC_METADATA, portable_path(&entry.spec))
                 .with_metadata(
                     FILES_METADATA,
                     files
                         .iter()
-                        .map(|file| file.to_string_lossy().to_string())
+                        .map(|file| portable_path(file))
                         .collect::<Vec<_>>()
                         .join(","),
                 )
@@ -555,6 +556,22 @@ unclosed fence hides this: <!-- ryoko:implements after/fence.rs -->
         assert!(parse_links("<!-- ryoko:implements -->").is_empty());
         assert!(parse_links("no comments here").is_empty());
         assert!(parse_links("<!-- ryoko:implements unterminated").is_empty());
+    }
+
+    #[test]
+    fn portable_paths_keep_stable_forward_slash_record_keys_and_drift_labels() {
+        let path = Path::new("docs").join("rfc.md");
+        assert_eq!(portable_path(&path), "docs/rfc.md");
+        let drift = SpecDrift {
+            spec: path,
+            changed: vec![Path::new("src").join("lib.rs")],
+            missing: vec![],
+            added: vec![],
+            removed: vec![],
+            spec_changed: false,
+            unrecorded: false,
+        };
+        assert!(drift.describe().contains("changed: src/lib.rs"));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! other files without reading every body again. The database lives beside the
 //! worktree lease state at `.ryoko/state/symbols.sqlite3`.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, params};
@@ -47,11 +48,20 @@ pub struct WorkspaceIndex {
 
 impl WorkspaceIndex {
     pub fn open(path: &Path) -> Result<Self, IndexError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        // SQLite's NOFOLLOW flag rejects a database path reached through a
+        // symlinked ancestor on macOS (for example /var -> /private/var).
+        // Resolve the containing directory, but never resolve the database
+        // file itself: NOFOLLOW must still reject a symlinked database.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let canonical_parent = std::fs::canonicalize(parent)?;
+        let filename = path.file_name().ok_or(IndexError::InvalidPath)?;
+        let database_path = canonical_parent.join(filename);
         let connection = Connection::open_with_flags(
-            path,
+            &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -75,7 +85,8 @@ impl WorkspaceIndex {
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS files (
                  path TEXT PRIMARY KEY,
-                 language TEXT NOT NULL
+                 language TEXT NOT NULL,
+                 content_hash TEXT NOT NULL DEFAULT ''
              );
              CREATE TABLE IF NOT EXISTS symbols (
                  path TEXT NOT NULL,
@@ -96,6 +107,22 @@ impl WorkspaceIndex {
              CREATE INDEX IF NOT EXISTS calls_by_callee ON calls(callee);
              CREATE INDEX IF NOT EXISTS calls_by_caller ON calls(caller_path, caller);",
         )?;
+
+        // Existing databases predate content hashing. SQLite ADD COLUMN with a
+        // default is compatible with their existing rows and is safe to repeat.
+        let has_hash = {
+            let mut statement = self.connection.prepare("PRAGMA table_info(files)")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|name| name == "content_hash")
+        };
+        if !has_hash {
+            self.connection.execute(
+                "ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -142,6 +169,85 @@ impl WorkspaceIndex {
         Ok(count)
     }
 
+    /// A stored content hash, or None when the file has not been indexed.
+    /// A blank hash identifies a record written by the older full-rebuild index.
+    pub fn content_hash(&self, path: &str) -> Result<Option<String>, IndexError> {
+        use rusqlite::OptionalExtension;
+
+        let value = self
+            .connection
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    /// Applies only changed, already-parsed files and removes disappeared paths.
+    /// The caller must calculate each hash from source bytes before parsing,
+    /// so unchanged files do not need to enter the tree-sitter pipeline.
+    pub fn sync_files(
+        &mut self,
+        changed: &[(FileContext, String)],
+        present: &BTreeSet<String>,
+    ) -> Result<usize, IndexError> {
+        let transaction = self.connection.transaction()?;
+        let old_paths = {
+            let mut statement = transaction.prepare("SELECT path FROM files")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for path in old_paths {
+            if !present.contains(&path) {
+                transaction.execute("DELETE FROM symbols WHERE path = ?1", params![path])?;
+                transaction.execute("DELETE FROM calls WHERE caller_path = ?1", params![path])?;
+                transaction.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+            }
+        }
+
+        for (file, hash) in changed {
+            if !present.contains(&file.path) {
+                continue;
+            }
+            transaction.execute("DELETE FROM symbols WHERE path = ?1", params![file.path])?;
+            transaction.execute(
+                "DELETE FROM calls WHERE caller_path = ?1",
+                params![file.path],
+            )?;
+            transaction.execute(
+                "INSERT OR REPLACE INTO files(path, language, content_hash) VALUES (?1, ?2, ?3)",
+                params![file.path, file.language, hash],
+            )?;
+            for symbol in &file.symbols {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO symbols
+                     (path, name, kind, signature, start_line, end_line)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        file.path,
+                        symbol.name,
+                        symbol.kind,
+                        bound(&symbol.signature, MAX_SIGNATURE_CHARS),
+                        symbol.start_line as i64,
+                        symbol.end_line as i64,
+                    ],
+                )?;
+            }
+            for call in &file.calls {
+                transaction.execute(
+                    "INSERT INTO calls(caller_path, caller, callee, line)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![file.path, call.caller, call.callee, call.line as i64],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(changed.len())
+    }
+
     pub fn symbol(&self, name: &str, limit: usize) -> Result<Vec<SymbolHit>, IndexError> {
         let limit = limit.clamp(1, 50) as i64;
         let mut statement = self.connection.prepare(
@@ -174,6 +280,136 @@ impl WorkspaceIndex {
             hit.callers = rows.collect::<Result<Vec<_>, _>>()?;
         }
         Ok(hits)
+    }
+
+    /// Rank references across the indexed repository for a natural-language
+    /// task. Name matches win over file-path and signature matches; call sites
+    /// are included so the model can assess the blast radius before editing.
+    /// This is deterministic lexical retrieval, not an embedding search.
+    pub fn context_for_goal(&self, goal: &str, max_chars: usize) -> Result<String, IndexError> {
+        if max_chars == 0 {
+            return Ok(String::new());
+        }
+        let terms = goal_terms(goal)
+            .into_iter()
+            .map(|term| term.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            return Ok(String::new());
+        }
+
+        // Keep the scan bounded even for unusually large generated projects.
+        let mut statement = self.connection.prepare(
+            "SELECT path, name, kind, signature, start_line
+             FROM symbols ORDER BY path, start_line LIMIT 20000",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SymbolHit {
+                path: row.get(0)?,
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                signature: row.get(3)?,
+                start_line: row.get::<_, i64>(4)? as usize,
+                callers: Vec::new(),
+            })
+        })?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let hit = row?;
+            let name = hit.name.to_ascii_lowercase();
+            let path = hit.path.to_ascii_lowercase();
+            let signature = hit.signature.to_ascii_lowercase();
+            let score = terms.iter().fold(0_u32, |total, term| {
+                total
+                    + if name == *term {
+                        100
+                    } else if name.contains(term) {
+                        45
+                    } else {
+                        0
+                    }
+                    + if path.contains(term) { 25 } else { 0 }
+                    + if signature.contains(term) { 8 } else { 0 }
+            });
+            if score > 0 {
+                scored.push((score, hit));
+            }
+        }
+        scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.start_line.cmp(&right.start_line))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        let mut output = String::from(
+            "Repository-wide related definitions and call sites (untrusted reference data):\n",
+        );
+        let mut seen = BTreeSet::new();
+        let mut callers = self.connection.prepare(
+            "SELECT caller_path, caller, line FROM calls
+             WHERE callee = ?1 ORDER BY caller_path, line LIMIT 5",
+        )?;
+        for (_, hit) in scored.into_iter().take(16) {
+            let key = (hit.path.clone(), hit.name.clone(), hit.start_line);
+            if !seen.insert(key) {
+                continue;
+            }
+            output.push_str(&format!(
+                "- {} {} at {}:{}\n",
+                hit.kind,
+                bound(&hit.signature, 180),
+                hit.path,
+                hit.start_line
+            ));
+            let rows = callers.query_map(params![hit.name], |row| {
+                Ok(CallerHit {
+                    path: row.get(0)?,
+                    caller: row.get(1)?,
+                    line: row.get::<_, i64>(2)? as usize,
+                })
+            })?;
+            for caller in rows {
+                let caller = caller?;
+                output.push_str(&format!(
+                    "  references: {} at {}:{}\n",
+                    caller.caller, caller.path, caller.line
+                ));
+            }
+            if output.chars().count() >= max_chars {
+                break;
+            }
+        }
+
+        // Paths can matter even when a file has no named declarations (e.g.
+        // test fixtures, scripts and migration files).
+        let mut paths = self
+            .connection
+            .prepare("SELECT path FROM files ORDER BY path LIMIT 3000")?;
+        let candidates = paths.query_map([], |row| row.get::<_, String>(0))?;
+        let mut matched_paths = Vec::new();
+        for candidate in candidates {
+            let path = candidate?;
+            let lower = path.to_ascii_lowercase();
+            let score = terms
+                .iter()
+                .filter(|term| lower.contains(term.as_str()))
+                .count();
+            if score > 0 {
+                matched_paths.push((score, path));
+            }
+        }
+        matched_paths.sort_by(|(score_a, path_a), (score_b, path_b)| {
+            score_b.cmp(score_a).then_with(|| path_a.cmp(path_b))
+        });
+        for (_, path) in matched_paths.into_iter().take(12) {
+            output.push_str(&format!("- related path: {path}\n"));
+        }
+        if output.ends_with("reference data):\n") {
+            return Ok(String::new());
+        }
+        Ok(bound(&output, max_chars))
     }
 
     /// Compact prompt-ready context for symbol-like goal terms. Duplicate
@@ -367,6 +603,130 @@ mod tests {
         assert!(context.contains("`run`"));
         assert!(context.contains("caller: main"));
         assert!(context.chars().count() <= 160);
+    }
+
+    #[test]
+    fn ranked_repository_context_recovers_partial_symbols_paths_and_callers() {
+        let mut index = WorkspaceIndex::in_memory().unwrap();
+        let files = [
+            context("src/payments.rs", &["verifyPayment"], &[]),
+            context(
+                "src/checkout.rs",
+                &["startCheckout"],
+                &[("startCheckout", "verifyPayment")],
+            ),
+            context("tests/payment_flow.rs", &["regression"], &[]),
+            context("src/unrelated.rs", &["renderChart"], &[]),
+        ];
+        index.rebuild(&files).unwrap();
+        let found = index
+            .context_for_goal("fix payment verification", 2000)
+            .unwrap();
+        assert!(found.contains("verifyPayment"));
+        assert!(found.contains("src/payments.rs"));
+        assert!(found.contains("startCheckout at src/checkout.rs"));
+        assert!(found.contains("tests/payment_flow.rs"));
+        assert!(!found.contains("renderChart"));
+        assert_eq!(
+            found,
+            index
+                .context_for_goal("fix payment verification", 2000)
+                .unwrap()
+        );
+        assert_eq!(
+            index
+                .context_for_goal("fix payment", 120)
+                .unwrap()
+                .chars()
+                .count(),
+            120
+        );
+        assert!(index.context_for_goal("fix payment", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn incrementally_updates_changed_files_and_removes_deleted_paths() {
+        let mut index = WorkspaceIndex::in_memory().unwrap();
+        let old = context("src/lib.rs", &["before"], &[]);
+        let present = BTreeSet::from(["src/lib.rs".to_owned()]);
+        assert_eq!(
+            index
+                .sync_files(&[(old, "hash-one".to_owned())], &present)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            index.content_hash("src/lib.rs").unwrap(),
+            Some("hash-one".to_owned())
+        );
+        assert_eq!(index.symbol("before", 5).unwrap().len(), 1);
+
+        // Caller can skip an unchanged file without deleting its symbols.
+        assert_eq!(index.sync_files(&[], &present).unwrap(), 0);
+        assert_eq!(index.symbol("before", 5).unwrap().len(), 1);
+
+        let new = context("src/lib.rs", &["after"], &[]);
+        assert_eq!(
+            index
+                .sync_files(&[(new, "hash-two".to_owned())], &present)
+                .unwrap(),
+            1
+        );
+        assert!(index.symbol("before", 5).unwrap().is_empty());
+        assert_eq!(index.symbol("after", 5).unwrap().len(), 1);
+
+        assert_eq!(index.sync_files(&[], &BTreeSet::new()).unwrap(), 0);
+        assert!(index.symbol("after", 5).unwrap().is_empty());
+        assert_eq!(index.content_hash("src/lib.rs").unwrap(), None);
+    }
+
+    #[test]
+    fn legacy_index_schema_migrates_without_losing_file_records() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("symbols.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE files(path TEXT PRIMARY KEY, language TEXT NOT NULL);
+                 INSERT INTO files(path, language) VALUES ('src/lib.rs', 'rust');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let index = WorkspaceIndex::open(&path).unwrap();
+        assert_eq!(
+            index.content_hash("src/lib.rs").unwrap(),
+            Some(String::new())
+        );
+        drop(index);
+        let index = WorkspaceIndex::open(&path).unwrap();
+        assert_eq!(
+            index.content_hash("src/lib.rs").unwrap(),
+            Some(String::new())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opens_database_through_symlinked_ancestor_without_following_database_symlinks() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let actual_parent = directory.path().join("real");
+        std::fs::create_dir_all(&actual_parent).unwrap();
+        let alias = directory.path().join("alias");
+        std::os::unix::fs::symlink(&actual_parent, &alias).unwrap();
+
+        let path = alias.join("symbols.sqlite3");
+        let index = WorkspaceIndex::open(&path).unwrap();
+        drop(index);
+        assert!(actual_parent.join("symbols.sqlite3").is_file());
+
+        // A symlink at the final component remains forbidden, even when
+        // the containing directory itself arrived through a symlink.
+        let target = actual_parent.join("target.sqlite3");
+        std::fs::write(&target, []).unwrap();
+        let link = actual_parent.join("linked.sqlite3");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(WorkspaceIndex::open(&alias.join("linked.sqlite3")).is_err());
     }
 
     #[cfg(unix)]

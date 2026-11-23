@@ -29,6 +29,11 @@ use crate::event::{AgentPhase, EventSink, OrchestratorEvent, TaskFailureStage};
 use crate::mcp::McpToolService;
 use crate::memory::SharedMemory;
 use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
+use crate::review::{
+    CODE_REVIEW_ROLE, INDEPENDENT_REVIEW_METADATA, REVIEW_TARGET_METADATA, ReviewRecord,
+    ReviewVerdict, SECURITY_REVIEW_ROLE, review_record_key, trusted_validation_evidence,
+    validation_evidence_key,
+};
 use crate::team::{ARCHITECT_ROLE, BACKEND_ROLE, SECURITY_ROLE};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::WorkspaceProvider;
@@ -120,6 +125,15 @@ pub struct RepairCycle {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ReviewOutcome {
+    pub task_id: Uuid,
+    /// False when a reviewer failed verification, proposed edits, or rejected
+    /// the implementation. The record remains a proposal, not trusted proof.
+    pub accepted: bool,
+    pub record: ReviewRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OrchestrationReport {
     pub run_id: Uuid,
     pub succeeded: Vec<TaskSuccess>,
@@ -132,6 +146,9 @@ pub struct OrchestrationReport {
     /// `failed`; this list explains what the loop already tried.
     #[serde(default)]
     pub needs_human_review: Vec<HumanReview>,
+    /// Structured records from both accepted and failed independent reviews.
+    #[serde(default)]
+    pub review_records: Vec<ReviewOutcome>,
     pub duration_ms: u64,
 }
 
@@ -147,6 +164,19 @@ impl OrchestrationReport {
 
     pub fn pull_requests(&self) -> Vec<&TaskSuccess> {
         self.succeeded.iter().collect()
+    }
+
+    /// Read successful, evidence-verified independent review records without
+    /// requiring downstream integrations to parse arbitrary agent prose.
+    pub fn successful_reviews(&self) -> Vec<(Uuid, ReviewRecord)> {
+        self.succeeded
+            .iter()
+            .filter_map(|success| {
+                ReviewRecord::parse(&success.output)
+                    .ok()
+                    .map(|record| (success.task_id, record))
+            })
+            .collect()
     }
 }
 
@@ -302,13 +332,16 @@ impl Orchestrator {
             join_set.spawn(async move {
                 let operation = async {
                     let task = task;
-                    if let Some(reason) = wait_for_dependencies(&dependencies).await {
-                        events.emit(OrchestratorEvent::TaskSkipped {
-                            task_id: task.id,
-                            role: task.assigned_to.clone(),
-                            reason: reason.clone(),
-                        });
-                        return (task, None, TaskOutcome::Skipped { reason });
+                    let speculative = task.is_speculative();
+                    if !speculative {
+                        if let Some(reason) = wait_for_dependencies(&dependencies).await {
+                            events.emit(OrchestratorEvent::TaskSkipped {
+                                task_id: task.id,
+                                role: task.assigned_to.clone(),
+                                reason: reason.clone(),
+                            });
+                            return (task, None, TaskOutcome::Skipped { reason });
+                        }
                     }
 
                     let permit = match semaphore.acquire_owned().await {
@@ -329,14 +362,44 @@ impl Orchestrator {
                     let (outcome, success) = execute_task(
                         &task,
                         agent,
-                        context,
+                        context.clone(),
                         workspace,
                         events.clone(),
                         max_attempts,
                         diagnostic_sink,
                     )
                     .await;
+                    // Released before a speculative task waits on its
+                    // dependencies, so it can never starve them of a permit.
                     drop(permit);
+
+                    if speculative {
+                        // Do not publish a speculative success to the event
+                        // stream or shared memory until all dependencies pass.
+                        if let Some(reason) = wait_for_dependencies(&dependencies).await {
+                            let reason = format!("speculative result discarded: {reason}");
+                            events.emit(OrchestratorEvent::TaskSkipped {
+                                task_id: task.id,
+                                role: task.assigned_to.clone(),
+                                reason: reason.clone(),
+                            });
+                            return (task, None, TaskOutcome::Skipped { reason });
+                        }
+                        if let (TaskOutcome::Succeeded { attempts }, Some(success)) =
+                            (&outcome, &success)
+                        {
+                            context.memory.insert(
+                                task_summary_key(task.id),
+                                success.output.chars().take(2_000).collect::<String>(),
+                            );
+                            events.emit(OrchestratorEvent::TaskSucceeded {
+                                task_id: task.id,
+                                role: task.assigned_to.clone(),
+                                output: success.output.clone(),
+                                attempts: *attempts,
+                            });
+                        }
+                    }
 
                     (task, success, outcome)
                 };
@@ -362,6 +425,7 @@ impl Orchestrator {
             skipped: Vec::new(),
             repairs: Vec::new(),
             needs_human_review: Vec::new(),
+            review_records: Vec::new(),
             duration_ms: 0,
         };
 
@@ -418,6 +482,20 @@ impl Orchestrator {
         self.repair_review_failures(&mut report, &plan_tasks, &registry, &project, &memory)
             .await;
 
+        report.review_records = plan_tasks
+            .iter()
+            .filter(|task| task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA))
+            .filter_map(|task| {
+                let raw = memory.get(&review_record_key(task.id))?;
+                let record = ReviewRecord::parse(&raw).ok()?;
+                let accepted = report.succeeded.iter().any(|item| item.task_id == task.id);
+                Some(ReviewOutcome {
+                    task_id: task.id,
+                    accepted,
+                    record,
+                })
+            })
+            .collect();
         report.duration_ms = started_at.elapsed().as_millis() as u64;
         self.events.emit(OrchestratorEvent::RunFinished {
             run_id,
@@ -441,6 +519,25 @@ impl Orchestrator {
         let mut indegree: HashMap<Uuid, usize> = tasks.iter().map(|t| (t.id, 0)).collect();
         let mut edges: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
         for task in tasks {
+            if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+                let valid = task
+                    .metadata
+                    .get(REVIEW_TARGET_METADATA)
+                    .and_then(|target| target.parse::<Uuid>().ok())
+                    .is_some_and(|target| {
+                        task.dependencies.len() == 1
+                            && task.dependencies[0] == target
+                            && tasks.iter().any(|candidate| {
+                                candidate.id == target && candidate.assigned_to != task.assigned_to
+                            })
+                    });
+                if !valid {
+                    return Err(CoreError::Internal(format!(
+                        "independent review {} must depend on exactly one distinct producer",
+                        task.id
+                    )));
+                }
+            }
             for dependency in &task.dependencies {
                 if *dependency == task.id {
                     return Err(CoreError::DependencyCycle {
@@ -710,7 +807,8 @@ fn is_actionable_review_failure(failure: &TaskFailure) -> bool {
 /// bug a producer can fix. QA and Security only.
 fn is_reviewer_role(role: &AgentRole) -> bool {
     matches!(role, AgentRole::QaEngineer)
-        || matches!(role, AgentRole::Custom(name) if name == SECURITY_ROLE)
+        || matches!(role, AgentRole::Custom(name) if
+            name == SECURITY_ROLE || name == CODE_REVIEW_ROLE || name == SECURITY_REVIEW_ROLE)
 }
 
 /// Producers that can act on a review failure.
@@ -845,6 +943,18 @@ async fn execute_task(
             });
         }
         attempted_files = result.changes.iter().map(|c| c.path.clone()).collect();
+        if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+            let key = review_record_key(task.id);
+            if let Ok(record) = ReviewRecord::parse(&result.output) {
+                if let Ok(serialized) = serde_json::to_string(&record) {
+                    context.memory.insert(key, serialized);
+                } else {
+                    context.memory.remove(&key);
+                }
+            } else {
+                context.memory.remove(&key);
+            }
+        }
 
         if !result.success {
             let reason = result
@@ -891,26 +1001,98 @@ async fn execute_task(
             continue;
         }
 
+        // Independent reviewers cannot publish edits. Their verdict must cite
+        // evidence minted from the reviewed task's real validation logs.
+        if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+            let checked = (|| -> Result<(), String> {
+                if !result.changes.is_empty() {
+                    return Err("independent reviewers must not propose file changes".to_owned());
+                }
+                let target = task
+                    .metadata
+                    .get(REVIEW_TARGET_METADATA)
+                    .ok_or_else(|| "review target is missing".to_owned())?
+                    .parse::<Uuid>()
+                    .map_err(|_| "review target ID is invalid".to_owned())?;
+                let reference = context.memory.get(&validation_evidence_key(target));
+                let record = ReviewRecord::parse(&result.output)?;
+                record.verify(task, reference.as_deref())?;
+                if record.verdict != ReviewVerdict::Pass {
+                    return Err(record.failure_feedback());
+                }
+                Ok(())
+            })();
+            if let Err(reason) = checked {
+                let _ = agent.rollback(ctx.clone(), task, &reason).await;
+                let _ = lease.discard().await;
+                events.emit(OrchestratorEvent::TaskFailed {
+                    task_id: task.id,
+                    role: task.assigned_to.clone(),
+                    error: reason.clone(),
+                    attempts: attempt,
+                    retrying: false,
+                    stage: TaskFailureStage::Agent,
+                });
+                return (
+                    TaskOutcome::Failed {
+                        reason,
+                        attempts: attempt,
+                        visual_feedback: None,
+                    },
+                    None,
+                );
+            }
+        }
+
+        if task.is_speculative() && !result.changes.is_empty() {
+            // Speculative tasks run before the code they review exists; a
+            // file change from one is a contract violation, not a retryable
+            // failure, and nothing it proposed is staged.
+            let reason = "speculative task proposed file changes; it must be read-only".to_owned();
+            let _ = agent.rollback(ctx.clone(), task, &reason).await;
+            let _ = lease.discard().await;
+            events.emit(OrchestratorEvent::TaskFailed {
+                task_id: task.id,
+                role: task.assigned_to.clone(),
+                error: reason.clone(),
+                attempts: attempt,
+                retrying: false,
+                stage: TaskFailureStage::Agent,
+            });
+            return (
+                TaskOutcome::Failed {
+                    reason,
+                    attempts: attempt,
+                    visual_feedback: None,
+                },
+                None,
+            );
+        }
+
         // A visual review verdicts; it proposes nothing. There is nothing to
         // stage, and the spec policy that requires tests for a change does not
         // apply, so the verdict is recorded without a branch.
         if result.success
             && result.changes.is_empty()
-            && task
-                .metadata
-                .contains_key(crate::vision::VISUAL_REVIEW_METADATA)
+            && (task.is_speculative()
+                || task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA)
+                || task
+                    .metadata
+                    .contains_key(crate::vision::VISUAL_REVIEW_METADATA))
         {
             let _ = lease.discard().await;
-            context.memory.insert(
-                task_summary_key(task.id),
-                result.output.chars().take(2_000).collect::<String>(),
-            );
-            events.emit(OrchestratorEvent::TaskSucceeded {
-                task_id: task.id,
-                role: task.assigned_to.clone(),
-                output: result.output.clone(),
-                attempts: attempt,
-            });
+            if !task.is_speculative() {
+                context.memory.insert(
+                    task_summary_key(task.id),
+                    result.output.chars().take(2_000).collect::<String>(),
+                );
+                events.emit(OrchestratorEvent::TaskSucceeded {
+                    task_id: task.id,
+                    role: task.assigned_to.clone(),
+                    output: result.output.clone(),
+                    attempts: attempt,
+                });
+            }
             return (
                 TaskOutcome::Succeeded { attempts: attempt },
                 Some(TaskSuccess {
@@ -956,9 +1138,15 @@ async fn execute_task(
             task_id: task.id,
             file_count: result.changes.len(),
         });
-        let staged = StagedChanges::new(task.id, result.changes.clone())
-            .with_root(lease.root().to_path_buf());
-        let report = match context.validator.validate(&staged).await {
+        let report = match lease.seal().await {
+            Ok(()) => {
+                let staged = StagedChanges::new(task.id, result.changes.clone())
+                    .with_root(lease.validation_root());
+                context.validator.validate(&staged).await
+            }
+            Err(error) => Err(error),
+        };
+        let report = match report {
             Ok(report) => report,
             Err(err) => ValidationReport {
                 passed: false,
@@ -966,6 +1154,18 @@ async fn execute_task(
                 logs: Vec::new(),
                 duration_ms: 0,
             },
+        };
+        let report = if report.passed {
+            match lease.verify_seal().await {
+                Ok(()) => report,
+                Err(error) => ValidationReport::failed(
+                    format!("source changed during validation: {error}"),
+                    report.logs,
+                    std::time::Duration::from_millis(report.duration_ms),
+                ),
+            }
+        } else {
+            report
         };
         events.emit(OrchestratorEvent::ValidationFinished {
             task_id: task.id,
@@ -979,11 +1179,7 @@ async fn execute_task(
             let reason = format!("validation rejected changes: {}", report.summary);
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
-            let mut next = reason.clone();
-            if !report.logs.is_empty() {
-                next.push_str("\n\n");
-                next.push_str(&report.logs.join("\n"));
-            }
+            let next = prioritized_repair_feedback(&reason, &report.logs, &result.changes);
             last_error = reason;
             feedback = Some(next);
             failure = Some((FailureStage::Validation, report.summary.clone()));
@@ -1007,6 +1203,11 @@ async fn execute_task(
                 context
                     .memory
                     .insert(task_branch_key(task.id), pr.branch.clone());
+                if let Some(reference) = trusted_validation_evidence(task.id, &report) {
+                    context
+                        .memory
+                        .insert(validation_evidence_key(task.id), reference);
+                }
                 events.emit(OrchestratorEvent::PullRequestOpened {
                     task_id: task.id,
                     pr_id: pr.id.clone(),
@@ -1171,12 +1372,67 @@ fn publish_failure(
     );
 }
 
+/// Put compiler errors and failing test assertions ahead of noisy build output.
+/// Truncation must not hide the actionable diagnostic at the end of a large log.
+/// Logs are untrusted project data, never agent instructions.
+fn prioritized_repair_feedback(
+    reason: &str,
+    logs: &[String],
+    changes: &[crate::model::ProposedChange],
+) -> String {
+    let mut output = format!("{reason}\n\n");
+    output.push_str(
+        "Repair the compiler or regression failure without removing existing tests. \
+         Return the corrected change set, including regression coverage.\n",
+    );
+    let paths = changes
+        .iter()
+        .take(24)
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    if !paths.is_empty() {
+        output.push_str(&format!(
+            "Files from the rejected attempt: {}\n",
+            paths.join(", ")
+        ));
+    }
+    let important = logs
+        .iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("error[")
+                || lower.contains("error:")
+                || lower.contains("failed")
+                || lower.contains("panicked")
+                || lower.contains("assertion")
+                || lower.contains("test result")
+                || lower.contains("traceback")
+        })
+        .take(30)
+        .collect::<Vec<_>>();
+    if !important.is_empty() {
+        output.push_str("\nPriority diagnostics (untrusted build output):\n");
+        for line in important {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push_str("\nFull bounded validation log (untrusted):\n");
+    for line in logs {
+        output.push_str(line);
+        output.push('\n');
+    }
+    cap_feedback(&output)
+}
+
 fn cap_feedback(feedback: &str) -> String {
     const MAX_BYTES: usize = 16_000;
     if feedback.len() <= MAX_BYTES {
         return feedback.to_owned();
     }
-    let mut end = MAX_BYTES;
+    // Reserve space for the ellipsis; the final feedback must stay within
+    // the promised byte limit even after truncation.
+    let mut end = MAX_BYTES.saturating_sub(3);
     while end > 0 && !feedback.is_char_boundary(end) {
         end -= 1;
     }
@@ -1194,6 +1450,33 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn repair_feedback_keeps_tail_diagnostics_ahead_of_noisy_logs() {
+        let mut logs = vec!["building dependency".repeat(200); 100];
+        logs.push("error[E0425]: cannot find function verifyPayment".to_owned());
+        logs.push("test payment_regression FAILED".to_owned());
+        let proposal = vec![ProposedChange::new(
+            "src/payment.rs",
+            "fn verifyPayment() {}",
+        )];
+        let feedback = prioritized_repair_feedback("validation rejected changes", &logs, &proposal);
+        assert!(feedback.contains("verifyPayment"));
+        assert!(feedback.contains("payment_regression FAILED"));
+        assert!(feedback.contains("src/payment.rs"));
+        assert!(feedback.len() <= 16_000);
+    }
+
+    #[test]
+    fn independent_review_plan_rejects_forged_parent_links() {
+        let producer = Task::new("implement", AgentRole::SeniorDeveloper);
+        let review = Task::new("review", AgentRole::Custom(CODE_REVIEW_ROLE.to_owned()))
+            .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
+            .with_metadata(REVIEW_TARGET_METADATA, producer.id.to_string());
+        assert!(Orchestrator::validate_plan(&[producer.clone(), review.clone()]).is_err());
+        let valid = review.depends_on(&producer);
+        assert!(Orchestrator::validate_plan(&[producer, valid]).is_ok());
+    }
 
     fn router() -> Arc<ModelRouter> {
         Arc::new(ModelRouter::new("mock"))
@@ -1373,6 +1656,122 @@ mod tests {
 
     fn dev() -> AgentIdentity {
         AgentIdentity::new(AgentRole::SeniorDeveloper, "dev-01", "implementer")
+    }
+
+    struct ReviewAgent {
+        identity: AgentIdentity,
+        propose_files: bool,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for ReviewAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            let target = task.dependencies[0];
+            let evidence = ctx
+                .memory
+                .get(&validation_evidence_key(target))
+                .unwrap_or_else(|| format!("validator:{target}:unverified"));
+            let output = serde_json::json!({
+                "verdict": "pass",
+                "summary": "reviewed compiled source and regression evidence",
+                "findings": [],
+                "evidence_refs": [evidence],
+            })
+            .to_string();
+            let mut result = TaskResult::success(task.id, output);
+            if self.propose_files {
+                result = result.with_changes(change());
+            }
+            Ok(result)
+        }
+    }
+
+    struct ExecutedValidator;
+
+    #[async_trait]
+    impl ChangeValidator for ExecutedValidator {
+        async fn validate(&self, _changes: &StagedChanges) -> CoreResult<ValidationReport> {
+            Ok(ValidationReport::passed(
+                "isolated regression suite passed",
+                vec!["spec test files: tests/smoke.rs; command: cargo test".to_owned()],
+                Duration::from_millis(1),
+            ))
+        }
+    }
+
+    async fn independent_review_run(
+        validator: Arc<dyn ChangeValidator>,
+        propose_files: bool,
+    ) -> OrchestrationReport {
+        let orchestrator =
+            Orchestrator::new(workspace(), validator, router()).with_config(OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 0,
+            });
+        let producer = Task::new("producer", AgentRole::SeniorDeveloper);
+        let reviewer_role = AgentRole::Custom(CODE_REVIEW_ROLE.to_owned());
+        let reviewer = Task::new("review", reviewer_role.clone())
+            .depends_on(&producer)
+            .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
+            .with_metadata(REVIEW_TARGET_METADATA, producer.id.to_string());
+        orchestrator
+            .run(
+                vec![producer, reviewer],
+                vec![
+                    Arc::new(SleepAgent {
+                        identity: dev(),
+                        delay: Duration::ZERO,
+                    }),
+                    Arc::new(ReviewAgent {
+                        identity: AgentIdentity::new(reviewer_role, "reviewer", "read only"),
+                        propose_files,
+                    }),
+                ],
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn independent_review_requires_executed_validation_evidence() {
+        let no_proof = independent_review_run(Arc::new(AllowAllValidator), false).await;
+        assert_eq!(no_proof.failed.len(), 1);
+        assert!(
+            no_proof.failed[0]
+                .error
+                .contains("no executed test evidence")
+        );
+        assert!(no_proof.successful_reviews().is_empty());
+
+        let proved = independent_review_run(Arc::new(ExecutedValidator), false).await;
+        assert!(proved.all_succeeded(), "{:?}", proved.failed);
+        assert_eq!(proved.successful_reviews().len(), 1);
+        assert_eq!(proved.review_records.len(), 1);
+        assert!(proved.review_records[0].accepted);
+        assert_eq!(
+            proved.successful_reviews()[0].1.verdict,
+            ReviewVerdict::Pass
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_review_cannot_publish_file_changes() {
+        let report = independent_review_run(Arc::new(ExecutedValidator), true).await;
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            report.failed[0]
+                .error
+                .contains("must not propose file changes")
+        );
+        assert!(report.successful_reviews().is_empty());
+        assert_eq!(report.review_records.len(), 1);
+        assert!(!report.review_records[0].accepted);
     }
 
     #[tokio::test]
@@ -2405,5 +2804,172 @@ mod tests {
         assert_eq!(report.failed.len(), 1);
         assert!(report.repairs.is_empty());
         assert!(report.needs_human_review.is_empty());
+    }
+
+    /// Read-only reviewer that sleeps, then reports without proposing files.
+    struct ReadOnlyAgent {
+        identity: AgentIdentity,
+        delay: Duration,
+        started: Arc<StdMutex<Option<Instant>>>,
+        propose: bool,
+        calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for ReadOnlyAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started
+                .lock()
+                .unwrap()
+                .get_or_insert_with(Instant::now);
+            tokio::time::sleep(self.delay).await;
+            let result = TaskResult::success(task.id, "audit clean");
+            Ok(if self.propose {
+                result.with_changes(change())
+            } else {
+                result
+            })
+        }
+    }
+
+    fn security(delay: Duration, propose: bool) -> (Arc<ReadOnlyAgent>, Arc<AtomicU32>) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let agent = Arc::new(ReadOnlyAgent {
+            identity: AgentIdentity::new(
+                AgentRole::Custom("security".to_owned()),
+                "sec-01",
+                "security",
+            ),
+            delay,
+            started: Arc::new(StdMutex::new(None)),
+            propose,
+            calls: calls.clone(),
+        });
+        (agent, calls)
+    }
+
+    fn concurrent(max_attempts: u32) -> Orchestrator {
+        Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router()).with_config(
+            OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts,
+                max_repair_cycles: 0,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn speculative_tasks_overlap_the_work_they_depend_on() {
+        let producer = Task::new("implement", AgentRole::SeniorDeveloper);
+        let audit = Task::new(
+            "audit dependencies",
+            AgentRole::Custom("security".to_owned()),
+        )
+        .depends_on(&producer)
+        .speculative();
+        let (sec, _) = security(Duration::from_millis(200), false);
+        let started = sec.started.clone();
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(SleepAgent {
+                identity: dev(),
+                delay: Duration::from_millis(200),
+            }),
+            sec,
+        ];
+
+        let run_start = Instant::now();
+        let report = concurrent(1)
+            .run(
+                vec![producer, audit.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+        let audit_started = started.lock().unwrap().expect("audit ran");
+        assert!(
+            audit_started.duration_since(run_start) < Duration::from_millis(150),
+            "the audit must not wait for the producer"
+        );
+        assert!(run_start.elapsed() < Duration::from_millis(390));
+        assert!(report.succeeded.iter().any(|s| s.task_id == audit.id));
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+    }
+
+    #[tokio::test]
+    async fn speculative_results_are_discarded_when_a_dependency_fails() {
+        let producer = Task::new("broken", AgentRole::ProjectManager);
+        let audit = Task::new("audit", AgentRole::Custom("security".to_owned()))
+            .depends_on(&producer)
+            .speculative();
+        let (sec, calls) = security(Duration::ZERO, false);
+        let agents: Vec<Arc<dyn AgentRuntime>> = vec![
+            Arc::new(FailingAgent {
+                identity: AgentIdentity::new(AgentRole::ProjectManager, "pm-01", "planner"),
+                rolled_back: Arc::new(AtomicBool::new(false)),
+            }),
+            sec,
+        ];
+
+        let events = EventSink::default();
+        let mut emitted = events.subscribe();
+        let report = concurrent(1)
+            .with_events(events)
+            .run(
+                vec![producer, audit.clone()],
+                agents,
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "it ran speculatively");
+        // A discarded speculative result must not leak a false success to
+        // Mission Control (or to shared task summaries).
+        let mut reported_success = false;
+        while let Ok(event) = emitted.try_recv() {
+            if let OrchestratorEvent::TaskSucceeded { task_id, .. } = event {
+                reported_success |= task_id == audit.id;
+            }
+        }
+        assert!(!reported_success, "discarded task emitted TaskSucceeded");
+        assert!(report.succeeded.iter().all(|s| s.task_id != audit.id));
+        let skipped = report
+            .skipped
+            .iter()
+            .find(|s| s.task_id == audit.id)
+            .expect("discarded result is reported as skipped");
+        assert!(skipped.reason.starts_with("speculative result discarded"));
+    }
+
+    #[tokio::test]
+    async fn speculative_tasks_may_not_propose_file_changes() {
+        let audit = Task::new("audit", AgentRole::Custom("security".to_owned())).speculative();
+        let (sec, calls) = security(Duration::ZERO, true);
+        let workspace = workspace();
+        let orchestrator =
+            Orchestrator::new(workspace.clone(), Arc::new(AllowAllValidator), router())
+                .with_config(OrchestratorConfig {
+                    max_concurrency: 1,
+                    max_attempts: 3,
+                    max_repair_cycles: 0,
+                });
+
+        let report = orchestrator
+            .run(vec![audit], vec![sec], ProjectContext::default())
+            .await
+            .unwrap();
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].error.contains("must be read-only"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a contract violation is not retried"
+        );
+        assert!(report.succeeded.is_empty());
     }
 }

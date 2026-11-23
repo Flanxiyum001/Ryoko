@@ -11,6 +11,18 @@ blackboard. A bounded, human-editable project memory store now lives under
 `.ryoko/memory/`. Durable semantic retrieval and automatic memory promotion
 do not exist yet.
 
+Outlines never contain bodies: each symbol is rendered with its declaration
+signature (first line up to the body, whitespace-collapsed, at most 200 bytes)
+so agents see parameter and return types of unrelated files without paying for
+their implementations. `ModelAgent` caches only its trusted shared instructions
+in the system prefix; repository context, including dependency summaries, stays
+in a lower-priority user message because it is untrusted input. The agent role
+and goal follow the stable prefix, and `ChatRequest::cache_system_prefix` is
+set. The Anthropic adapter sends the system prompt as content blocks with an
+`ephemeral` `cache_control` breakpoint after that prefix; OpenAI-compatible
+providers cache identical prefixes automatically and need only the ordering.
+Cache reads are reported as `Usage::cached_input_tokens`.
+
 ## Indexing pipeline
 
 ```text

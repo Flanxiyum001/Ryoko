@@ -13,6 +13,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::terminal_decode::TerminalUtf8Decoder;
 use crate::workspace::{WorkspaceState, current_root};
 
 const MAX_INPUT_BYTES: usize = 32 * 1024;
@@ -134,26 +135,38 @@ pub fn terminal_start(
     thread::spawn(move || {
         let mut reader = reader;
         let mut buffer = [0u8; READ_BUFFER];
+        let mut decoder = TerminalUtf8Decoder::default();
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
-                    let data = String::from_utf8_lossy(&buffer[..read]).into_owned();
-                    if app
-                        .emit(
-                            "ryoko-terminal-output",
-                            TerminalOutput {
-                                session_id: id,
-                                data,
-                            },
-                        )
-                        .is_err()
+                    let data = decoder.push(&buffer[..read]);
+                    if !data.is_empty()
+                        && app
+                            .emit(
+                                "ryoko-terminal-output",
+                                TerminalOutput {
+                                    session_id: id,
+                                    data,
+                                },
+                            )
+                            .is_err()
                     {
-                        break;
+                        return;
                     }
                 }
                 Err(_) => break,
             }
+        }
+        let trailing = decoder.finish();
+        if !trailing.is_empty() {
+            let _ = app.emit(
+                "ryoko-terminal-output",
+                TerminalOutput {
+                    session_id: id,
+                    data: trailing,
+                },
+            );
         }
     });
 
@@ -223,6 +236,13 @@ pub fn terminal_status(state: State<'_, TerminalState>) -> Result<TerminalStatus
         .try_wait()
         .map_err(|error| format!("cannot inspect terminal: {error}"))?
         .is_none();
+    if !running {
+        guard.take();
+        return Ok(TerminalStatus {
+            running: false,
+            session_id: None,
+        });
+    }
     Ok(TerminalStatus {
         running,
         session_id: Some(session.id),

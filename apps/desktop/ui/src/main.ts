@@ -7,8 +7,24 @@ import '@xterm/xterm/css/xterm.css';
 import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
-import { LspClient, type LspState } from './lsp';
+import { LspClient, type LspState, type LspServerStatus } from './lsp';
+import { registerMonacoCapabilities } from './lsp_bridge';
+import { buildTree, changeKind, filterTreePaths } from './tree';
+import { mountQuickOpen } from './quick_open_view';
+import { mountSearchPanel } from './search_view';
+import {
+  renderChanges,
+  type ChangesSnapshot,
+} from './changes_view';
+import { mountSettingsDialog } from './settings_view';
+import { InlineEditController } from './inline_edit_view';
+import {
+  chordForEvent,
+  loadOverrides,
+  resolveKeybindings,
+} from './keybindings';
 import { mountConnectors } from './connectors_panel';
+import { mountMarketplaceBrowser } from './marketplace_browser';
 import { mountGithubQueue } from './github_queue';
 import {
   focusMissionTasks,
@@ -125,6 +141,11 @@ interface DapMessage {
   message: string;
 }
 
+interface DapLog {
+  sessionId: number;
+  message: string;
+}
+
 interface DapStatus {
   running: boolean;
   sessionId: number | null;
@@ -192,11 +213,17 @@ const runCancel = element<HTMLButtonElement>('runCancel');
 const runState = element('runState');
 const runLog = element('runLog');
 const lspStatus = element('lspStatus');
+const lspPills = element('lspPills');
+const changesSummary = element('changesSummary');
+const changesList = element('changesList');
 const editorStatus = element('editorStatus');
 const cursorPos = element('cursorPos');
 const languageMode = element('languageMode');
 const bottomPanel = element('bottomPanel');
 const terminalTab = element<HTMLButtonElement>('terminalTab');
+const searchTab = element<HTMLButtonElement>('searchTab');
+const searchPanel = element('searchPanel');
+const searchInput = element<HTMLInputElement>('searchInput');
 const debugTab = element<HTMLButtonElement>('debugTab');
 const bottomClose = element<HTMLButtonElement>('bottomClose');
 const bottomStatus = element('bottomStatus');
@@ -219,6 +246,52 @@ const debugStepOut = element<HTMLButtonElement>('debugStepOut');
 const debugBreakpoint = element<HTMLButtonElement>('debugBreakpoint');
 const debugStatus = element('debugStatus');
 const debugLog = element('debugLog');
+const inlineEditRun = element<HTMLButtonElement>('inlineEditRun');
+const inlineEditCancel = element<HTMLButtonElement>('inlineEditCancel');
+const inlineEditAccept = element<HTMLButtonElement>('inlineEditAccept');
+const inlineEditInput = element<HTMLInputElement>('inlineEditInput');
+const searchReplace = element<HTMLInputElement>('searchReplace');
+const changesDetails = element<HTMLDetailsElement>('changesDetails');
+const changesRefresh = element<HTMLButtonElement>('changesRefresh');
+const openSettings = element<HTMLButtonElement>('openSettings');
+const workbenchLayout = document.querySelector<HTMLElement>('.layout')!;
+const inspectorPane = element('inspectorPane');
+const railButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.rail-button'));
+
+type WorkbenchView = 'explorer' | 'editor' | 'mission' | 'changes' | 'problems' | 'settings';
+
+function activateView(view: WorkbenchView): void {
+  if (view === 'settings') {
+    openSettings.click();
+    return;
+  }
+  workbenchLayout.dataset.activeView = view;
+  workbenchLayout.classList.toggle('hide-explorer', view !== 'explorer');
+  workbenchLayout.classList.toggle('hide-inspector', view === 'explorer' || view === 'editor');
+  for (const button of railButtons) {
+    const active = button.dataset.view === view;
+    button.classList.toggle('active', active);
+    if (button.dataset.view !== 'settings') button.setAttribute('aria-pressed', String(active));
+  }
+  if (view === 'changes') {
+    changesDetails.open = true;
+    changesDetails.scrollIntoView({ block: 'nearest' });
+  } else if (view === 'mission') {
+    inspectorPane.querySelector('.mission')?.scrollIntoView({ block: 'nearest' });
+  } else if (view === 'problems') {
+    problemList.scrollIntoView({ block: 'nearest' });
+  }
+  requestAnimationFrame(() => editor.layout());
+}
+
+railButtons.forEach((button) => button.addEventListener('click', () => {
+  const view = button.dataset.view;
+  if (view === 'explorer' || view === 'editor' || view === 'mission' ||
+      view === 'changes' || view === 'problems' || view === 'settings') {
+    activateView(view);
+  }
+}));
+element<HTMLButtonElement>('emptyOpenFolder').addEventListener('click', () => openFolderButton.click());
 
 const state: {
   root: string;
@@ -244,6 +317,10 @@ let diffModifiedModel: monaco.editor.ITextModel | null = null;
 let xterm: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let terminalSessionId: number | null = null;
+let terminalStarting = false;
+let pendingTerminalOutput: TerminalOutput[] = [];
+let terminalStatusPolling = false;
+let dapStatusPolling = false;
 let dapSessionId: number | null = null;
 let dapSeq = 0;
 let dapThreadId = 1;
@@ -253,6 +330,15 @@ const debugBreakpoints = new Map<string, Set<number>>();
 const openFiles = new Map<string, OpenFile>();
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
 const changeTimers = new Map<string, number>();
+const expandedDirectories = new Set<string>();
+const workbenchChanges = new Map<string, ReturnType<typeof changeKind>>();
+const keybindings = resolveKeybindings(loadOverrides(localStorage));
+const quickOpen = mountQuickOpen({
+  workspaceRoot: () => state.root,
+  files: () => state.files,
+  openFile,
+  setStatus,
+});
 
 const editor = monaco.editor.create(editorHost, {
   theme: 'vs-dark',
@@ -388,23 +474,38 @@ const diffEditor = monaco.editor.createDiffEditor(diffEditorHost, {
 });
 
 const lsp = new LspClient({
-  onDiagnostics: (params) => applyDiagnostics(params),
+  onDiagnostics: (params, server) => applyDiagnostics(params, server),
   onState: (connection, detail) => setLspState(connection, detail),
+  onServers: (servers) => renderServerPills(servers),
+});
+
+const inlineEdit = new InlineEditController({
+  editor,
+  currentFile: () => (state.current ? { path: state.current.path, model: state.current.model } : null),
+  languageId: () => state.current?.languageId ?? 'plaintext',
+  setStatus,
+  onSaveAfterApply: saveCurrent,
 });
 
 function setStatus(message: string): void {
   editorStatus.textContent = message;
 }
 
-function showBottom(panel: 'terminal' | 'debug'): void {
+function showBottom(panel: 'terminal' | 'debug' | 'search'): void {
   bottomPanel.classList.remove('hidden');
   const terminal = panel === 'terminal';
+  const search = panel === 'search';
   terminalTab.classList.toggle('active', terminal);
-  debugTab.classList.toggle('active', !terminal);
+  searchTab.classList.toggle('active', search);
+  debugTab.classList.toggle('active', !terminal && !search);
   terminalPanel.classList.toggle('hidden', !terminal);
-  debugPanel.classList.toggle('hidden', terminal);
+  searchPanel.classList.toggle('hidden', !search);
+  debugPanel.classList.toggle('hidden', terminal || search);
   if (terminal) {
     window.requestAnimationFrame(() => fitTerminal());
+  }
+  if (search) {
+    searchInput.focus();
   }
 }
 
@@ -445,6 +546,10 @@ function fitTerminal(): void {
 }
 
 async function startTerminal(): Promise<void> {
+  if (terminalStarting) return;
+  terminalStarting = true;
+  terminalStart.disabled = true;
+  pendingTerminalOutput = [];
   try {
     showBottom('terminal');
     const terminal = ensureTerminal();
@@ -452,22 +557,34 @@ async function startTerminal(): Promise<void> {
     terminalSessionId = null;
     const status = await invoke<TerminalStatus>('terminal_start', { shell: null });
     terminalSessionId = status.sessionId;
-    terminalStart.disabled = true;
+    for (const output of pendingTerminalOutput) {
+      if (output.sessionId === terminalSessionId) terminal.write(output.data);
+    }
     terminalStop.disabled = false;
     bottomStatus.textContent = 'Local shell running';
     fitTerminal();
     terminal.focus();
   } catch (error) {
+    terminalSessionId = null;
+    terminalStart.disabled = false;
+    terminalStop.disabled = true;
     bottomStatus.textContent = `Terminal unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    terminalStarting = false;
+    pendingTerminalOutput = [];
   }
 }
 
 async function stopTerminal(): Promise<void> {
-  await invoke('terminal_stop').catch(() => undefined);
-  terminalSessionId = null;
-  terminalStart.disabled = false;
-  terminalStop.disabled = true;
-  bottomStatus.textContent = 'Terminal stopped';
+  try {
+    await invoke('terminal_stop');
+    terminalSessionId = null;
+    terminalStart.disabled = false;
+    terminalStop.disabled = true;
+    bottomStatus.textContent = 'Terminal stopped';
+  } catch (error) {
+    bottomStatus.textContent = 'Could not stop terminal: ' + String(error);
+  }
 }
 
 function appendDebug(line: string): void {
@@ -523,6 +640,8 @@ async function startDebug(): Promise<void> {
       supportsRunInTerminalRequest: false,
     });
   } catch (error) {
+    await invoke('dap_stop').catch(() => undefined);
+    dapSessionId = null;
     updateDapButtons(false);
     debugStatus.textContent = `Debug adapter unavailable: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -550,7 +669,7 @@ async function launchDap(): Promise<void> {
 }
 
 function handleDapMessage(payload: DapMessage): void {
-  if (dapSessionId !== null && payload.sessionId !== dapSessionId) return;
+  if (dapSessionId === null || payload.sessionId !== dapSessionId) return;
   appendDebug(`← ${payload.message}`);
   let value: Record<string, unknown>;
   try {
@@ -620,6 +739,17 @@ function setLspState(connection: LspState, detail?: string): void {
   if (detail) setStatus(`ryoko-lsp: ${detail}`);
 }
 
+function renderServerPills(servers: LspServerStatus[]): void {
+  lspPills.replaceChildren();
+  for (const server of servers) {
+    if (server.id === 'ryoko-lsp') continue;
+    const pill = document.createElement('span');
+    pill.className = 'status-pill ' + server.state;
+    pill.textContent = `${server.id} ${server.state}`;
+    lspPills.append(pill);
+  }
+}
+
 function markDirty(file: OpenFile): void {
   file.dirty = file.model.getValue() !== file.savedText;
   if (state.current === file) {
@@ -630,7 +760,7 @@ function markDirty(file: OpenFile): void {
 
 function renderFiles(): void {
   const query = fileFilter.value.trim().toLowerCase();
-  const visible = state.files.filter((path) => path.toLowerCase().includes(query));
+  const visible = filterTreePaths(state.files, query);
   fileCount.textContent = `${state.files.length} files`;
   fileList.replaceChildren();
   if (visible.length === 0) {
@@ -640,19 +770,63 @@ function renderFiles(): void {
     fileList.append(hint);
     return;
   }
+  const nodes = buildTree(visible, { expanded: expandedDirectories, changes: workbenchChanges });
   const fragment = document.createDocumentFragment();
-  for (const path of visible.slice(0, 1500)) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'file-link' + (state.current?.path === path ? ' active' : '');
-    button.textContent = path;
-    button.title = path;
-    button.addEventListener('click', () => {
-      void openFile(path);
-    });
-    fragment.append(button);
+  for (const node of nodes) {
+    if (node.type === 'dir') {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'tree-dir';
+      button.style.paddingLeft = `${8 + node.depth * 14}px`;
+      button.textContent = `${expandedDirectories.has(node.path) ? '▾' : '▸'} ${node.name}`;
+      button.title = node.path;
+      button.addEventListener('click', () => {
+        if (expandedDirectories.has(node.path)) expandedDirectories.delete(node.path);
+        else expandedDirectories.add(node.path);
+        renderFiles();
+      });
+      fragment.append(button);
+    } else {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'file-link tree-file'
+        + (state.current?.path === node.path ? ' active' : '')
+        + (node.change ? ` change-${node.change}` : '');
+      button.style.paddingLeft = `${8 + node.depth * 14}px`;
+      button.textContent = node.change ? `${node.name} · ${node.change.charAt(0).toUpperCase()}` : node.name;
+      button.title = node.change ? `${node.path} (${node.change})` : node.path;
+      button.addEventListener('click', () => {
+        void openFile(node.path);
+        if (window.matchMedia('(max-width: 720px)').matches) activateView('editor');
+      });
+      fragment.append(button);
+    }
   }
   fileList.append(fragment);
+}
+
+async function refreshWorkbenchChanges(): Promise<void> {
+  if (!state.root) return;
+  try {
+    const snapshot = await invoke<ChangesSnapshot>('git_changes');
+    workbenchChanges.clear();
+    if (snapshot.isRepository) {
+      for (const entry of snapshot.entries) {
+        workbenchChanges.set(entry.path, changeKind(entry.kind));
+      }
+    }
+    renderFiles();
+    changesSummary.textContent = snapshot.isRepository
+      ? `${snapshot.entries.length} change(s)`
+      : 'not a repository';
+    renderChanges(snapshot.entries, snapshot.isRepository, changesList, {
+      openDiff: openPathDiff,
+      setStatus,
+    });
+  } catch (error) {
+    changesSummary.textContent = 'unavailable';
+    setStatus(`Change scan failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function revealEditor(): void {
@@ -690,11 +864,18 @@ async function openFolder(): Promise<void> {
     // Open the new workspace successfully before discarding any old editor
     // buffers. Changing a folder must not erase unsaved content on failure.
     await lsp.stop();
+    quickOpen.close();
+    await stopTerminal();
+    await stopDebug();
     for (const timer of changeTimers.values()) window.clearTimeout(timer);
     changeTimers.clear();
     for (const file of openFiles.values()) file.model.dispose();
     openFiles.clear();
     diagnostics.clear();
+    workbenchChanges.clear();
+    expandedDirectories.clear();
+    changesSummary.textContent = 'no folder';
+    changesList.replaceChildren();
     state.current = null;
     closeDiffReview();
     missionLogs = [];
@@ -736,6 +917,8 @@ async function openFolder(): Promise<void> {
     setStatus('Loading files…');
     await loadFiles();
     setStatus(`${state.files.length} files from ${info.name}`);
+    lsp.setWorkspaceRoot(info.root);
+    void refreshWorkbenchChanges();
     void refreshAgentSessions();
     void refreshMissionLogs();
     void refreshHunks();
@@ -893,6 +1076,7 @@ async function stageSelectedHunks(): Promise<void> {
   const ids = chosenHunks();
   try {
     await invoke('stage_review_hunks', { ids, expectedPatch: gitHunks.patch });
+    void refreshWorkbenchChanges();
     setStatus('Staged ' + ids.length + ' selected text hunk(s) in Git index. No commit or merge was made.');
     await refreshHunks();
   } catch (error) {
@@ -910,6 +1094,39 @@ function clearDiffEditor(): void {
   diffModifiedModel?.dispose();
   diffOriginalModel = null;
   diffModifiedModel = null;
+}
+
+async function openPathDiff(path: string): Promise<void> {
+  if (!state.root) return;
+  if ([...openFiles.values()].some((file) => file.dirty)) {
+    setStatus('Save or discard unsaved Monaco edits before reviewing changes.');
+    return;
+  }
+  try {
+    const review = await invoke<ReviewFileContent>('read_review_file', { path });
+    clearDiffEditor();
+    const languageId = languageForPath(path);
+    const suffix = encodeURIComponent(path).replaceAll('%', '_');
+    diffOriginalModel = monaco.editor.createModel(
+      review.original,
+      languageId,
+      monaco.Uri.parse(`ryoko-review://original/${suffix}`),
+    );
+    diffModifiedModel = monaco.editor.createModel(
+      review.modified,
+      languageId,
+      monaco.Uri.parse(`ryoko-review://modified/${suffix}`),
+    );
+    diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
+    diffReviewPath.textContent = `${path} - working tree`;
+    diffReview.classList.remove('hidden');
+    editorHost.classList.add('hidden');
+    emptyEditor.classList.add('hidden');
+    diffEditor.layout();
+    setStatus(`Reviewing ${path} against HEAD`);
+  } catch (error) {
+    setStatus('Diff review failed: ' + (error instanceof Error ? error.message : String(error)));
+  }
 }
 
 function closeDiffReview(): void {
@@ -1049,9 +1266,11 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
   try {
     if (action === 'accept') {
       await invoke('stage_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      void refreshWorkbenchChanges();
       setStatus(`Accepted hunk #${hunk.id} into the Git index. No commit or merge was made.`);
     } else {
       await invoke('reject_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      void refreshWorkbenchChanges();
       setStatus(`Rejected hunk #${hunk.id}; only those working-file edits were reverted.`);
     }
     await refreshHunks();
@@ -1497,6 +1716,7 @@ async function openFile(path: string): Promise<void> {
     renderFiles();
     updateCursor();
     setStatus(path);
+    quickOpen.remember(path);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   }
@@ -1519,6 +1739,7 @@ async function saveCurrent(): Promise<void> {
     lsp.change(file.uri, file.version, content);
     renderFiles();
     setStatus(`Saved ${file.path}`);
+    void refreshWorkbenchChanges();
     void refreshHunks();
   } catch (error) {
     setStatus(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1538,11 +1759,11 @@ function toMarker(diagnostic: LspDiagnostic): monaco.editor.IMarkerData {
   };
 }
 
-function applyDiagnostics(params: PublishDiagnosticsParams): void {
-  diagnostics.set(params.uri, params);
+function applyDiagnostics(params: PublishDiagnosticsParams, server: string): void {
+  diagnostics.set(`${server}\u0000${params.uri}`, params);
   const model = monaco.editor.getModel(monaco.Uri.parse(params.uri));
   if (model) {
-    monaco.editor.setModelMarkers(model, 'ryoko-lsp', params.diagnostics.map(toMarker));
+    monaco.editor.setModelMarkers(model, `lsp-${server}`, params.diagnostics.map(toMarker));
   }
   renderProblems();
 }
@@ -1707,8 +1928,60 @@ missionLogSelect.addEventListener('change', () => {
 toggleTerminal.addEventListener('click', () => showBottom('terminal'));
 toggleDebug.addEventListener('click', () => showBottom('debug'));
 terminalTab.addEventListener('click', () => showBottom('terminal'));
+searchTab.addEventListener('click', () => showBottom('search'));
 debugTab.addEventListener('click', () => showBottom('debug'));
 bottomClose.addEventListener('click', () => bottomPanel.classList.add('hidden'));
+
+function dispatchBinding(action: string): void {
+  switch (action) {
+    case 'workbench.quickOpen':
+      quickOpen.open();
+      break;
+    case 'workbench.search':
+      showBottom('search');
+      break;
+    case 'workbench.replace':
+      showBottom('search');
+      searchReplace.focus();
+      break;
+    case 'workbench.changes':
+      activateView('changes');
+      break;
+    case 'workbench.settings':
+      openSettings.click();
+      break;
+    case 'editor.inlineEdit':
+      inlineEdit.open();
+      break;
+    default:
+      break;
+  }
+}
+
+window.addEventListener('keydown', (event) => {
+  if (event.repeat) return;
+  const action = keybindings.byChord.get(chordForEvent(event));
+  if (!action || action === 'editor.save') return;
+  event.preventDefault();
+  dispatchBinding(action);
+});
+
+inlineEditRun.addEventListener('click', () => void inlineEdit.submit());
+inlineEditCancel.addEventListener('click', () => inlineEdit.reject());
+inlineEditAccept.addEventListener('click', () => inlineEdit.accept());
+inlineEditInput.addEventListener('keydown', (event) => {
+  event.stopPropagation();
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    void inlineEdit.submit();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    inlineEdit.reject();
+  }
+});
+changesRefresh.addEventListener('click', () => {
+  void refreshWorkbenchChanges();
+});
 terminalStart.addEventListener('click', () => {
   void startTerminal();
 });
@@ -1738,8 +2011,15 @@ debugBreakpoint.addEventListener('click', () => {
 });
 
 void listen<TerminalOutput>('ryoko-terminal-output', (event) => {
-  if (terminalSessionId !== null && event.payload.sessionId !== terminalSessionId) return;
-  ensureTerminal().write(event.payload.data);
+  if (terminalSessionId !== null && event.payload.sessionId === terminalSessionId) {
+    ensureTerminal().write(event.payload.data);
+  } else if (terminalStarting && terminalSessionId === null) {
+    // Buffer the first shell prompt until terminal_start returns its session ID.
+    const bytes = pendingTerminalOutput.reduce((sum, output) => sum + output.data.length, 0);
+    if (bytes + event.payload.data.length <= 64 * 1024) {
+      pendingTerminalOutput.push(event.payload);
+    }
+  }
 });
 void listen<FimChunk>('ryoko-fim-chunk', (event) => applyFimChunk(event.payload));
 void listen<FimError>('ryoko-fim-error', (event) => {
@@ -1748,9 +2028,49 @@ void listen<FimError>('ryoko-fim-error', (event) => {
   setStatus(`Completion unavailable: ${event.payload.message}`);
 });
 void listen<DapMessage>('ryoko-dap-message', (event) => handleDapMessage(event.payload));
-void listen<string>('ryoko-dap-log', (event) => {
-  if (event.payload) appendDebug(`[adapter] ${event.payload}`);
+void listen<DapLog>('ryoko-dap-log', (event) => {
+  if (dapSessionId !== null && event.payload.sessionId === dapSessionId && event.payload.message) {
+    appendDebug(`[adapter] ${event.payload.message}`);
+  }
 });
+
+async function pollTerminalStatus(): Promise<void> {
+  if (terminalSessionId === null || terminalStarting || terminalStatusPolling) return;
+  terminalStatusPolling = true;
+  const observedId = terminalSessionId;
+  try {
+    const status = await invoke<TerminalStatus>('terminal_status');
+    if (!status.running && terminalSessionId === observedId) {
+      terminalSessionId = null;
+      terminalStart.disabled = false;
+      terminalStop.disabled = true;
+      bottomStatus.textContent = 'Shell exited';
+      xterm?.write('\r\n[Shell exited]\r\n');
+    }
+  } catch (error) {
+    bottomStatus.textContent = 'Terminal status unavailable: ' + String(error);
+  } finally {
+    terminalStatusPolling = false;
+  }
+}
+
+async function pollDebugStatus(): Promise<void> {
+  if (dapSessionId === null || dapStatusPolling) return;
+  dapStatusPolling = true;
+  const observedId = dapSessionId;
+  try {
+    const status = await invoke<DapStatus>('dap_status');
+    if (!status.running && dapSessionId === observedId) {
+      dapSessionId = null;
+      updateDapButtons(false);
+      debugStatus.textContent = 'Debug adapter exited';
+    }
+  } catch (error) {
+    debugStatus.textContent = 'Debug status unavailable: ' + String(error);
+  } finally {
+    dapStatusPolling = false;
+  }
+}
 
 window.setInterval(() => {
   if (state.root && document.visibilityState === 'visible') {
@@ -1758,6 +2078,13 @@ window.setInterval(() => {
     void refreshRunStatus();
   }
 }, 1200);
+
+window.setInterval(() => {
+  if (document.visibilityState === 'visible') {
+    void pollTerminalStatus();
+    void pollDebugStatus();
+  }
+}, 2500);
 
 updateRunLabels();
 refreshRunStatus();
@@ -1772,3 +2099,11 @@ setLspState('offline');
 renderMissionOptions();
 mountGithubQueue(setStatus);
 mountConnectors(setStatus);
+mountMarketplaceBrowser(setStatus);
+mountSearchPanel({ openFile, setStatus });
+mountSettingsDialog({ setStatus });
+registerMonacoCapabilities(
+  monaco,
+  lsp,
+  ['rust', 'typescript', 'javascript', 'python', 'go', 'c', 'cpp', 'java', 'css', 'shell'],
+);

@@ -117,6 +117,26 @@ Signals are routing hints only. They grant no filesystem, network or deployment
 permission, and the generated plan still has to pass
 `Orchestrator::validate_plan` before anything executes.
 
+## Speculative read-only tasks
+
+`Task::speculative()` (metadata `ryoko.speculative = "true"`) marks a task as a
+read-only check, such as a dependency audit, static analysis or test-plan
+draft, that may run ahead of the producers it depends on:
+
+- it acquires a concurrency permit and starts immediately, without waiting for
+  its dependencies, so it overlaps code generation;
+- it does not see its dependencies' summaries, because they do not exist yet;
+- a file change from it is a contract violation: the lease is discarded and
+  the task fails without retry;
+- after it finishes it releases its permit and then waits for its
+  dependencies. If any of them fails or is skipped, its result is discarded
+  and it is reported as skipped (`speculative result discarded: ...`), so its
+  own dependents are skipped too.
+
+The built-in team plans do not mark any task speculative: their QA and Security
+nodes publish branches and feed the repair loop, which requires the producer's
+output. Speculation is opt-in for callers that build their own DAG.
+
 ## Self-healing reviews
 
 A failing QA or Security node is feedback for a producer, not a dead end. After
@@ -152,6 +172,14 @@ that share an interface.
 ## Budget and cancellation
 
 Reserve budget before dispatch, record actual usage, release the remainder.
+The router admits bounded requests only with known pricing and an output token
+limit. A shared ledger reserves the maximum estimated input and output charge
+atomically against run and task caps before provider dispatch; reported usage
+settles it. A call dropped without a usage event consumes the entire reserved
+allowance conservatively, since the provider may have billed it. Providers that exceed
+the requested output cap or omit usage can still incur unreported charges, so
+the provider adapter must enforce the cap and report usage for hard external
+billing guarantees.
 Enforce per-agent, per-task and per-project ceilings, output caps, timeouts, retry
 limits and concurrency limits. Cancellation must reach the provider stream, tool
 execution and runner process, and must be acknowledged within a bounded interval.

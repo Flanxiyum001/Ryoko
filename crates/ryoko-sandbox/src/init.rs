@@ -5,10 +5,11 @@
 //! The generated file is deterministic: no model output and no repository
 //! content is interpolated into the Dockerfile.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{BuildBackend, BuildSandbox};
 
@@ -30,7 +31,7 @@ dist
 *.key
 ";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ecosystem {
     Rust,
@@ -198,10 +199,151 @@ impl SandboxPlan {
 
     pub async fn build(&self, backend: BuildBackend) -> Result<(), InitError> {
         let sandbox = BuildSandbox::new(backend, None);
-        sandbox
+        let output = sandbox
             .build_image(&self.context, &self.dockerfile, &self.image, BUILD_TIMEOUT)
             .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr
+                .lines()
+                .rev()
+                .take(20)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(InitError::Build(tail));
+        }
+        self.record_build()?;
         Ok(())
+    }
+
+    /// Where the fingerprint of the last successful build is kept, next to the
+    /// generated Dockerfile.
+    pub fn state_path(&self) -> Result<PathBuf, InitError> {
+        let name = self
+            .dockerfile
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(InitError::UnsafeOutput)?;
+        Ok(self.dockerfile.with_file_name(format!("{name}.state.json")))
+    }
+
+    /// Hashes every input that decides what the image contains: the generated
+    /// Dockerfile, the image tag and the dependency manifests and lockfiles of
+    /// the detected ecosystem. Only file bytes are read; nothing is executed.
+    pub fn fingerprint(&self) -> Result<ImageState, InitError> {
+        let mut inputs = BTreeMap::new();
+        for relative in dependency_inputs(&self.context, self.ecosystem)? {
+            let path = self.context.join(&relative);
+            // Stream large manifests instead of hashing only their length:
+            // two different oversized lockfiles can have the same size.
+            let mut file = std::fs::File::open(&path)?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = std::io::Read::read(&mut file, &mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            let digest = hex(&hasher.finalize());
+            inputs.insert(relative, digest);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"ryoko-sandbox-fingerprint-v1\0");
+        hasher.update(self.ecosystem.label().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(self.image.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(Sha256::digest(self.dockerfile_contents.as_bytes()));
+        for (path, digest) in &inputs {
+            hasher.update(path.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(digest.as_bytes());
+            hasher.update(b"\0");
+        }
+        Ok(ImageState {
+            version: STATE_VERSION,
+            ecosystem: self.ecosystem,
+            image: self.image.clone(),
+            dockerfile_sha256: hex(&Sha256::digest(self.dockerfile_contents.as_bytes())),
+            fingerprint: hex(&hasher.finalize()),
+            inputs,
+        })
+    }
+
+    /// Compares the current inputs with the last successful build. A missing,
+    /// unreadable or foreign state file means the image has never been built
+    /// from this plan, so it is reported as such rather than trusted.
+    pub fn freshness(&self) -> Result<Freshness, InitError> {
+        let current = self.fingerprint()?;
+        let path = self.state_path()?;
+        let recorded = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_STATE_BYTES => {
+                std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<ImageState>(&bytes).ok())
+            }
+            _ => None,
+        };
+        let Some(recorded) = recorded.filter(|state| state.version == STATE_VERSION) else {
+            return Ok(Freshness::NeverBuilt);
+        };
+        if recorded.fingerprint == current.fingerprint {
+            return Ok(Freshness::Fresh);
+        }
+        let mut changed: BTreeSet<String> = BTreeSet::new();
+        for (path, digest) in &current.inputs {
+            if recorded.inputs.get(path) != Some(digest) {
+                changed.insert(path.clone());
+            }
+        }
+        for path in recorded.inputs.keys() {
+            if !current.inputs.contains_key(path) {
+                changed.insert(path.clone());
+            }
+        }
+        if recorded.dockerfile_sha256 != current.dockerfile_sha256 {
+            changed.insert(self.relative_dockerfile());
+        }
+        if recorded.image != current.image {
+            changed.insert("image tag".to_owned());
+        }
+        Ok(Freshness::Stale {
+            changed: changed.into_iter().collect(),
+        })
+    }
+
+    /// Records the current fingerprint as the last successful build. Called by
+    /// [`Self::build`]; exposed so an image built by other means can be adopted
+    /// explicitly.
+    pub fn record_build(&self) -> Result<(), InitError> {
+        let path = self.state_path()?;
+        let parent = path.parent().ok_or(InitError::UnsafeOutput)?;
+        if !parent.canonicalize()?.starts_with(&self.context)
+            || path
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(InitError::UnsafeOutput);
+        }
+        let state = self.fingerprint()?;
+        let mut bytes = serde_json::to_vec_pretty(&state)
+            .map_err(|error| InitError::Io(std::io::Error::other(error)))?;
+        bytes.push(b'\n');
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    fn relative_dockerfile(&self) -> String {
+        self.dockerfile
+            .strip_prefix(&self.context)
+            .unwrap_or(&self.dockerfile)
+            .to_string_lossy()
+            .replace('\\', "/")
     }
 }
 
@@ -389,6 +531,116 @@ ENV PIP_NO_INDEX=1
 WORKDIR /workspace
 "
     .to_owned()
+}
+
+const STATE_VERSION: u32 = 1;
+const MAX_STATE_BYTES: u64 = 1024 * 1024;
+/// Bounds the manifest walk for Rust workspaces so a huge tree cannot stall it.
+const MAX_WALK_DEPTH: usize = 32;
+const MAX_WALK_ENTRIES: usize = 20_000;
+const SKIPPED_DIRS: &[&str] = &[".git", "target", "node_modules", "dist", ".ryoko"];
+
+/// Fingerprint of the inputs an image was built from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageState {
+    pub version: u32,
+    pub ecosystem: Ecosystem,
+    pub image: String,
+    pub dockerfile_sha256: String,
+    pub fingerprint: String,
+    /// Repository-relative path (always `/`-separated) to its SHA-256.
+    pub inputs: BTreeMap<String, String>,
+}
+
+/// Whether the sandbox image still matches the repository's dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Freshness {
+    /// No successful build has been recorded for this plan.
+    NeverBuilt,
+    Fresh,
+    /// Inputs changed since the last build; `changed` names them.
+    Stale {
+        changed: Vec<String>,
+    },
+}
+
+impl Freshness {
+    pub fn needs_build(&self) -> bool {
+        !matches!(self, Self::Fresh)
+    }
+}
+
+/// The manifests and lockfiles that decide an ecosystem's dependency set.
+/// Symlinks are skipped so the fingerprint never follows a link out of the
+/// repository.
+fn dependency_inputs(root: &Path, ecosystem: Ecosystem) -> Result<Vec<String>, InitError> {
+    let fixed: &[&str] = match ecosystem {
+        Ecosystem::Rust => &[],
+        Ecosystem::Node => &["package.json", "package-lock.json", "npm-shrinkwrap.json"],
+        Ecosystem::Python => &[
+            "pyproject.toml",
+            "poetry.lock",
+            "uv.lock",
+            "requirements.txt",
+            "setup.cfg",
+            "setup.py",
+        ],
+    };
+    let mut found: Vec<String> = fixed
+        .iter()
+        .filter(|name| {
+            std::fs::symlink_metadata(root.join(name)).is_ok_and(|metadata| metadata.is_file())
+        })
+        .map(|name| (*name).to_owned())
+        .collect();
+    if ecosystem == Ecosystem::Rust {
+        let mut stack = vec![(root.to_path_buf(), 0usize)];
+        let mut visited = 0usize;
+        while let Some((dir, depth)) = stack.pop() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                visited += 1;
+                if visited > MAX_WALK_ENTRIES {
+                    return Err(InitError::Io(std::io::Error::other(
+                        "dependency scan exceeded the directory entry limit",
+                    )));
+                }
+                let file_type = entry.file_type()?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if file_type.is_dir() && !SKIPPED_DIRS.contains(&name.as_ref()) {
+                    if depth >= MAX_WALK_DEPTH {
+                        return Err(InitError::Io(std::io::Error::other(
+                            "dependency scan exceeded the directory depth limit",
+                        )));
+                    }
+                    stack.push((entry.path(), depth + 1));
+                } else if file_type.is_file()
+                    && matches!(
+                        name.as_ref(),
+                        "Cargo.toml" | "Cargo.lock" | "rust-toolchain" | "rust-toolchain.toml"
+                    )
+                    && let Ok(relative) = entry.path().strip_prefix(root)
+                {
+                    found.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 #[cfg(test)]
@@ -627,6 +879,9 @@ mod tests {
 
     /// Exercises the two lifecycle guarantees that need no browser: readiness
     /// polling against a real server, and killing the whole process group.
+    /// This probes /bin/sh and POSIX negative-PID signalling; the harness is
+    /// packaged for Linux OCI containers, not native Windows process groups.
+    #[cfg(unix)]
     #[test]
     fn the_harness_waits_for_the_server_and_kills_its_process_group() {
         const DRIVER: &str = r#"
@@ -760,6 +1015,162 @@ console.log("ok");
                 .with_file_name("Dockerfile.dockerignore")
                 .is_file()
         );
-        assert!(plan.dockerfile.starts_with(dir.path()));
+        // inspect() canonicalizes the repository root: /var and /private/var
+        // refer to the same location on macOS but are not lexical prefixes.
+        assert!(
+            plan.dockerfile
+                .starts_with(dir.path().canonicalize().unwrap())
+        );
+    }
+
+    fn rust_project() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/a\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "version = 4\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/a/src")).unwrap();
+        std::fs::write(
+            dir.path().join("crates/a/Cargo.toml"),
+            "[package]\nname=\"a\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("crates/a/src/lib.rs"), "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_unbuilt_plan_needs_a_build_and_a_recorded_one_is_fresh() {
+        let dir = rust_project();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        plan.write().unwrap();
+        assert_eq!(plan.freshness().unwrap(), Freshness::NeverBuilt);
+        plan.record_build().unwrap();
+        assert_eq!(plan.freshness().unwrap(), Freshness::Fresh);
+        let state = plan.fingerprint().unwrap();
+        let inputs: Vec<&str> = state.inputs.keys().map(String::as_str).collect();
+        assert_eq!(
+            inputs,
+            vec!["Cargo.lock", "Cargo.toml", "crates/a/Cargo.toml"]
+        );
+    }
+
+    #[test]
+    fn a_lockfile_or_member_manifest_change_marks_the_image_stale() {
+        let dir = rust_project();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        plan.write().unwrap();
+        plan.record_build().unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "version = 4\n# bumped\n").unwrap();
+        std::fs::write(
+            dir.path().join("crates/a/Cargo.toml"),
+            "[package]\nname=\"a\"\n[dependencies]\nserde = \"1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            plan.freshness().unwrap(),
+            Freshness::Stale {
+                changed: vec!["Cargo.lock".to_owned(), "crates/a/Cargo.toml".to_owned()]
+            }
+        );
+        // Source edits are not dependency inputs.
+        plan.record_build().unwrap();
+        std::fs::write(dir.path().join("crates/a/src/lib.rs"), "pub fn x() {}").unwrap();
+        assert_eq!(plan.freshness().unwrap(), Freshness::Fresh);
+    }
+
+    #[test]
+    fn a_new_tag_a_removed_lockfile_or_a_tampered_state_is_not_fresh() {
+        let dir = node_project(r#"{ "dependencies": { "express": "^4" } }"#);
+        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        plan.write().unwrap();
+        plan.record_build().unwrap();
+
+        let retagged = SandboxPlan::inspect(dir.path(), Some("other:1".to_owned()), None).unwrap();
+        assert_eq!(
+            retagged.freshness().unwrap(),
+            Freshness::Stale {
+                changed: vec!["image tag".to_owned()]
+            }
+        );
+
+        std::fs::remove_file(dir.path().join("package-lock.json")).unwrap();
+        assert_eq!(
+            plan.freshness().unwrap(),
+            Freshness::Stale {
+                changed: vec!["package-lock.json".to_owned()]
+            }
+        );
+
+        std::fs::write(plan.state_path().unwrap(), "not json").unwrap();
+        assert_eq!(plan.freshness().unwrap(), Freshness::NeverBuilt);
+    }
+
+    #[test]
+    fn nested_manifests_are_tracked_and_scan_limits_fail_closed() {
+        let dir = rust_project();
+        let nested = dir.path().join("crates/a/src/deep/one/two/three/four");
+        std::fs::create_dir_all(&nested).unwrap();
+        let manifest = nested.join("Cargo.toml");
+        std::fs::write(&manifest, "[package]\nname=\"nested\"\n").unwrap();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        plan.write().unwrap();
+        plan.record_build().unwrap();
+        std::fs::write(&manifest, "[package]\nname=\"changed\"\n").unwrap();
+        assert!(matches!(plan.freshness(), Ok(Freshness::Stale { .. })));
+
+        // A deeper tree must error rather than silently become "fresh".
+        let mut deep = nested;
+        for _ in 0..MAX_WALK_DEPTH {
+            deep.push("child");
+        }
+        std::fs::create_dir_all(deep).unwrap();
+        assert!(plan.fingerprint().is_err());
+    }
+
+    #[test]
+    fn oversized_lockfile_changes_of_identical_length_are_detected() {
+        let dir = rust_project();
+        let path = dir.path().join("Cargo.lock");
+        let mut contents = vec![b'a'; 16 * 1024 * 1024 + 1];
+        std::fs::write(&path, &contents).unwrap();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        plan.write().unwrap();
+        plan.record_build().unwrap();
+        assert_eq!(plan.freshness().unwrap(), Freshness::Fresh);
+
+        contents[0] = b'b';
+        std::fs::write(path, &contents).unwrap();
+        assert_eq!(
+            plan.freshness().unwrap(),
+            Freshness::Stale {
+                changed: vec!["Cargo.lock".to_owned()]
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fingerprint_never_follows_symlinks_out_of_the_repository() {
+        let outside = TempDir::new().unwrap();
+        std::fs::write(
+            outside.path().join("Cargo.toml"),
+            "[package]\nname=\"secret\"\n",
+        )
+        .unwrap();
+        let dir = rust_project();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        let plan = SandboxPlan::inspect(dir.path(), None, None).unwrap();
+        let state = plan.fingerprint().unwrap();
+        assert!(state.inputs.keys().all(|path| !path.starts_with("linked")));
+
+        plan.write().unwrap();
+        let state_path = plan.state_path().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("stolen.json"), &state_path).unwrap();
+        assert!(matches!(plan.record_build(), Err(InitError::UnsafeOutput)));
+        assert!(!outside.path().join("stolen.json").exists());
     }
 }
