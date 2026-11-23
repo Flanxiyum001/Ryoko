@@ -334,7 +334,9 @@ impl WorkspaceIndex {
                 .then_with(|| left.name.cmp(&right.name))
         });
 
-        let mut output = String::from("Repository-wide related definitions and call sites (untrusted reference data):\n");
+        let mut output = String::from(
+            "Repository-wide related definitions and call sites (untrusted reference data):\n",
+        );
         let mut seen = BTreeSet::new();
         let mut callers = self.connection.prepare(
             "SELECT caller_path, caller, line FROM calls
@@ -373,15 +375,18 @@ impl WorkspaceIndex {
 
         // Paths can matter even when a file has no named declarations (e.g.
         // test fixtures, scripts and migration files).
-        let mut paths = self.connection.prepare(
-            "SELECT path FROM files ORDER BY path LIMIT 3000",
-        )?;
+        let mut paths = self
+            .connection
+            .prepare("SELECT path FROM files ORDER BY path LIMIT 3000")?;
         let candidates = paths.query_map([], |row| row.get::<_, String>(0))?;
         let mut matched_paths = Vec::new();
         for candidate in candidates {
             let path = candidate?;
             let lower = path.to_ascii_lowercase();
-            let score = terms.iter().filter(|term| lower.contains(term.as_str())).count();
+            let score = terms
+                .iter()
+                .filter(|term| lower.contains(term.as_str()))
+                .count();
             if score > 0 {
                 matched_paths.push((score, path));
             }
@@ -596,19 +601,37 @@ mod tests {
         let mut index = WorkspaceIndex::in_memory().unwrap();
         let files = [
             context("src/payments.rs", &["verifyPayment"], &[]),
-            context("src/checkout.rs", &["startCheckout"], &[("startCheckout", "verifyPayment")]),
+            context(
+                "src/checkout.rs",
+                &["startCheckout"],
+                &[("startCheckout", "verifyPayment")],
+            ),
             context("tests/payment_flow.rs", &["regression"], &[]),
             context("src/unrelated.rs", &["renderChart"], &[]),
         ];
         index.rebuild(&files).unwrap();
-        let found = index.context_for_goal("fix payment verification", 2000).unwrap();
+        let found = index
+            .context_for_goal("fix payment verification", 2000)
+            .unwrap();
         assert!(found.contains("verifyPayment"));
         assert!(found.contains("src/payments.rs"));
         assert!(found.contains("startCheckout at src/checkout.rs"));
         assert!(found.contains("tests/payment_flow.rs"));
         assert!(!found.contains("renderChart"));
-        assert_eq!(found, index.context_for_goal("fix payment verification", 2000).unwrap());
-        assert_eq!(index.context_for_goal("fix payment", 120).unwrap().chars().count(), 120);
+        assert_eq!(
+            found,
+            index
+                .context_for_goal("fix payment verification", 2000)
+                .unwrap()
+        );
+        assert_eq!(
+            index
+                .context_for_goal("fix payment", 120)
+                .unwrap()
+                .chars()
+                .count(),
+            120
+        );
         assert!(index.context_for_goal("fix payment", 0).unwrap().is_empty());
     }
 
