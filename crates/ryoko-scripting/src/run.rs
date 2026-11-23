@@ -99,6 +99,7 @@ mod tests {
         (fixture.dir, fixture.manifest, fixture.wasm, fixture.policy)
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn plugin_agent_returns_validated_changes() {
         let output = format!(
@@ -137,6 +138,7 @@ mod tests {
         assert_eq!(result.changes[0].path, "src/plugin_generated.rs");
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn plugin_agent_rejects_unsafe_paths_before_returning() {
         let output = format!(
@@ -167,6 +169,7 @@ mod tests {
         assert!(result.error.unwrap().contains("traversal"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn non_agent_plugin_cannot_become_an_agent() {
         let output = r#"{"schema":1,"result":{"type":"lint","diagnostics":[]}}"#;

@@ -125,8 +125,21 @@ impl DurableStore {
                 "storage database must not be a symlink".into(),
             ));
         }
+        // Normalize ancestor symlinks (notably /var -> /private/var on
+        // macOS) before SQLite's NOFOLLOW open. The explicit parent check
+        // above still rejects a symlink at the storage directory itself,
+        // and NOFOLLOW still forbids a symlink at the database file.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let canonical_parent = std::fs::canonicalize(parent)?;
+        let filename = path
+            .file_name()
+            .ok_or_else(|| StorageError::InvalidData("storage filename is missing".into()))?;
+        let database_path = canonical_parent.join(filename);
         let connection = Connection::open_with_flags(
-            path,
+            &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -428,6 +441,26 @@ mod tests {
         event.payload = serde_json::json!({"success": false});
         assert!(matches!(store.append(&event), Err(StorageError::Conflict)));
         assert!(store.interrupted_tasks().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_symlinked_ancestors_but_rejects_symlinked_storage_directories() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let actual = temp.path().join("actual");
+        std::fs::create_dir_all(&actual).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+
+        // The storage directory itself is real; only an ancestor is an
+        // alias (as /var is on macOS). SQLite NOFOLLOW must still work.
+        let db = alias.join("state").join("tasks.sqlite3");
+        let store = DurableStore::open(&db).unwrap();
+        drop(store);
+        assert!(actual.join("state/tasks.sqlite3").is_file());
+
+        // A symlink directly at the storage directory must remain refused.
+        assert!(DurableStore::open(&alias.join("tasks.sqlite3")).is_err());
     }
 
     #[test]

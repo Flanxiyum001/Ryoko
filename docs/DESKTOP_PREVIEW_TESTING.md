@@ -9,7 +9,17 @@ non-sensitive files and back up anything important.
 For public testers, open [Ryoko Releases](https://github.com/Flanxiyum001/Ryoko/releases),
 select a release explicitly labeled **Pre-release**, and download the installer
 for your operating system. You do not need GitHub Actions access for a public
-release. Check the release's `SHA256SUMS.txt` file to verify downloads.
+release. Check the release's `SHA256SUMS.txt` file to verify downloads. Phase 5
+also adds GitHub build-provenance attestations for preview assets. Once the
+release workflow succeeds, a downloaded installer can be checked with:
+
+```sh
+gh attestation verify PATH_TO_DOWNLOADED_INSTALLER --repo Flanxiyum001/Ryoko
+```
+
+This verifies the artifact's recorded GitHub workflow identity and digest,
+not Windows Authenticode or Apple notarization. Previews remain **unsigned**
+at the operating-system level.
 
 For a test build that has not yet been published as a Release:
 

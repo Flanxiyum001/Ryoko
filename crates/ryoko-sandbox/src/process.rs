@@ -153,23 +153,32 @@ impl BuildSandbox {
         let Some(dir) = &self.artifacts else {
             return Ok(None);
         };
+        // Compare physical paths on both sides. A worktree beneath a macOS
+        // /var alias must not bypass the "outside worktree" mount boundary.
+        let canonical_root = root.canonicalize()?;
+        if !canonical_root.is_dir() {
+            return Err(BuildSandboxError::InvalidConfiguration);
+        }
         if dir
             .symlink_metadata()
             .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
             return Err(BuildSandboxError::InvalidConfiguration);
         }
+        let already_existed = dir.exists();
         std::fs::create_dir_all(dir)?;
         let canonical = dir.canonicalize()?;
         if !canonical.is_dir()
-            || canonical.starts_with(root)
+            || canonical.starts_with(&canonical_root)
             || canonical
                 .to_string_lossy()
                 .chars()
                 .any(|ch| matches!(ch, ',' | '\n' | '\r'))
         {
-            // Remove the directory only if this call created it empty.
-            let _ = std::fs::remove_dir(&canonical);
+            // Never delete a pre-existing user directory when rejecting it.
+            if !already_existed {
+                let _ = std::fs::remove_dir(&canonical);
+            }
             return Err(BuildSandboxError::InvalidConfiguration);
         }
         Ok(Some(canonical))
@@ -541,6 +550,21 @@ mod runtime_flags {
             sandbox.prepare_artifacts(&worktree),
             Err(BuildSandboxError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn an_existing_artifact_directory_inside_worktree_is_not_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worktree = dir.path().join("worktree");
+        let artifacts = worktree.join("screenshots");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let sandbox = BuildSandbox::new(BuildBackend::Docker, Some("image:1".to_owned()))
+            .with_artifacts(&artifacts);
+        assert!(matches!(
+            sandbox.prepare_artifacts(&worktree),
+            Err(BuildSandboxError::InvalidConfiguration)
+        ));
+        assert!(artifacts.is_dir());
     }
 
     #[test]
