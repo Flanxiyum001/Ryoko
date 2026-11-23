@@ -272,7 +272,9 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     const path = url.pathname;
 
     if (req.method === 'GET' && path === '/health') {
-      return json(res, 200, { service: 'ryoko-github-app', status: 'ok', configured: Boolean(client.configured) });
+      return json(res, 200, { service: 'ryoko-github-app', status: 'ok',
+        configured: Boolean(client.configured), durable: Boolean(stateDb),
+        workerMode: stateDb ? settings.workerMode : 'legacy' });
     }
     if (req.method === 'POST' && path === '/webhooks/github') {
       if (!settings.webhookSecret) throw bad('webhook secret not configured', 503);
@@ -723,5 +725,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       else res.destroy();
     });
   });
+  const worker = stateDb && ['worker','all'].includes(settings.workerMode)
+    ? startGithubWorker({ store: stateDb, broker: client, settings, runPipeline }) : null;
+  server.on('close', () => { if (worker) void worker.stop(); });
   return server;
 }
