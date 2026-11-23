@@ -232,6 +232,11 @@ test('native desktop starts an authorized issue job once and exposes its result'
     });
     const { token } = await desktop.json();
     const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const details = await request('/api/desktop/issue?installationId=17&repoId=41&number=9', {
+      headers,
+    });
+    assert.equal(details.status, 200);
+    assert.equal((await details.json()).title, 'Improve search');
     const body = JSON.stringify({ installationId: 17, repoId: 41, number: 9 });
     assert.equal((await request('/api/desktop/jobs', { method: 'POST', headers, body })).status, 202);
     assert.equal((await request('/api/desktop/jobs', { method: 'POST', headers, body })).status, 409);
