@@ -467,8 +467,9 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       const list = [...proposals.values()]
         .filter((item) => item.owner === session.user.login
           && item.proposal.installationId === installationId && item.proposal.repoId === repoId
-          && Date.now() < item.expires && item.status === 'pending')
-        .slice(0, 2);
+          && (item.status !== 'pending' || Date.now() < item.expires))
+        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+        .slice(0, 50);
       return json(res, 200, { proposals: list.map((item) => ({
         id: item.id, source: item.source, status: item.status,
         operation: item.proposal.operation, params: item.proposal.params,
@@ -572,7 +573,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       const proposal = validateProposal(await jsonBody(req));
       if (!settings.agentRepoIds.includes(proposal.repoId)) throw bad('agent repo not allowlisted', 403);
       const owner = Array.from(sessions.values()).find(
-        (s) => s.user && settings.allowedUsers.includes(s.user.login.toLowerCase()),
+        (s) => s.user && s.token && Date.now() <= s.expires
+          && settings.allowedUsers.includes(s.user.login.toLowerCase()),
       );
       if (!owner) throw bad('user must connect before agents may request proposals', 409);
       await client.authorizedRepo(owner.token, proposal.installationId, proposal.repoId);
