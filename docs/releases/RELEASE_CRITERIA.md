@@ -74,16 +74,24 @@ proposal.
 
 ## Tag-published releases
 
-`.github/workflows/release.yml` publishes a GitHub Release for every tag push,
-including `-alpha` and `-beta` tags, and marks it as the repository's Latest
-release (`prerelease: false`, `make_latest: true`). The human act that authorizes
-that publication is the tag push itself; no agent or workflow decides it.
+A tag push publishes a GitHub Release, including for `-alpha` and `-beta` tags,
+and marks it as the repository's Latest release. The human act that authorizes
+that publication is the tag push itself; no agent or workflow decides it. Exactly
+one workflow owns each tag pattern, so two publishers never race for the same
+release:
 
-The workflow does not gate on CI and does not attach installers. It creates the
-release entry and commits-generated notes only, so a tag can point at a commit
-whose CI failed and `Latest` can name a pre-release build. The gates above still
-decide whether a build is shippable; a tag does not replace them. Installer
-artifacts continue to come from the `Desktop installers` workflow.
+| Tags | Workflow | Release contents |
+| --- | --- | --- |
+| `desktop-preview-v*` | `Ryoko preview installers (unsigned)` | unsigned installers, checksums, generated notes |
+| every other tag | `Auto Release` | generated notes only, no assets |
+
+The `Auto Release` workflow does not gate on CI and does not attach installers,
+so a tag can point at a commit whose CI failed and `Latest` can name a
+pre-release build. The preview workflow does gate on all three installer builds
+succeeding before it publishes. The gates above still decide whether a build is
+shippable; a tag does not replace them. Production `desktop-v*` installers
+continue to be produced by the `Desktop installers` workflow, which does not
+create a release.
 
 
 ## Desktop installer signing gate (workflow-ready, credentials not supplied)

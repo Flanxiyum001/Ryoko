@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - '*'
+      # `desktop-preview-v*` already has a publisher: the preview installer
+      # workflow creates that release with the signed-off asset set. Two
+      # publishers on one tag would race to create the same release.
+      - '!desktop-preview-v*'
 
 permissions:
   contents: write
