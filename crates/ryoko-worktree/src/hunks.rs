@@ -1,9 +1,17 @@
 //! Parse Git's own unified diffs into selectably staged text hunks.
 //!
-//! Unsupported binary, rename, deletion and mode-only changes are never guessed.
-//! Text hunks may be staged individually, as part of an explicit cross-file
-//! atomic group, or - for a newly created file - partially, in which case the
-//! selected added lines are renumbered into one contiguous creation patch.
+//! Unsupported binary, rename, deletion and mode-only changes are never
+//! guessed: they stay listed as explicit per-file review states instead of
+//! silently disappearing. Text hunks may be staged individually, as part of
+//! an explicit cross-file atomic group, or - for a newly created file -
+//! partially, in which case the selected added lines are renumbered into one
+//! contiguous creation patch.
+//!
+//! Before applying, a selection is verified against a freshly captured patch:
+//! every hunk must still anchor to the same file identity (path and index
+//! base) and the same line ranges it was reviewed against, so a changed base
+//! surfaces as an understandable conflict instead of an overwrite or a
+//! misleading success.
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
@@ -17,6 +25,61 @@ pub struct ReviewHunk {
     pub path: String,
     pub header: String,
     pub preview: String,
+    /// Old index blob abbreviation of the file this hunk was reviewed against,
+    /// `0000000` for creations, or empty when Git omitted the index line.
+    pub base: String,
+}
+
+/// Review state of one file difference in the patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileReviewState {
+    /// Modified text file with selectable hunks.
+    Text,
+    /// Newly created text file with selectable hunks.
+    Created,
+    /// Deleted file; its content is gone, nothing is staged per hunk.
+    Deleted,
+    /// Renamed file; renamed paths are reviewed as one whole-file change.
+    Renamed,
+    /// Copied file; copied paths are reviewed as one whole-file change.
+    Copied,
+    /// Binary content; never editable through text hunks.
+    Binary,
+    /// Mode change only; no content hunks exist.
+    ModeOnly,
+    /// Submodule pointer; managed by Git, not by hunk review.
+    Submodule,
+}
+
+impl FileReviewState {
+    /// Stable key for typed IPC surfaces.
+    pub fn key(self) -> &'static str {
+        match self {
+            FileReviewState::Text => "text",
+            FileReviewState::Created => "created",
+            FileReviewState::Deleted => "deleted",
+            FileReviewState::Renamed => "renamed",
+            FileReviewState::Copied => "copied",
+            FileReviewState::Binary => "binary",
+            FileReviewState::ModeOnly => "mode-only",
+            FileReviewState::Submodule => "submodule",
+        }
+    }
+
+    /// Only plain text and creation differences support hunk staging.
+    pub fn supports_hunk_staging(self) -> bool {
+        matches!(self, FileReviewState::Text | FileReviewState::Created)
+    }
+}
+
+/// One file's review state with the hunk IDs it owns (empty when its state
+/// does not support hunk staging).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileReview {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub state: FileReviewState,
+    pub hunk_ids: Vec<usize>,
 }
 
 /// A set of hunks that a caller wants applied together or not at all.
@@ -38,6 +101,9 @@ struct FilePatch {
     header: Vec<String>,
     hunks: Vec<Vec<String>>,
     path: Option<String>,
+    old_path: Option<String>,
+    state: Option<FileReviewState>,
+    index_old: Option<String>,
     newly_created: bool,
 }
 
@@ -45,6 +111,22 @@ struct FilePatch {
 pub struct HunkPatch {
     files: Vec<FilePatch>,
     hunks: Vec<ReviewHunk>,
+}
+
+/// A selected hunk that no longer anchors to the file identity and line
+/// ranges it was reviewed against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleHunk {
+    pub id: usize,
+    pub path: String,
+    pub reason: &'static str,
+}
+
+/// Outcome of verifying a selection against the freshly captured patch.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SelectionAudit {
+    pub fresh: Vec<usize>,
+    pub stale: Vec<StaleHunk>,
 }
 
 impl HunkPatch {
@@ -63,6 +145,9 @@ impl HunkPatch {
                     header: vec![line.to_owned()],
                     hunks: Vec::new(),
                     path: None,
+                    old_path: None,
+                    state: None,
+                    index_old: None,
                     newly_created: false,
                 });
             } else if let Some(file) = &mut current {
@@ -71,6 +156,14 @@ impl HunkPatch {
                 } else if let Some(hunk) = file.hunks.last_mut() {
                     hunk.push(line.to_owned());
                 } else {
+                    if file.old_path.is_none()
+                        && let Some(old) = line
+                            .strip_prefix("--- a/")
+                            .or_else(|| line.strip_prefix("rename from "))
+                            .or_else(|| line.strip_prefix("copy from "))
+                    {
+                        file.old_path = Some(old.to_owned());
+                    }
                     file.header.push(line.to_owned());
                 }
             } else if !line.trim().is_empty() {
@@ -83,20 +176,80 @@ impl HunkPatch {
 
         let mut hunks = Vec::new();
         for file in &mut files {
-            let unsupported = file.header.iter().any(|line| {
-                line.starts_with("GIT binary patch")
-                    || line.starts_with("Binary files ")
-                    || line.starts_with("rename from ")
-                    || line.starts_with("rename to ")
-                    || line.starts_with("copy from ")
-                    || line.starts_with("copy to ")
-                    || line.starts_with("deleted file mode ")
-                    || line.starts_with("old mode ")
-                    || line.starts_with("new mode ")
-                    || line.starts_with("Submodule ")
+            let binary = file.header.iter().any(|line| {
+                line.starts_with("GIT binary patch") || line.starts_with("Binary files ")
             });
-            if unsupported || file.hunks.is_empty() {
+            let submodule = file
+                .header
+                .iter()
+                .any(|line| line.starts_with("Submodule "));
+            let deleted = file
+                .header
+                .iter()
+                .any(|line| line.starts_with("deleted file mode "));
+            let renamed = file
+                .header
+                .iter()
+                .any(|line| line.starts_with("rename from "));
+            let copied = file
+                .header
+                .iter()
+                .any(|line| line.starts_with("copy from "));
+            let mode_change = file
+                .header
+                .iter()
+                .any(|line| line.starts_with("old mode ") || line.starts_with("new mode "));
+            let created = file
+                .header
+                .iter()
+                .any(|line| line.starts_with("new file mode "));
+
+            if let Some(line) = file.header.iter().find(|line| line.starts_with("index ")) {
+                file.index_old = line
+                    .strip_prefix("index ")
+                    .and_then(|rest| rest.split("..").next())
+                    .map(str::to_owned);
+            }
+
+            let state = if binary {
+                FileReviewState::Binary
+            } else if submodule {
+                FileReviewState::Submodule
+            } else if deleted {
+                FileReviewState::Deleted
+            } else if renamed {
+                FileReviewState::Renamed
+            } else if copied {
+                FileReviewState::Copied
+            } else if created {
+                FileReviewState::Created
+            } else if mode_change {
+                FileReviewState::ModeOnly
+            } else {
+                FileReviewState::Text
+            };
+            file.state = Some(state);
+            file.newly_created = created && state.supports_hunk_staging();
+
+            if !state.supports_hunk_staging() || file.hunks.is_empty() {
                 file.hunks.clear();
+                if file.path.is_none() {
+                    file.path = file
+                        .header
+                        .iter()
+                        .find_map(|line| {
+                            line.strip_prefix("rename to ")
+                                .or_else(|| line.strip_prefix("copy to "))
+                        })
+                        .map(str::to_owned);
+                }
+                if file.path.is_none() {
+                    file.path = file.old_path.clone().or_else(|| {
+                        file.header
+                            .first()
+                            .and_then(|line| fallback_diff_path(line))
+                    });
+                }
                 continue;
             }
             let Some(path) = file
@@ -125,10 +278,7 @@ impl HunkPatch {
                 continue;
             }
             file.path = Some(path.to_owned());
-            file.newly_created = file
-                .header
-                .iter()
-                .any(|line| line.starts_with("new file mode "));
+            let index_old = file.index_old.clone().unwrap_or_default();
             for hunk in &file.hunks {
                 let id = hunks.len() + 1;
                 if id > MAX_HUNKS {
@@ -146,6 +296,7 @@ impl HunkPatch {
                     path: path.to_owned(),
                     header: hunk[0].clone(),
                     preview: preview.chars().take(500).collect(),
+                    base: index_old.clone(),
                 });
             }
         }
@@ -154,6 +305,26 @@ impl HunkPatch {
 
     pub fn hunks(&self) -> &[ReviewHunk] {
         &self.hunks
+    }
+
+    /// Per-file review states, in patch order, including the differences that
+    /// do not support hunk staging (binary, renames, copies, deletions,
+    /// mode-only and submodule changes). Callers render these as explicit,
+    /// non-editable review states instead of leaving them invisible.
+    pub fn file_reviews(&self) -> Vec<FileReview> {
+        let mut next_hunk = 1usize;
+        let mut reviews = Vec::with_capacity(self.files.len());
+        for file in &self.files {
+            let hunk_ids = (next_hunk..next_hunk + file.hunks.len()).collect::<Vec<_>>();
+            next_hunk += file.hunks.len();
+            reviews.push(FileReview {
+                path: file.path.clone().unwrap_or_else(|| "unknown".to_owned()),
+                old_path: file.old_path.clone(),
+                state: file.state.unwrap_or(FileReviewState::Text),
+                hunk_ids,
+            });
+        }
+        reviews
     }
 
     /// One atomic group per file, in patch order. Callers that need a group
@@ -220,6 +391,95 @@ impl HunkPatch {
             return Err("no selectable text hunk was found".into());
         }
         Ok(result.join("\n") + "\n")
+    }
+
+    /// Verifies the chosen hunks against the freshly captured `current` patch.
+    ///
+    /// `self` is the reviewed snapshot the caller selected from; `current` is
+    /// the diff captured immediately before apply. A hunk stays fresh only
+    /// when the same file identity (path and index base blob) still carries
+    /// the exact same hunk header in `current`, so a changed base, a moved
+    /// line range or a vanished difference is reported per file instead of
+    /// being applied blindly.
+    pub fn verify_selection(
+        &self,
+        chosen: &[usize],
+        current: &HunkPatch,
+    ) -> Result<SelectionAudit, String> {
+        if chosen.is_empty() || chosen.len() > MAX_HUNKS {
+            return Err("select at least one and at most 128 hunk IDs".into());
+        }
+        let ids: HashSet<usize> = chosen.iter().copied().collect();
+        if ids.len() != chosen.len() || ids.iter().any(|id| *id == 0 || *id > self.hunks.len()) {
+            return Err("invalid or repeated hunk ID".into());
+        }
+
+        let mut fresh_anchors: HashSet<(String, String, String)> = HashSet::new();
+        let mut current_paths: HashMap<String, HashSet<String>> = HashMap::new();
+        for hunk in &current.hunks {
+            fresh_anchors.insert((hunk.path.clone(), hunk.base.clone(), hunk.header.clone()));
+            current_paths
+                .entry(hunk.path.clone())
+                .or_default()
+                .insert(hunk.base.clone());
+        }
+
+        let mut audit = SelectionAudit::default();
+        let mut ordered = ids.into_iter().collect::<Vec<_>>();
+        ordered.sort_unstable();
+        for id in ordered {
+            let hunk = &self.hunks[id - 1];
+            if current_paths.contains_key(&hunk.path)
+                && current_paths
+                    .get(&hunk.path)
+                    .is_some_and(|bases| bases.contains(&hunk.base))
+                && fresh_anchors.contains(&(
+                    hunk.path.clone(),
+                    hunk.base.clone(),
+                    hunk.header.clone(),
+                ))
+            {
+                audit.fresh.push(id);
+                continue;
+            }
+            let reason = if !current_paths.contains_key(&hunk.path) {
+                "reviewed file no longer has unstaged differences"
+            } else if current_paths
+                .get(&hunk.path)
+                .is_some_and(|bases| !bases.contains(&hunk.base))
+            {
+                "index base changed for this file"
+            } else {
+                "reviewed line range no longer matches the file"
+            };
+            audit.stale.push(StaleHunk {
+                id,
+                path: hunk.path.clone(),
+                reason,
+            });
+        }
+        Ok(audit)
+    }
+
+    /// Selects the chosen hunks from the freshly captured `current` patch,
+    /// but only when every reviewed hunk still anchors to the same file and
+    /// base it was reviewed against. Any stale hunk fails the whole selection
+    /// with a per-file conflict message; nothing is applied partially, and the
+    /// caller must refresh the review instead of overwriting.
+    pub fn select_verified(&self, chosen: &[usize], current: &HunkPatch) -> Result<String, String> {
+        let audit = self.verify_selection(chosen, current)?;
+        if audit.stale.is_empty() {
+            return current.select(&audit.fresh);
+        }
+        let details = audit
+            .stale
+            .iter()
+            .map(|stale| format!("#{} {}: {}", stale.id, stale.path, stale.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(format!(
+            "review base is stale; refresh and reselect: {details}"
+        ))
     }
 
     /// Stage every hunk of every chosen atomic group.
@@ -292,6 +552,19 @@ impl HunkPatch {
         flattened.dedup();
         Ok(flattened)
     }
+}
+
+/// Derives the new-side path from a `diff --git a/x b/y` header line. Used
+/// only as a fallback for differences without `+++` and without explicit
+/// rename/copy destinations.
+fn fallback_diff_path(line: &str) -> Option<String> {
+    let body = line.strip_prefix("diff --git ")?;
+    let position = body.find(" b/")?;
+    let candidate = body[position + 3..].trim_end_matches('\t');
+    if candidate.is_empty() || candidate.chars().any(char::is_control) {
+        return None;
+    }
+    Some(candidate.to_owned())
 }
 
 /// Rebuild a creation patch that contains only the selected added lines.
@@ -390,6 +663,136 @@ mod tests {
         )
         .unwrap();
         assert!(renamed.hunks().is_empty());
+    }
+
+    #[test]
+    fn binary_and_rename_files_get_explicit_non_editable_review_states() {
+        let patch = HunkPatch::parse(
+            "diff --git a/old.rs b/new.rs\nsimilarity index 70%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .unwrap();
+        let reviews = patch.file_reviews();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].path, "new.rs");
+        assert_eq!(reviews[0].old_path.as_deref(), Some("old.rs"));
+        assert_eq!(reviews[0].state, FileReviewState::Renamed);
+        assert!(reviews[0].hunk_ids.is_empty());
+        assert!(!reviews[0].state.supports_hunk_staging());
+
+        let binary = HunkPatch::parse(
+            "diff --git a/blob.bin b/blob.bin\nindex 1234567..89abcde 100644\nGIT binary patch\nliteral 4\nc2VjcmV0\n",
+        )
+        .unwrap();
+        let reviews = binary.file_reviews();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].path, "blob.bin");
+        assert_eq!(reviews[0].state, FileReviewState::Binary);
+        assert!(!reviews[0].state.supports_hunk_staging());
+    }
+
+    #[test]
+    fn deleted_mode_only_and_submodule_files_get_review_states() {
+        let combined = "diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\nindex 1111111..0000000\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-content\ndiff --git a/lib.rs b/lib.rs\nold mode 100644\nnew mode 100755\ndiff --git a/sub b/sub\nindex abcdef1..1234567 160000\nSubmodule sub abcdef111111111111111111111111111111111..1234567890123456789012345678901234567890:\n";
+        let patch = HunkPatch::parse(combined).unwrap();
+        assert!(patch.hunks().is_empty());
+        let reviews = patch.file_reviews();
+        let states = reviews
+            .iter()
+            .map(|review| (review.path.as_str(), review.state))
+            .collect::<Vec<_>>();
+        assert!(states.contains(&("gone.rs", FileReviewState::Deleted)));
+        assert!(states.contains(&("lib.rs", FileReviewState::ModeOnly)));
+        assert!(states.contains(&("sub", FileReviewState::Submodule)));
+        assert!(reviews.iter().all(|review| review.hunk_ids.is_empty()));
+    }
+
+    #[test]
+    fn a_changed_base_marks_the_selected_hunk_stale() {
+        let reviewed = HunkPatch::parse(PATCH).unwrap();
+        let current = HunkPatch::parse(
+            "diff --git a/src/main.rs b/src/main.rs\nindex 9999999..2222222 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let error = reviewed
+            .select_verified(&[1], &current)
+            .expect_err("a changed index base must refuse staging");
+        assert!(error.contains("index base changed"), "{error}");
+        assert!(error.contains("src/main.rs"));
+        let audit = reviewed.verify_selection(&[1], &current).unwrap();
+        assert!(audit.fresh.is_empty());
+        assert_eq!(audit.stale.len(), 1);
+        assert_eq!(audit.stale[0].reason, "index base changed for this file");
+    }
+
+    #[test]
+    fn a_moved_line_range_is_reported_as_stale_with_exact_path_targeting() {
+        let reviewed = HunkPatch::parse(PATCH).unwrap();
+        let current = HunkPatch::parse(
+            "diff --git a/src/main.rs b/src/main.rs\nindex 1111111..2222222 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -7,1 +7,1 @@\n-older\n+newer\n",
+        )
+        .unwrap();
+        let audit = reviewed.verify_selection(&[2], &current).unwrap();
+        assert!(audit.fresh.is_empty());
+        assert_eq!(audit.stale.len(), 1);
+        assert_eq!(audit.stale[0].path, "src/main.rs");
+        assert_eq!(
+            audit.stale[0].reason,
+            "reviewed line range no longer matches the file"
+        );
+        assert!(reviewed.select_verified(&[2], &current).is_err());
+    }
+
+    #[test]
+    fn a_vanished_file_difference_is_reported_as_stale() {
+        let combined = format!(
+            "{PATCH}diff --git a/other.rs b/other.rs\nindex 4444444..5555555 100644\n--- a/other.rs\n+++ b/other.rs\n@@ -1,1 +1,1 @@\n-a\n+b\n"
+        );
+        let reviewed = HunkPatch::parse(&combined).unwrap();
+        let current = HunkPatch::parse(PATCH).unwrap();
+        let audit = reviewed.verify_selection(&[3], &current).unwrap();
+        assert!(audit.fresh.is_empty());
+        assert_eq!(
+            audit.stale[0].reason,
+            "reviewed file no longer has unstaged differences"
+        );
+    }
+
+    #[test]
+    fn selecting_hunks_of_an_unchanged_file_survives_unrelated_file_changes() {
+        let combined = format!(
+            "{PATCH}diff --git a/generated.rs b/generated.rs\nindex 6666666..7777777 100644\n--- a/generated.rs\n+++ b/generated.rs\n@@ -1,1 +1,1 @@\n-a\n+b\n"
+        );
+        let reviewed = HunkPatch::parse(&combined).unwrap();
+        let mut drifted = String::new();
+        for line in combined.lines() {
+            if line.starts_with("index 6666666") {
+                drifted.push_str("index 6666668..7777778 100644\n");
+            } else {
+                drifted.push_str(line);
+                drifted.push('\n');
+            }
+        }
+        let current = HunkPatch::parse(&drifted).unwrap();
+        let audit = reviewed.verify_selection(&[1], &current).unwrap();
+        assert_eq!(audit.fresh, vec![1]);
+        assert!(audit.stale.is_empty());
+
+        let audit = reviewed.verify_selection(&[3], &current).unwrap();
+        assert!(audit.fresh.is_empty());
+        assert_eq!(audit.stale[0].reason, "index base changed for this file");
+    }
+
+    #[test]
+    fn verified_selection_takes_its_content_from_the_fresh_patch() {
+        let reviewed = HunkPatch::parse(PATCH).unwrap();
+        let current = HunkPatch::parse(
+            "diff --git a/src/main.rs b/src/main.rs\nindex 1111111..2222222 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+fresh\n@@ -20,1 +20,1 @@\n-older\n+newer\n",
+        )
+        .unwrap();
+        let staged = reviewed.select_verified(&[1], &current).unwrap();
+        assert!(staged.contains("+fresh"), "{staged}");
+        assert!(!staged.contains("+new\n"));
+        assert!(staged.contains("@@ -1,1 +1,1 @@"));
     }
 
     const NEW_FILE: &str = "diff --git a/new.rs b/new.rs\nnew file mode 100644\nindex 0000000..3333333\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1,1 @@\n+one\n@@ -0,0 +3,1 @@\n+two\n";
