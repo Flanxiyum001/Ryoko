@@ -672,6 +672,7 @@ impl ChangeValidator for FixtureValidator {
         }
 
         let mut logs = vec![
+            format!("spec test files: {test_file}; command: rustc --test {test_file}"),
             "runner: rustc --test, executed trusted builtin source".to_owned(),
             format!("executed: {}", executed.join(", ")),
         ];
