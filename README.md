@@ -288,6 +288,7 @@ The root workspace is organized as follows:
 | `ryoko-vfs` | Incremental virtual document store used by the language server |
 | `ryoko-scripting` | WASI-sandboxed plugin manifest, ABI, host and agent adapter |
 | `ryoko-marketplace` | Experimental registry client and CLI for MCP extensions and WASI skills; not a trusted public plugin store |
+| `ryoko-github` | GitHub account sign-in (OAuth device flow), repository access and checkout fetch/pull/push sync; credentials live in the host's Git credential helper |
 
 External tools use the [MCP client](docs/architecture/MCP_CLIENT.md): attach an explicitly chosen stdio server to a run with `--mcp-server`, a mandatory `--mcp-allow-tool` list, and `--mcp-max-calls`. Every call still requires a fresh terminal `YES`; the run's model budget and the separate call cap are checked first. Extensions use the [WASI plugin API](docs/architecture/PLUGINS.md): a JSON manifest declares `agent`, `linter` or `context`, a host-owned policy must allow its id and kind, and every invocation gets no filesystem, no environment, no arguments and no network, bounded by fuel, time, memory and output limits.
 
@@ -296,6 +297,8 @@ See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) a
 ## Desktop app
 
 `apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` and registered standard language servers through a multiplexed stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server. Writes to sensitive paths (`.env*`, CI workflows, credential files) additionally require an OS-native, one-time confirmation before any filesystem mutation; cancellation denies the write. This does not yet gate arbitrary agent shell/network actions, which are not exposed through the current desktop IPC.
+
+The **GitHub account** panel signs in with an OAuth device flow (your own OAuth App client ID in `RYOKO_GITHUB_CLIENT_ID`) or adopts an existing `RYOKO_GITHUB_TOKEN` / stored Git credential. One session lists and clones your repositories, fetches, fast-forward pulls and pushes the open checkout, and can select a GitHub Copilot model for the agent. The token is never written into the workspace: it stays in the shell process and, when the host has a Git credential helper, in that OS-backed store. See [the GitHub integration notes](docs/architecture/GITHUB_INTEGRATION.md).
 
     cargo build -p ryoko-native --bin ryoko-lsp
     cd apps/desktop

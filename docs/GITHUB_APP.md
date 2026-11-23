@@ -1,5 +1,11 @@
 # Ryoko GitHub App and Workbench (experimental)
 
+> For a single user working in the desktop IDE, use the native account instead:
+> [architecture/GITHUB_INTEGRATION.md](architecture/GITHUB_INTEGRATION.md). It
+> needs no server, no App registration and no installation step, and it covers
+> repositories, checkout sync and Copilot. This page remains the multi-user
+> server broker with webhooks, Mission Control sessions and an approval queue.
+
 This integration adds a **trusted GitHub App broker** and a **browser-hosted, Tauri-ready IDE workbench** with Agent Mission Control. It does **not** register the GitHub App automatically, package a native binary, merge code or deploy applications.
 
 Use [the least-privilege App manifest template](../configs/github-app-manifest.example.json) as a registration reference. Replace YOUR_HOST before registering. For this prototype, leave request_oauth_on_install disabled and use the explicit Connect GitHub button, which creates a per-session OAuth state first.

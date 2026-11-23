@@ -386,6 +386,28 @@ pre.mission-detail-value {
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 
+/* Native GitHub account, repositories, checkout sync and Copilot. */
+.github-account {
+  display: flex; flex-direction: column;
+  border-bottom: 1px solid var(--border);
+}
+.github-account-body { display: flex; flex-direction: column; gap: 7px; padding: 0 10px 9px; }
+.github-account-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.github-login { display: flex; flex-direction: column; gap: 4px; }
+.github-user-code {
+  display: inline-block; padding: 5px 9px; border-radius: 6px;
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); font-size: 15px; letter-spacing: .16em;
+}
+.github-repos { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; }
+.github-repos select, .github-repos input { min-width: 0; }
+.github-sync { display: flex; flex-direction: column; gap: 3px; }
+.github-sync-head { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text); }
+.github-copilot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.github-copilot-label {
+  font-size: 10px; letter-spacing: .08em; color: var(--muted);
+}
+
 /* Read-only GitHub queue backed by the user's authenticated gh CLI. */
 .github-queue {
   display: flex; flex-direction: column; flex: 0 0 23%; min-height: 126px;

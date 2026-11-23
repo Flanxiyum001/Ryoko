@@ -265,6 +265,7 @@ pub fn start_run(
     check_command: Option<String>,
     state: State<'_, RunState>,
     workspace: State<'_, WorkspaceState>,
+    github: State<'_, crate::github_account::GitHubAccountState>,
 ) -> Result<RunStatus, String> {
     let goal = goal.trim();
     if goal.is_empty() {
@@ -384,6 +385,11 @@ pub fn start_run(
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(stderr))
         .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(token) = crate::github_account::copilot_token(&github) {
+        // A `copilot` provider profile resolves its credential from this
+        // variable. It reaches only this child process, never a config file.
+        command.env("RYOKO_GITHUB_TOKEN", token);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

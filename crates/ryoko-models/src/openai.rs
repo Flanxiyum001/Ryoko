@@ -275,7 +275,7 @@ fn wire_message(message: &Message) -> Value {
     wire
 }
 
-fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
+pub(crate) fn decode_sse(response: reqwest::Response, provider: String) -> ModelStream {
     Box::pin(async_stream::stream! {
         let mut bytes = response.bytes_stream();
         let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);

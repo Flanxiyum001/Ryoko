@@ -25,6 +25,7 @@ import {
 } from './keybindings';
 import { mountConnectors } from './connectors_panel';
 import { mountMarketplaceBrowser } from './marketplace_browser';
+import { mountGitHubAccount } from './github_account';
 import { mountGithubQueue } from './github_queue';
 import {
   focusMissionTasks,
@@ -843,6 +844,12 @@ async function loadFiles(): Promise<void> {
 async function openFolder(): Promise<void> {
   const selected = await open({ directory: true, multiple: false });
   if (typeof selected !== 'string') return;
+  await openFolderAt(selected);
+}
+
+/** Opens an already-chosen folder through the same guards and reset as the
+ * folder picker, so a clone from the GitHub panel cannot discard unsaved work. */
+async function openFolderAt(selected: string): Promise<void> {
   if ([...openFiles.values()].some((file) => file.dirty)
     && !window.confirm('Switch workspaces and discard unsaved edits?')) {
     return;
@@ -2097,6 +2104,7 @@ window.addEventListener('beforeunload', () => {
 
 setLspState('offline');
 renderMissionOptions();
+mountGitHubAccount(setStatus, openFolderAt);
 mountGithubQueue(setStatus);
 mountConnectors(setStatus);
 mountMarketplaceBrowser(setStatus);

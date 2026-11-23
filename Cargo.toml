@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ryoko-core",
+    "crates/ryoko-github",
     "crates/ryoko-models",
     "crates/ryoko-native",
     "crates/ryoko-orchestrator",

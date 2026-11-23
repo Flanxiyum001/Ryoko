@@ -7,6 +7,7 @@
 
 mod anthropic;
 mod config;
+mod copilot;
 mod fim;
 mod gemini;
 mod ledger;
@@ -18,6 +19,7 @@ mod types;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider, anthropic_wire_body};
 pub use config::{ProviderCatalog, ProviderProfile, WireProtocol};
+pub use copilot::{CopilotConfig, CopilotProvider};
 pub use fim::{FimClient, FimConfig};
 pub use gemini::{GeminiConfig, GeminiProvider, gemini_wire_body, parse_gemini_response};
 pub use ledger::{Budget, LedgerSnapshot, UsageLedger};

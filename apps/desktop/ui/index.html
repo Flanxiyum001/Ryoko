@@ -175,6 +175,48 @@
           </div>
           <pre id="connectorInspect" class="connector-inspect hidden" aria-live="polite"></pre>
         </details>
+        <details class="github-account" id="githubAccountPanel" open>
+          <summary>GITHUB ACCOUNT <span id="githubAccountSummary" class="counter">not connected</span></summary>
+          <div class="github-account-body">
+            <p id="githubAccountNotice" class="connector-notice hidden" role="alert"></p>
+            <p class="hint">Sign in once for repositories, checkout sync and Copilot. The token stays in the OS credential helper; Ryoko never writes it to this project.</p>
+            <div class="github-account-actions">
+              <button id="githubSignIn" class="button primary compact" type="button">Sign in with GitHub</button>
+              <button id="githubConnectExisting" class="button ghost compact" type="button">Use existing credential</button>
+              <button id="githubSignOut" class="button ghost compact" type="button">Sign out</button>
+            </div>
+            <div id="githubLoginBox" class="github-login hidden">
+              <p class="hint">Open <a id="githubVerification" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">github.com/login/device</a> and enter:</p>
+              <code id="githubUserCode" class="github-user-code">····-····</code>
+              <p id="githubLoginState" class="hint" role="status" aria-live="polite"></p>
+            </div>
+            <div class="github-repos">
+              <label class="sr-only" for="githubRepoSelect">Your GitHub repositories</label>
+              <select id="githubRepoSelect" aria-label="Your GitHub repositories"></select>
+              <label class="sr-only" for="githubCloneParent">Folder that receives cloned repositories</label>
+              <input id="githubCloneParent" type="text" readonly placeholder="Choose a folder for clones…">
+              <button id="githubChooseParent" class="button ghost compact" type="button">Folder…</button>
+              <button id="githubClone" class="button primary compact" type="button">Clone &amp; open</button>
+            </div>
+            <div class="github-sync">
+              <div class="github-sync-head">
+                <span id="githubSyncLabel">Not a Git repository</span>
+                <span class="status-spacer"></span>
+                <button id="githubFetch" class="button ghost compact" type="button">Fetch</button>
+                <button id="githubPull" class="button ghost compact" type="button">Pull</button>
+                <button id="githubPush" class="button ghost compact" type="button">Push</button>
+              </div>
+              <p id="githubSyncHint" class="hint"></p>
+            </div>
+            <div class="github-copilot">
+              <span class="github-copilot-label">COPILOT</span>
+              <label class="sr-only" for="githubCopilotModel">Copilot model</label>
+              <select id="githubCopilotModel" aria-label="Copilot model"></select>
+              <button id="githubCopilotUse" class="button ghost compact" type="button">Use for this workspace</button>
+              <span id="githubCopilotStatus" class="hint">Connect GitHub to check Copilot.</span>
+            </div>
+          </div>
+        </details>
         <details class="github-queue">
           <summary>GITHUB PR / ISSUE QUEUE <span id="githubQueueCount" class="counter">not connected</span></summary>
           <div class="github-pair">

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use ryoko_models::{
     ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog, ProviderProfile,
-    UsageLedger,
+    UsageLedger, WireProtocol,
 };
 
 fn env(name: &str) -> Option<String> {
@@ -21,15 +21,26 @@ fn env(name: &str) -> Option<String> {
 }
 
 /// Resolves the model selection and a router that can serve it, preferring
-/// the workspace catalog over the environment fallback.
-pub fn load_router(root: &Path, model: Option<&str>) -> Result<(String, Arc<ModelRouter>), String> {
+/// an explicit choice, then `RYOKO_MODEL`, then the workspace's saved default
+/// (`github_use_copilot` writes one).
+///
+/// `copilot_token` supplies a signed-in GitHub session for a `copilot` provider
+/// without putting the token in the process environment.
+pub fn load_router(
+    root: &Path,
+    model: Option<&str>,
+    copilot_token: Option<&str>,
+) -> Result<(String, Arc<ModelRouter>), String> {
     let model = model
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .map(str::to_owned)
         .or_else(|| env("RYOKO_MODEL"))
+        .or_else(|| crate::settings::load_default_model(root).ok().flatten())
         .ok_or_else(|| {
-            "no model selected: pick one in the settings panel or set RYOKO_MODEL".to_owned()
+            "no model selected: pick one in the settings panel, set RYOKO_MODEL or connect \
+             GitHub Copilot"
+                .to_owned()
         })?;
     let ledger = UsageLedger::new(None);
 
@@ -46,7 +57,13 @@ pub fn load_router(root: &Path, model: Option<&str>) -> Result<(String, Arc<Mode
         let catalog = ProviderCatalog::parse_json(&json)
             .map_err(|error| format!("invalid provider catalog: {error}"))?;
         let router = catalog
-            .build_router_for_models([model.as_str()])
+            .build_router_for_models_with_secrets([model.as_str()], |profile| {
+                if profile.wire == Some(WireProtocol::Copilot) {
+                    copilot_token.map(str::to_owned)
+                } else {
+                    None
+                }
+            })
             .map_err(|error| format!("invalid provider catalog: {error}"))?
             .with_ledger(ledger);
         return Ok((model, Arc::new(router)));
@@ -113,8 +130,32 @@ mod tests {
     #[test]
     fn a_missing_model_selection_is_refused_with_guidance() {
         let workspace = TempWorkspace::new();
-        let error = load_router(&workspace.0, None).expect_err("no model anywhere");
+        let error = load_router(&workspace.0, None, None).expect_err("no model anywhere");
         assert!(error.contains("RYOKO_MODEL") || error.contains("settings panel"));
+    }
+
+    #[test]
+    fn the_saved_default_model_resolves_a_bare_selection() {
+        let workspace = TempWorkspace::new();
+        crate::settings::save_providers(
+            &workspace.0,
+            &serde_json::json!({
+                "default_provider": "ollama",
+                "providers": [{
+                    "id": "ollama",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "api_key_env": "RYOKO_MUXCHECK_KEY"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("valid catalog saves");
+        crate::settings::save_default_model(&workspace.0, "qwen3-coder").expect("model saves");
+        unsafe {
+            std::env::set_var("RYOKO_MUXCHECK_KEY", "test-token");
+        }
+        let (model, _router) = load_router(&workspace.0, None, None).expect("saved default model");
+        assert_eq!(model, "qwen3-coder");
     }
 
     #[test]
@@ -136,7 +177,7 @@ mod tests {
         unsafe {
             std::env::set_var("RYOKO_MUXCHECK_KEY", "test-token");
         }
-        let (model, _router) = load_router(&workspace.0, Some("qwen3-coder"))
+        let (model, _router) = load_router(&workspace.0, Some("qwen3-coder"), None)
             .expect("catalog covers a bare model id via default_provider");
         assert_eq!(model, "qwen3-coder");
     }
@@ -157,6 +198,6 @@ mod tests {
             .to_string(),
         )
         .expect("valid catalog saves");
-        assert!(load_router(&workspace.0, Some("missing/variant")).is_err());
+        assert!(load_router(&workspace.0, Some("missing/variant"), None).is_err());
     }
 }

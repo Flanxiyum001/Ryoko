@@ -8,6 +8,7 @@ only when its first real consumer exists.
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `ryoko-cli` | Argument parsing, terminal workflows, MCP stdio process transport and operator prompts, connector catalog commands, provider/team configuration, run and review commands | Domain rules, provider payloads |
+| `ryoko-github` | GitHub account sign-in (OAuth device flow), repository listing, checkout fetch/fast-forward/push sync and credential handling through the host's Git credential helper | Model payloads (see `ryoko-models::copilot`), editor UI, worktree lifecycle |
 | `ryoko-core` | Domain types (`Task`, `TaskResult`, `AgentRole`), agent runtime contract, `ModelAgent` tool loop, orchestrator, IACP, MCP protocol, approval gate, bounded MCP toolbox and multi-connector mounting, connector registry and readiness, in-process memory blackboard, tree-sitter context extraction | HTTP, process spawning, editor UI |
 | `ryoko-models` | Provider adapters, provider catalogue, model routing, streaming events, usage and budget ledger | Task planning, file access |
 | `ryoko-native` | LSP server over stdio, diagnostics publishing, code lenses, quick fixes, execute commands | Workspace lifetime, model calls |

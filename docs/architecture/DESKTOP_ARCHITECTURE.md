@@ -44,6 +44,17 @@ workspace_search(...)           bounded regex search over the open workspace
 workspace_replace_preview(...)  dry-run replace plans with drift markers
 workspace_replace_apply(...)    applies only what the preview showed
 inline_edit(args)               one targeted model edit for the active selection
+github_status()                 redacted GitHub account state (no token)
+github_connect_existing()       adopt RYOKO_GITHUB_TOKEN or a stored Git credential
+github_sign_in_start()          begin OAuth device-flow sign-in
+github_sign_in_poll()           finish or report a pending sign-in
+github_sign_out()               drop the session and erase the helper entry
+github_repositories()           repositories the account can access
+github_clone_repository(...)    clone into a sibling folder and open it
+git_sync_status()               branch, upstream, ahead/behind, dirty
+git_sync(action)                fetch, fast-forward pull or push
+github_copilot_models()         Copilot models for the signed-in account
+github_use_copilot(model)       write a validated Copilot catalog + default model
 settings_read() / settings_save_providers(json)        visual settings surface
 settings_save_lsp_servers(json) validated language-server registry
 workbench_protocol_version()    lets the webview feature-detect the surface
@@ -253,6 +264,28 @@ as HTML. A missing database simply means no sessions have been recorded.
 The panel refreshes when a workspace opens and when the operator presses
 **Refresh**. It does not poll, so a stale view is visible rather than silently
 changing while the operator reads it.
+
+## Native GitHub account
+
+The **GitHub account** panel signs the IDE in once and then uses that session for
+repositories, checkout sync and Copilot. Sign-in is an OAuth device flow with
+the operator's own client ID (`RYOKO_GITHUB_CLIENT_ID`), so there is no server
+and no client secret. **Use existing credential** adopts `RYOKO_GITHUB_TOKEN` or
+the token Git's credential helper already stores for `github.com`.
+
+The token stays in the Rust process and, when the host helper can hold it, in
+that OS-backed store; it is written to the helper on stdin and never into the
+workspace, an event log or a rendered status. Cloning re-checks the repository
+against the account's own list, refuses an existing destination, and opens the
+clone as the workspace. Sync is `fetch`, a `--ff-only` pull that refuses a dirty
+or diverged checkout, and a non-forcing push; the token reaches Git through an
+ephemeral credential helper plus the environment, and only for an
+`https://github.com/...` remote.
+
+**Use for this workspace** writes `.ryoko/desktop/providers.json` with one
+`copilot` profile plus a default model, so the agent and inline edit run on the
+user's Copilot seat. See [GITHUB_INTEGRATION.md](GITHUB_INTEGRATION.md) for the
+credential flow, the Copilot exchange and the documented limitation.
 
 ## Native GitHub review queue
 

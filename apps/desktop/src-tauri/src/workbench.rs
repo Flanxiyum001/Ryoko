@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::git_status::{self, ChangeEntry};
+use crate::github_account::GitHubAccountState;
 use crate::inline_edit::{self, InlineEditRequest};
 use crate::search::{self, SearchHit};
 use crate::servers::LspRegistry;
@@ -406,6 +407,7 @@ pub struct InlineEditReply {
 pub async fn inline_edit(
     args: InlineEditArgs,
     state: State<'_, WorkspaceState>,
+    github: State<'_, GitHubAccountState>,
 ) -> Result<InlineEditReply, String> {
     if args.instructions.trim().is_empty() {
         return Err("inline edit instructions cannot be empty".to_owned());
@@ -418,7 +420,9 @@ pub async fn inline_edit(
         return Err("inline edit context exceeds the size limit".to_owned());
     }
     let root = current_root(&state)?;
-    let (model, router) = crate::model_runtime::load_router(&root, args.model.as_deref())?;
+    let copilot_token = crate::github_account::copilot_token(&github);
+    let (model, router) =
+        crate::model_runtime::load_router(&root, args.model.as_deref(), copilot_token.as_deref())?;
     let request = InlineEditRequest {
         instructions: args.instructions,
         language: args.language,

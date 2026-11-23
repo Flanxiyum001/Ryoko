@@ -2,6 +2,7 @@ mod completion;
 mod connectors;
 mod debug_adapter;
 mod git_status;
+mod github_account;
 mod github_queue;
 mod inline_edit;
 mod lsp;
@@ -29,6 +30,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(workspace::WorkspaceState::default())
         .manage(github_queue::GitHubQueueState::default())
+        .manage(github_account::GitHubAccountState::default())
         .manage(lsp::LspState::default())
         .manage(run::RunState::default())
         .manage(completion::CompletionState::default())
@@ -55,6 +57,17 @@ pub fn run() {
             marketplace::marketplace_catalog,
             mission::list_mission_logs,
             mission::read_mission_log,
+            github_account::github_status,
+            github_account::github_connect_existing,
+            github_account::github_sign_in_start,
+            github_account::github_sign_in_poll,
+            github_account::github_sign_out,
+            github_account::github_repositories,
+            github_account::github_clone_repository,
+            github_account::git_sync_status,
+            github_account::git_sync,
+            github_account::github_copilot_models,
+            github_account::github_use_copilot,
             github_queue::pair_github_queue,
             github_queue::disconnect_github_queue,
             github_queue::list_github_repositories,

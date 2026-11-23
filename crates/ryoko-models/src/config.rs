@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic::{AnthropicConfig, AnthropicProvider};
+use crate::copilot::{CopilotConfig, CopilotProvider};
 use crate::gemini::{GeminiConfig, GeminiProvider};
 use crate::{ModelError, ModelProvider, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider};
 
@@ -20,6 +21,10 @@ pub enum WireProtocol {
     OpenAi,
     Anthropic,
     Gemini,
+    /// GitHub Copilot chat completions. The configured key is a GitHub token
+    /// with the `Copilot requests` permission, or an OAuth token that the
+    /// adapter exchanges for a short-lived Copilot bearer.
+    Copilot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +134,23 @@ impl ProviderProfile {
                 return Err(invalid("native Gemini requires HTTPS"));
             }
         }
+        if self.wire == Some(WireProtocol::Copilot) {
+            if self.api_key_env.is_none() {
+                return Err(invalid(format!(
+                    "provider {} requires api_key_env naming a GitHub token for Copilot",
+                    self.id
+                )));
+            }
+            if url.scheme() != "https" {
+                return Err(invalid("GitHub Copilot requires HTTPS"));
+            }
+            if self.chat_path.is_some() {
+                return Err(invalid(format!(
+                    "provider {} must not set chat_path for Copilot",
+                    self.id
+                )));
+            }
+        }
         if let Some(path) = &self.chat_path {
             if !path.starts_with('/')
                 || path.starts_with("//")
@@ -147,9 +169,28 @@ impl ProviderProfile {
     }
 
     fn to_provider(&self) -> Result<Arc<dyn ModelProvider>, ModelError> {
+        self.to_provider_with(None)
+    }
+
+    /// Builds the provider with an explicit secret, used for a credential the
+    /// caller already holds (a signed-in GitHub session) instead of one read
+    /// from the process environment.
+    fn to_provider_with(
+        &self,
+        secret: Option<String>,
+    ) -> Result<Arc<dyn ModelProvider>, ModelError> {
         self.validate()?;
-        let api_key = match &self.api_key_env {
-            Some(var) => {
+        let api_key = match (&self.api_key_env, secret) {
+            (_, Some(secret)) => {
+                if secret.trim().is_empty() {
+                    return Err(invalid(format!(
+                        "provider {} was given an empty credential",
+                        self.id
+                    )));
+                }
+                Some(secret)
+            }
+            (Some(var), None) => {
                 let key = std::env::var(var).map_err(|_| {
                     invalid(format!(
                         "provider {} requires the environment variable {var}",
@@ -164,7 +205,7 @@ impl ProviderProfile {
                 }
                 Some(key)
             }
-            None => None,
+            (None, None) => None,
         };
 
         match self.wire.unwrap_or_default() {
@@ -191,6 +232,17 @@ impl ProviderProfile {
                     config = config.with_api_key(key);
                 }
                 Ok(Arc::new(GeminiProvider::new(config)?))
+            }
+            WireProtocol::Copilot => {
+                let key = api_key.ok_or_else(|| {
+                    invalid(format!(
+                        "provider {} requires a GitHub token for Copilot",
+                        self.id
+                    ))
+                })?;
+                let mut config = CopilotConfig::new(&self.id, key);
+                config.api_base = Some(self.base_url.clone());
+                Ok(Arc::new(CopilotProvider::new(config)?))
             }
         }
     }
@@ -231,6 +283,17 @@ impl ProviderCatalog {
         &self,
         models: impl IntoIterator<Item = &'a str>,
     ) -> Result<ModelRouter, ModelError> {
+        self.build_router_for_models_with_secrets(models, |_| None)
+    }
+
+    /// Like [`Self::build_router_for_models`], but a caller that already holds
+    /// a secret (for example a signed-in GitHub session) can supply it for the
+    /// matching provider instead of requiring the environment variable.
+    pub fn build_router_for_models_with_secrets<'a>(
+        &self,
+        models: impl IntoIterator<Item = &'a str>,
+        mut secret_for: impl FnMut(&ProviderProfile) -> Option<String>,
+    ) -> Result<ModelRouter, ModelError> {
         self.validate()?;
         let mut required = HashSet::new();
         for model in models {
@@ -261,7 +324,7 @@ impl ProviderCatalog {
         let mut router = ModelRouter::new(&self.default_provider);
         for profile in &self.providers {
             if required.contains(&profile.id) {
-                router.register(profile.to_provider()?);
+                router.register(profile.to_provider_with(secret_for(profile))?);
             }
         }
         Ok(router)
@@ -326,6 +389,49 @@ mod tests {
         catalog.providers[0].wire = Some(WireProtocol::Anthropic);
         let router = catalog.build_router().unwrap();
         assert_eq!(router.providers().count(), 1);
+    }
+
+    fn copilot_catalog() -> ProviderCatalog {
+        let mut catalog = example();
+        catalog.default_provider = "github-copilot".into();
+        catalog.providers[0].id = "github-copilot".into();
+        catalog.providers[0].base_url = "https://api.githubcopilot.com".into();
+        catalog.providers[0].wire = Some(WireProtocol::Copilot);
+        catalog
+    }
+
+    #[test]
+    fn copilot_profiles_require_https_and_a_credential_reference() {
+        let mut catalog = copilot_catalog();
+        assert!(catalog.validate().is_err());
+        catalog.providers[0].api_key_env = Some("RYOKO_GITHUB_TOKEN".into());
+        assert!(catalog.validate().is_ok());
+        catalog.providers[0].base_url = "http://api.githubcopilot.com".into();
+        assert!(catalog.validate().is_err());
+        catalog.providers[0].base_url = "https://api.githubcopilot.com".into();
+        catalog.providers[0].chat_path = Some("/chat/completions".into());
+        assert!(catalog.validate().is_err());
+    }
+
+    #[test]
+    fn a_signed_in_secret_builds_copilot_without_the_environment() {
+        let mut catalog = copilot_catalog();
+        catalog.providers[0].api_key_env = Some("RYOKO_UNSET_COPILOT_TEST_KEY_551023".into());
+        assert!(
+            catalog
+                .build_router_for_models(["github-copilot/gpt-4o"])
+                .is_err(),
+            "no environment key and no supplied secret is an error"
+        );
+        let router = catalog
+            .build_router_for_models_with_secrets(["github-copilot/gpt-4o"], |profile| {
+                (profile.wire == Some(WireProtocol::Copilot)).then(|| "github_pat_test".to_owned())
+            })
+            .expect("the session token builds the provider");
+        assert_eq!(
+            router.providers().collect::<Vec<_>>(),
+            vec!["github-copilot"]
+        );
     }
 
     #[test]

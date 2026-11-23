@@ -13,6 +13,8 @@ use ryoko_models::ProviderCatalog;
 
 pub const PROVIDERS_FILE: &str = "providers.json";
 pub const LSP_REGISTRY_FILE: &str = "lsp.json";
+/// The model the workbench uses when no model is passed explicitly.
+pub const MODEL_FILE: &str = "model.json";
 const MAX_SETTINGS_BYTES: u64 = 256 * 1024;
 
 pub fn settings_dir(root: &Path) -> PathBuf {
@@ -73,6 +75,43 @@ pub fn save_providers(root: &Path, json: &str) -> Result<String, String> {
 
 pub fn load_providers(root: &Path) -> Result<Option<String>, String> {
     read_optional(&settings_dir(root).join(PROVIDERS_FILE))
+}
+
+/// Saves the default model selection (`provider/model` or a bare id). Only
+/// reachable from an explicit user action in the workbench.
+pub fn save_default_model(root: &Path, model: &str) -> Result<(), String> {
+    let model = model.trim();
+    if model.is_empty()
+        || model.len() > 200
+        || model.starts_with('/')
+        || model.contains("..")
+        || !model.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'/' | b':')
+        })
+    {
+        return Err("invalid model identifier".to_owned());
+    }
+    let payload = serde_json::json!({ "version": 1, "model": model }).to_string();
+    let directory = settings_dir(root);
+    crate::paths::create_directories_without_symlinks(root, &directory)?;
+    write_private(&directory.join(MODEL_FILE), &payload)
+}
+
+pub fn load_default_model(root: &Path) -> Result<Option<String>, String> {
+    let Some(raw) = read_optional(&settings_dir(root).join(MODEL_FILE))? else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let model = value
+        .get("model")
+        .and_then(|model| model.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && model.len() <= 200)
+        .map(str::to_owned);
+    Ok(model)
 }
 
 pub fn load_lsp_registry(root: &Path) -> Result<Option<String>, String> {
@@ -165,6 +204,19 @@ mod tests {
                 .expect("nothing written")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_default_model_round_trips_and_rejects_garbage() {
+        let workspace = TempWorkspace::new();
+        assert!(load_default_model(&workspace.0).unwrap().is_none());
+        save_default_model(&workspace.0, "github-copilot/gpt-4o").unwrap();
+        assert_eq!(
+            load_default_model(&workspace.0).unwrap().as_deref(),
+            Some("github-copilot/gpt-4o")
+        );
+        assert!(save_default_model(&workspace.0, "   ").is_err());
+        assert!(save_default_model(&workspace.0, "../../etc/passwd").is_err());
     }
 
     #[test]

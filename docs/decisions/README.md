@@ -20,6 +20,7 @@ accepted. An ADR is superseded, not edited, when the decision changes.
 | 013 | Durable event journal | In-memory broadcast only | Recovery and replay; storage and retention work |
 | 014 | Versioned plugin API before a marketplace | Ship a marketplace early | Stability; slower ecosystem growth |
 | 015 | Desktop LSP multiplexer routes per method, not per process | One multiplexer server; Monaco native providers only | One provider per language and fan-out sync; small routing layer to keep in sync with LSP |
+| 016 | Native GitHub account via OAuth device flow, with the host's Git credential helper as the token store | Server-side GitHub App broker for every user; bundling a keyring crate; Ryoko-owned secret file | No server or client secret to operate and no new system dependency; persistence depends on the host having a credential helper, so a session may be memory-only |
 
 ## Format for new ADRs
 
