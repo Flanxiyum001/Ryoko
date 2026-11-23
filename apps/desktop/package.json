@@ -11,7 +11,8 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "bench:quick-open": "vitest run --config vitest.bench.config.ts",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:ui": "playwright test"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",
@@ -21,6 +22,7 @@
     "monaco-editor": "^0.52.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@tauri-apps/cli": "^2.2.7",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
