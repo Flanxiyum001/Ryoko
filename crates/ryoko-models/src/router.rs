@@ -125,20 +125,24 @@ impl ModelRouter {
             .or(self.fallback_pricing);
         let ledger = self.ledger.clone();
         let reservation = if ledger.budget().is_some() {
-            let pricing = pricing.ok_or_else(|| ModelError::Configuration(
-                "bounded runs require pricing for every model".to_owned(),
-            ))?;
-            let output = provider_request.max_tokens.ok_or_else(|| ModelError::Configuration(
-                "bounded runs require max_tokens for every request".to_owned(),
-            ))?;
+            let pricing = pricing.ok_or_else(|| {
+                ModelError::Configuration("bounded runs require pricing for every model".to_owned())
+            })?;
+            let output = provider_request.max_tokens.ok_or_else(|| {
+                ModelError::Configuration(
+                    "bounded runs require max_tokens for every request".to_owned(),
+                )
+            })?;
             // UTF-8 bytes upper-bound text token counts; include serialized
             // protocol overhead and price all input at the dearer rate.
             let input = serde_json::to_vec(&provider_request)
                 .map_err(|error| ModelError::Configuration(error.to_string()))?
-                .len() as u64 + 1024;
+                .len() as u64
+                + 1024;
             let tokens = input.saturating_add(u64::from(output));
             let input_rate = pricing.input_per_mtok.max(pricing.cached_input_per_mtok);
-            let cost = (input as f64 * input_rate + output as f64 * pricing.output_per_mtok) / 1_000_000.0;
+            let cost =
+                (input as f64 * input_rate + output as f64 * pricing.output_per_mtok) / 1_000_000.0;
             ledger.reserve(scope.as_deref(), cost, tokens)?
         } else {
             None
