@@ -68,6 +68,10 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
+      - name: Generate branded native app icons
+        working-directory: apps/desktop
+        run: npm run icons
+
       - name: Run frontend unit tests
         working-directory: apps/desktop
         run: npm test
