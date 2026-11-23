@@ -6,7 +6,7 @@ The Ryoko release criteria ([`docs/releases/RELEASE_CRITERIA.md`](../releases/RE
 
 The evaluation framework operates on two execution paths:
 1. **Offline Deterministic CI Path (Default):** Runs fully offline in automated tests and standard CI with zero provider credentials or external network access.
-2. **Opt-in Live Provider Path:** Clearly marked as an opt-in non-blocking experiment with explicit budget caps, tracking token usage and cost.
+2. **Opt-in Live Provider Path:** Budgeted live evaluation is not yet wired to a configured model provider. Until it is, live requests must fail or be reported as skipped; a mock result must never be presented as a live-model score.
 
 ---
 
@@ -14,10 +14,7 @@ The evaluation framework operates on two execution paths:
 
 > [!IMPORTANT]
 > **No agent self-reported completion is ever accepted as passing evidence.**
-> Model responses are untrusted input. Even if an agent sets `success: true` or claims in prose that all bugs were fixed, task passing status is determined strictly by:
-> 1. Complete validation reports generated from isolated workspace execution.
-> 2. Trusted execution receipts (`validator:<task_id>:<receipt>`) verifying that required acceptance tests were executed.
-> 3. Zero regressions and strict path boundary checks.
+> Model responses are untrusted input. This offline suite only executes byte-for-byte trusted, built-in fixture programs using the actual Rust test runner. Each acceptance test must appear as an executed, passing test in the runner output. Changed or external proposals are rejected until a sandboxed validator is available; passing the built-in mock fixtures does **not** measure live coding-agent ability.
 > If an agent claims completion without verified validation evidence, the run is rejected and classified as `UnvalidatedSelfReport`.
 
 ---
@@ -51,6 +48,8 @@ When a task fails or is rejected, the evaluator assigns one of the following str
 
 ## Baseline Execution Results
 
+The figures below describe the **expected built-in offline smoke-test baseline**, not a measured live-model benchmark. Re-run the suite on the PR's current commit and use its emitted report as authoritative evidence.
+
 ### Summary Metrics
 
 | Metric | Baseline Value | Target Gate |
@@ -67,10 +66,10 @@ When a task fails or is rejected, the evaluator assigns one of the following str
 
 | Fixture ID | Category | Selected Model | Agent Self-Report | Validated Execution | Evidence Receipt | Status |
 |---|---|---|---|---|---|---|
-| `eval-bugfix-pagination` | Bug fix with regression | `mock/deterministic-agent` | Yes | Yes | `validator:eval-bugfix:...` | **PASS** |
-| `eval-multifile-token-bucket` | Multi-file feature | `mock/deterministic-agent` | Yes | Yes | `validator:eval-multifile:...` | **PASS** |
-| `eval-rejected-unsafe-traversal` | Rejected unsafe edit | `mock/deterministic-agent` | No | No (Rejected) | *None (Blocked)* | **PASS** |
-| `eval-unvalidated-self-report` | Adversarial counter-check | `mock/deterministic-agent` | Yes | No (Rejected) | *None (Blocked)* | **PASS** |
+| `eval-bugfix-pagination` | Bug fix with regression | `mock/deterministic-agent` | Yes | Rust tests actually executed | Runtime-generated receipt | **Expected PASS** |
+| `eval-multifile-token-bucket` | Multi-file feature | `mock/deterministic-agent` | Yes | Rust tests actually executed | Runtime-generated receipt | **Expected PASS** |
+| `eval-rejected-unsafe-traversal` | Rejected unsafe edit | `mock/deterministic-agent` | No | No (Rejected) | *None (Blocked)* | **Expected PASS** |
+| `eval-unvalidated-self-report` | Adversarial counter-check | `mock/deterministic-agent` | Claim in proposal text; parsed result rejected | No (Rejected) | *None (Blocked)* | **Expected PASS** |
 
 ---
 
@@ -110,9 +109,9 @@ Run a specific fixture:
 cargo run -p ryoko-cli -- eval --fixture eval-bugfix-pagination
 ```
 
-### 3. Opt-in Live Provider Evaluation (Non-Blocking)
+### 3. Opt-in Live Provider Evaluation (Not Production-Ready)
 
-To evaluate against a live model with an explicit budget cap:
+The CLI accepts an explicit budget cap, but a live model has **not** been connected to the evaluator's router. The following invocation is illustrative only, and is **not** evidence of a working live benchmark:
 
 ```sh
 export ANTHROPIC_API_KEY="..."
@@ -123,4 +122,4 @@ cargo run -p ryoko-cli -- eval \
   --budget-cap 0.50
 ```
 
-If API keys are not supplied, the runner marks live provider tests as non-blocking skips.
+Do not claim live evaluation passed, consumed a measured token budget, or was safely sandboxed until the model router, sandbox validation and usage accounting are wired and proven.
