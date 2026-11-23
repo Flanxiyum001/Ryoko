@@ -555,7 +555,9 @@ impl ChangeValidator for FixtureValidator {
             || changes.files != expected_proposal.files
             || self.fixture.expected_acceptance_tests != builtin.expected_acceptance_tests
         {
-            return Ok(failed("proposal differs from trusted offline fixture; sandboxed execution is required"));
+            return Ok(failed(
+                "proposal differs from trusted offline fixture; sandboxed execution is required",
+            ));
         }
         if changes.files.is_empty() || self.fixture.expected_acceptance_tests.is_empty() {
             return Ok(failed("no executable acceptance tests supplied"));
@@ -571,9 +573,12 @@ impl ChangeValidator for FixtureValidator {
             "eval-multifile-token-bucket" => "tests/test_rate_limiter.rs",
             _ => return Ok(failed("fixture is not an executable code-test case")),
         };
-        let root = std::env::temp_dir().join(format!("ryoko-trusted-eval-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("ryoko-trusted-eval-{}", uuid::Uuid::new_v4()));
         if let Err(error) = std::fs::create_dir(&root) {
-            return Ok(failed(&format!("cannot create isolated fixture directory: {error}")));
+            return Ok(failed(&format!(
+                "cannot create isolated fixture directory: {error}"
+            )));
         }
         let _cleanup = FixtureDir(root.clone());
 
@@ -605,9 +610,14 @@ impl ChangeValidator for FixtureValidator {
             }
         }
 
-        let executable = root.join(if cfg!(windows) { "fixture-tests.exe" } else { "fixture-tests" });
+        let executable = root.join(if cfg!(windows) {
+            "fixture-tests.exe"
+        } else {
+            "fixture-tests"
+        });
         let mut compile = tokio::process::Command::new("rustc");
-        compile.arg("--edition=2021")
+        compile
+            .arg("--edition=2021")
             .arg("--test")
             .arg(root.join(test_file))
             .arg("-o")
@@ -619,7 +629,12 @@ impl ChangeValidator for FixtureValidator {
         if !built.status.success() {
             return Ok(ValidationReport::failed(
                 "trusted fixture failed compilation",
-                vec![String::from_utf8_lossy(&built.stderr).chars().take(4000).collect()],
+                vec![
+                    String::from_utf8_lossy(&built.stderr)
+                        .chars()
+                        .take(4000)
+                        .collect(),
+                ],
                 started.elapsed(),
             ));
         }
@@ -633,9 +648,9 @@ impl ChangeValidator for FixtureValidator {
         let output = String::from_utf8_lossy(&tested.stdout);
         let mut executed = Vec::new();
         for test in &self.fixture.expected_acceptance_tests {
-            let succeeded = output.lines().any(|line| {
-                line.trim() == format!("test {test} ... ok")
-            });
+            let succeeded = output
+                .lines()
+                .any(|line| line.trim() == format!("test {test} ... ok"));
             if succeeded {
                 executed.push(test.clone());
             }
@@ -647,7 +662,10 @@ impl ChangeValidator for FixtureValidator {
                 "trusted fixture tests failed or acceptance test was not executed",
                 vec![
                     output.chars().take(4000).collect(),
-                    String::from_utf8_lossy(&tested.stderr).chars().take(2000).collect(),
+                    String::from_utf8_lossy(&tested.stderr)
+                        .chars()
+                        .take(2000)
+                        .collect(),
                 ],
                 started.elapsed(),
             ));
@@ -847,7 +865,10 @@ pub async fn run_evaluation_fixture(
     // rejected result itself rather than validating an empty patch and
     // mislabelling the rejection as a test failure.
     if !task_result.success {
-        let reason = task_result.error.as_deref().unwrap_or("agent returned failure");
+        let reason = task_result
+            .error
+            .as_deref()
+            .unwrap_or("agent returned failure");
         let classification = if reason.contains("parent traversal")
             || reason.contains("absolute paths")
             || reason.contains("unsafe path")
@@ -856,8 +877,7 @@ pub async fn run_evaluation_fixture(
             FailureClassification::UnsafePathRejected
         } else if reason.contains("files or edits must contain at least one change")
             && fixture.mock_proposal.as_ref().is_some_and(|p| {
-                p.summary.contains("All tests pass")
-                    || p.summary.contains("requirements satisfied")
+                p.summary.contains("All tests pass") || p.summary.contains("requirements satisfied")
             })
         {
             FailureClassification::UnvalidatedSelfReport
