@@ -305,7 +305,7 @@ pub async fn get_github_queue(
     Ok(data)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubViewData {
     view: String,
@@ -526,7 +526,7 @@ pub async fn decide_github_proposal(
     state: State<'_, GitHubQueueState>,
     app: AppHandle,
 ) -> Result<GitHubDecision, String> {
-    if !id.chars().all(|c| c.is_ascii_hexdigit() || c == b'-') || id.len() != 36 {
+    if !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') || id.len() != 36 {
         return Err("invalid proposal identifier".into());
     }
     let paired = token(&state)?;
@@ -563,7 +563,7 @@ pub async fn decide_github_proposal(
     if item.status != "pending" {
         return Err(format!(
             "proposal is no longer pending (status: {}); refresh the approval queue",
-            collapse(&item.status, 30)
+            clip(&item.status, 30)
         ));
     }
 
