@@ -70,9 +70,10 @@ contain a blocking finding. Failing reviews route actionable feedback to the
 producer through the existing bounded repair loop; exhausted failures
 escalate to human review.
 
-The `run --report PATH` JSON now includes `independent_reviews` for passing
-structured reviews, alongside existing task outcomes, validation logs and
-usage telemetry. Failed findings remain in the task failure/repair feedback.
+The `run --report PATH` JSON now includes `independent_reviews` for both accepted
+and rejected structured reviewer findings, with an `accepted` flag; it also
+retains task outcomes, validation logs and usage telemetry. Failed findings
+remain in the task failure/repair feedback.
 The source of truth for test execution is still the **sandbox validation log**,
 not the review's own prose.
 
