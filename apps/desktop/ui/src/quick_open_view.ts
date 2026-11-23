@@ -159,6 +159,10 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
   };
 
   const open = (): void => {
+    if (!backdrop.hidden) {
+      input.focus();
+      return;
+    }
     const root = deps.workspaceRoot();
     if (!root) {
       deps.setStatus('Open a workspace before searching for files.');
@@ -195,6 +199,16 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
     if (event.key === 'Escape') {
       event.stopPropagation();
       close();
+    } else if (event.key === 'Tab') {
+      const focusable = [input, ...Array.from(list.querySelectorAll<HTMLButtonElement>('button'))];
+      const position = focusable.indexOf(document.activeElement as HTMLInputElement);
+      if (event.shiftKey && position <= 0) {
+        event.preventDefault();
+        focusable[focusable.length - 1]?.focus();
+      } else if (!event.shiftKey && position === focusable.length - 1) {
+        event.preventDefault();
+        input.focus();
+      }
     }
   });
   backdrop.addEventListener('mousedown', (event) => {
