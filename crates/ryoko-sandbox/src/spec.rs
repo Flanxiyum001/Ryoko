@@ -211,6 +211,17 @@ mod tests {
         assert_eq!(evidence.test_files, vec!["src/api.rs"]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_spec_wasm_execution_until_it_is_process_isolated() {
+        let result = SandboxSpecValidator::static_module(
+            br#"(module (func (export "_start")))"#,
+            SpecPolicy::default(),
+        );
+        assert!(matches!(result, Err(SandboxError::Engine(_))));
+    }
+
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn source_without_tests_is_rejected_before_sandbox() {
         let validator = SandboxSpecValidator::static_module(
@@ -224,6 +235,7 @@ mod tests {
         assert!(report.logs.join(" ").contains("no test file"));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn test_evidence_runs_the_sandbox() {
         let validator = SandboxSpecValidator::static_module(
@@ -240,6 +252,7 @@ mod tests {
         assert!(report.logs.iter().any(|line| line.contains("tests/api.rs")));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn failing_tests_are_rejected_as_spec_failures() {
         let validator = SandboxSpecValidator::static_module(
