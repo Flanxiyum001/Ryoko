@@ -81,6 +81,19 @@ const mcp = agentMcp || (mcpServer ? {
   headlessApprove: list(process.env.RYOKO_MCP_HEADLESS_APPROVE),
   maxCalls: Number(process.env.RYOKO_MCP_MAX_CALLS || 0),
 } : null);
+// Hosted installations must use durable shared state. Multiple HTTP and worker
+// processes can share a PRIVATE local SQLite WAL file on one host/volume.
+const stateDbFile = process.env.RYOKO_STATE_DB || '';
+const workerMode = process.env.RYOKO_BROKER_MODE || 'all';
+if (!['api','worker','all'].includes(workerMode)) {
+  throw new Error('RYOKO_BROKER_MODE must be api, worker or all');
+}
+if (url.protocol === 'https:' && !stateDbFile) {
+  throw new Error('hosted broker requires RYOKO_STATE_DB (no in-memory sessions/jobs)');
+}
+if (stateDbFile && !process.env.RYOKO_STATE_KEY) {
+  throw new Error('RYOKO_STATE_KEY is required for encrypted durable state');
+}
 const server = createRyokoServer({
   broker,
   frontendPath,
@@ -96,14 +109,32 @@ const server = createRyokoServer({
     projectsRoot: process.env.RYOKO_PROJECTS_ROOT || '',
     botStateFile: process.env.RYOKO_BOT_STATE_FILE || '',
     approvalStateFile: process.env.RYOKO_APPROVAL_STATE_FILE || '',
+    stateDbFile,
+    stateKey: process.env.RYOKO_STATE_KEY || '',
+    workerMode,
     mcp,
   },
 });
 
-server.listen(port, host, () => {
-  console.log('Ryoko workbench listening on ' + origin);
-  console.log('GitHub sign-in: ' + (broker.configured ? 'configured' : 'not configured'));
-});
-function stop() { server.close(() => process.exit(0)); }
+if (workerMode !== 'worker') {
+  server.listen(port, host, () => {
+    console.log('Ryoko workbench listening on ' + origin);
+    console.log('GitHub sign-in: ' + (broker.configured ? 'configured' : 'not configured'));
+    console.log('Database-backed job processing: ' + Boolean(stateDbFile));
+  });
+} else {
+  if (!stateDbFile) throw new Error('worker-only mode requires RYOKO_STATE_DB');
+  console.log('Ryoko database job worker started without public HTTP listener');
+}
+let shuttingDown = false;
+function stop() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (workerMode === 'worker') {
+    void server.stopGithubWorker().then(() => process.exit(0)).catch(() => process.exit(1));
+  } else {
+    server.close(() => process.exit(0));
+  }
+}
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);
