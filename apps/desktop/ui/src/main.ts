@@ -2013,6 +2013,7 @@ function selectOpenFile(path: string): void {
   if (file.viewState) editor.restoreViewState(file.viewState);
   revealEditor();
   if (window.matchMedia('(max-width: 720px)').matches) activateView('editor');
+  else workbenchLayout.classList.remove('hide-inspector');
   languageMode.value = file.languageId;
   configureTaskForPath(path);
   runActiveFile.disabled = codeSessionId !== null;
@@ -2471,6 +2472,12 @@ window.setInterval(() => {
     void refreshRunStatus();
   }
 }, 1200);
+
+window.setInterval(() => {
+  if (state.root && document.visibilityState === 'visible') {
+    void refreshAgentSessions();
+  }
+}, 5000);
 
 window.setInterval(() => {
   if (document.visibilityState === 'visible') {
