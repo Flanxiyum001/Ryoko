@@ -267,7 +267,7 @@ impl GitWorktreeManager {
         }
         tokio::fs::create_dir_all(&self.worktrees_root).await?;
 
-        let path = worktree_path.to_string_lossy().into_owned();
+        let path = git_path_argument(&worktree_path);
         let output = self
             .git(
                 &self.base_project_path,
@@ -353,7 +353,7 @@ impl GitWorktreeManager {
         if let Some(parent) = session.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let path = session.path.to_string_lossy().into_owned();
+        let path = git_path_argument(&session.path);
         let output = self
             .git(
                 &self.base_project_path,
@@ -1154,7 +1154,7 @@ impl GitWorktreeManager {
         // `.git/worktrees` entries a concurrent creation is building.
         let _admin = self.worktree_admin.lock().await;
         if session.path.exists() {
-            let path = session.path.to_string_lossy().into_owned();
+            let path = git_path_argument(&session.path);
             let output = self
                 .git(
                     &self.base_project_path,
@@ -1261,7 +1261,13 @@ impl GitWorktreeManager {
             } else if line == format!("branch {target}")
                 && let Some(path) = path.take()
             {
-                return Ok(Some((path, branch.to_owned())));
+                // Git for Windows prints C:/... while Rust's canonical
+                // checkout path uses the verbatim \\?\\ form. Compare the
+                // resolved physical paths, not those different spellings.
+                // A missing checkout remains untrusted and cannot be
+                // mistaken for an existing managed checkout.
+                let physical = path.canonicalize().unwrap_or(path);
+                return Ok(Some((physical, branch.to_owned())));
             } else if line.trim().is_empty() {
                 path = None;
             }
@@ -1312,6 +1318,48 @@ impl GitWorktreeManager {
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         }
     }
+}
+
+/// Git for Windows cannot create a worktree when given Rust's canonical
+/// verbatim path (\\?\C:\...) as a command-line argument: it interprets
+/// that prefix as //?/ and fails to create the .git file. Keep the native
+/// verbatim path for filesystem operations, but supply an ordinary Win32
+/// drive/UNC path to Git. Other verbatim namespaces fail unchanged.
+fn git_path_argument(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{}", unc);
+        }
+        if let Some(drive) = raw.strip_prefix(r"\\?\") {
+            if matches!(
+                drive.as_bytes(),
+                [letter, b':', b'\\', ..] if letter.is_ascii_alphabetic()
+            ) {
+                return drive.to_owned();
+            }
+        }
+    }
+    raw.into_owned()
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn git_path_arguments_normalize_verbatim_drive_and_unc_paths() {
+    assert_eq!(
+        git_path_argument(Path::new(r"\\?\C:\workspace\Ryoko")),
+        r"C:\workspace\Ryoko"
+    );
+    assert_eq!(
+        git_path_argument(Path::new(r"\\?\UNC\server\share\Ryoko")),
+        r"\\server\share\Ryoko"
+    );
+    assert_eq!(git_path_argument(Path::new(r"C:\Ryoko")), r"C:\Ryoko");
+    // Do not reinterpret an unsupported Windows device namespace as a
+    // drive path. Passing an unknown namespace through fails safely.
+    let opaque = r"\\?\Volume{1234}\Ryoko";
+    assert_eq!(git_path_argument(Path::new(opaque)), opaque);
 }
 
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
@@ -1783,7 +1831,7 @@ impl WorkspaceLease for GitWorktreeLease {
         tokio::fs::create_dir_all(checkout.parent().expect("validation path has parent"))
             .await
             .map_err(|error| CoreError::Workspace(error.to_string()))?;
-        let checkout_arg = checkout.to_string_lossy().to_string();
+        let checkout_arg = git_path_argument(&checkout);
         self.manager
             .checked(
                 "materialize validation snapshot",
@@ -1883,7 +1931,7 @@ impl WorkspaceLease for GitWorktreeLease {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some((checkout, _)) = checkout {
-            let path = checkout.to_string_lossy().to_string();
+            let path = git_path_argument(&checkout);
             self.manager
                 .checked(
                     "remove validation snapshot",
@@ -1934,6 +1982,10 @@ mod tests {
         git(dir.path(), &["init", "-b", "main"]).await;
         git(dir.path(), &["config", "user.name", "Test"]).await;
         git(dir.path(), &["config", "user.email", "test@example.com"]).await;
+        // These fixtures compare exact source bytes after checkout/merge.
+        // Disable the runner's Windows CRLF conversion in this scratch
+        // repository; never change line-ending settings in user projects.
+        git(dir.path(), &["config", "core.autocrlf", "false"]).await;
         tokio::fs::write(dir.path().join("README.md"), "# project\n")
             .await
             .unwrap();
@@ -2142,6 +2194,23 @@ mod tests {
             .await
             .unwrap();
         assert!(branches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn git_worktree_list_returns_the_managed_checkout_path() {
+        let (_dir, manager) = repo().await;
+        let session = manager
+            .create_worktree("path-test", Uuid::new_v4())
+            .await
+            .unwrap();
+        let checkout = manager
+            .worktree_checkout(&session.branch_name)
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(checkout, session.path.canonicalize().unwrap());
+        manager.abandon_worktree(&session).await.unwrap();
     }
 
     #[tokio::test]

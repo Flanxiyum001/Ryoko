@@ -9,11 +9,13 @@
 
 These experimental installers are **unsigned** and not intended for production. Test with a disposable project. The separate [testing and installation guide](docs/DESKTOP_PREVIEW_TESTING.md) includes the smoke-test checklist.
 
+**Windows WASM safety limitation:** Native WASI/WASM guardrail execution is deliberately unavailable on Windows in this preview because Wasmtime 26 guest traps can abort the host process. Ryoko fails closed rather than treating an unverified test as passed. Container-backed project checks remain separately available with Docker/Podman. See [Phase 5 release trust](docs/PHASE_5_RELEASE_TRUST.md). The Windows preview is not feature-parity certified.
+
 For headless Linux x64 use, the optional **Ryoko CLI-only** GitHub Packages image is published at `ghcr.io/flanxiyum001/ryoko-cli:preview` when the package workflow succeeds and visibility is set to public; **it is not the desktop application**.
 
 > **Project status:** pre-alpha. The current workspace supports provider setup, chat, review-only team previews, an isolated human-reviewed file-generation workflow, editor language-server scaffolding, a Tauri desktop shell with a Monaco editor wired to `ryoko-lsp` plus customer language servers through a multiplexer (registry, search/replace, changes drawer, inline model edits, visual settings), WASI test execution and structural context extraction. It includes local FIM ghost text, a SQLite cross-file symbol index, an integrated PTY terminal and a DAP bridge, an interactive Mission Control task DAG, local diff-editor hunk review with sandboxed pre-flight validation, hardened container-backed project checks, and unsigned cross-platform preview installers, but not production-signed installers, automatic updates or deployment. Do not use its previews as proof of successful implementation.
 
-The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Those documents describe intent; only the crates and commands documented below are implemented. See [contributing](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), [security reporting](SECURITY.md), and [engineering rules](AGENTS.md) before opening a PR.
+The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Phase 5 release trust, plugin publisher verification, recovery, and cross-platform acceptance gates are tracked in [`docs/PHASE_5_RELEASE_TRUST.md`](docs/PHASE_5_RELEASE_TRUST.md); the gates are targets, not completed release certifications. Those documents describe intent; only the crates and commands documented below are implemented. See [contributing](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), [security reporting](SECURITY.md), and [engineering rules](AGENTS.md) before opening a PR.
 
 ## License and commercial use
 
