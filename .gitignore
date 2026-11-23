@@ -19,3 +19,7 @@ apps/desktop/src-tauri/binaries/
 *.key
 services/github-app/node_modules/
 apps/desktop/node_modules/
+
+# Playwright renderer acceptance evidence
+apps/desktop/test-results/
+apps/desktop/playwright-report/
