@@ -731,7 +731,13 @@ mod tests {
         assert!(user.contains(receipt));
         assert!(user.contains(patch));
         assert!(user.contains("untrusted_validated_change_patch"));
-        assert!(!request.system.as_deref().unwrap_or_default().contains(patch));
+        assert!(
+            !request
+                .system
+                .as_deref()
+                .unwrap_or_default()
+                .contains(patch)
+        );
     }
 
     #[test]
