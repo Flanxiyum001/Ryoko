@@ -2182,15 +2182,6 @@ fn build_symbol_index(root: &Path) -> Result<(WorkspaceIndex, usize), Box<dyn Er
     Ok((index, present.len()))
 }
 
-fn indexed_context(root: &Path, goal: &str) -> Result<String, Box<dyn Error>> {
-    let terms = goal_terms(goal);
-    if terms.is_empty() {
-        return Ok(String::new());
-    }
-    let (index, _) = build_symbol_index(root)?;
-    Ok(index.context_for_terms(&terms, 6_000)?)
-}
-
 async fn index_workspace(args: IndexArgs) -> Result<(), Box<dyn Error>> {
     let root = canonical_root(&args.repo)?;
     let (index, count) = build_symbol_index(&root)?;
@@ -2333,21 +2324,34 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         None => vec![Task::new(goal.clone(), AgentRole::SeniorDeveloper)],
     };
     let project_outline = project_brief(&root).await;
-    let symbol_context = match indexed_context(&root, &goal) {
-        Ok(context) => context,
+    // Parse the repository once, but retrieve context separately for each
+    // specialized task. A QA task needs different symbols than a backend task.
+    let symbol_index = match build_symbol_index(&root) {
+        Ok((index, _)) => Some(index),
         Err(error) => {
             eprintln!("warning: workspace symbol index unavailable: {error}");
-            String::new()
+            None
         }
     };
-    let project_context = if symbol_context.is_empty() {
-        project_outline
-    } else {
-        format!("{project_outline}\n\n{symbol_context}")
-    };
     for task in &mut tasks {
+        let task_goal = format!("{goal}\n{}", task.description);
+        let symbol_context = symbol_index
+            .as_ref()
+            .and_then(|index| match index.context_for_goal(&task_goal, 6_000) {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    eprintln!("warning: symbol context unavailable: {error}");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let project_context = if symbol_context.is_empty() {
+            project_outline.clone()
+        } else {
+            format!("{project_outline}\n\n{symbol_context}")
+        };
         task.metadata
-            .insert(CONTEXT_METADATA.to_owned(), project_context.clone());
+            .insert(CONTEXT_METADATA.to_owned(), project_context);
     }
     println!(
         "Creating isolated worktrees for {} agent task(s)...",
