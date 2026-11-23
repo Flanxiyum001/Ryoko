@@ -194,7 +194,8 @@ paired bearer token is held only inside Rust, never the webview.
 In the native panel you can:
 
 - Browse an authorized repository's issues and PRs and inspect fresh PR CI.
-- Explicitly start an issue engineering job with **Run agent** (only for
+- Explicitly start an issue engineering job with **Run agent**, confirmed
+  by an OS-owned dialog with the verified issue title (only for
   repository IDs in `RYOKO_AGENT_ALLOWED_REPO_IDS`).
 - Queue an explicitly reviewed local clone into `RYOKO_PROJECTS_ROOT`,
   safe `ryoko/` branch creation, UTF-8 file commits, **draft** PR
