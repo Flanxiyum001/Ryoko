@@ -599,7 +599,8 @@ mod tests {
         assert_eq!(
             handles
                 .into_iter()
-                .filter(|handle| handle.join().unwrap())
+                .map(|handle| handle.join().unwrap())
+                .filter(|success| *success)
                 .count(),
             1
         );
