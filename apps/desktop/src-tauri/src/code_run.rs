@@ -4,8 +4,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::Serialize;
@@ -69,11 +69,20 @@ fn target_file(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-fn prepare_argv(program: &str, args: &[String], file: &Path, root: &Path) -> Result<Vec<String>, String> {
-    if program.trim().is_empty() || program.len() > MAX_ARG_BYTES
+fn prepare_argv(
+    program: &str,
+    args: &[String],
+    file: &Path,
+    root: &Path,
+) -> Result<Vec<String>, String> {
+    if program.trim().is_empty()
+        || program.len() > MAX_ARG_BYTES
         || program.chars().any(char::is_control)
     {
-        return Err("invalid task executable; enter an executable path or name, not a shell command".to_owned());
+        return Err(
+            "invalid task executable; enter an executable path or name, not a shell command"
+                .to_owned(),
+        );
     }
     if args.len() > MAX_ARGS {
         return Err(format!("task accepts at most {MAX_ARGS} arguments"));
@@ -113,23 +122,37 @@ fn relay<R: Read + Send + 'static>(
             if allowed > 0 {
                 let data = decoder.push(&chunk[..allowed]);
                 if !data.is_empty() {
-                    let _ = app.emit("ryoko-code-output", CodeOutput {
-                        session_id, stream, data,
-                    });
+                    let _ = app.emit(
+                        "ryoko-code-output",
+                        CodeOutput {
+                            session_id,
+                            stream,
+                            data,
+                        },
+                    );
                 }
             }
             if allowed < read && !truncated.swap(true, Ordering::SeqCst) {
-                let _ = app.emit("ryoko-code-output", CodeOutput {
-                    session_id, stream: "system",
-                    data: "\n[Output truncated at 2 MiB. Process continues.]\n".to_owned(),
-                });
+                let _ = app.emit(
+                    "ryoko-code-output",
+                    CodeOutput {
+                        session_id,
+                        stream: "system",
+                        data: "\n[Output truncated at 2 MiB. Process continues.]\n".to_owned(),
+                    },
+                );
             }
         }
         let remaining = decoder.finish();
         if !remaining.is_empty() {
-            let _ = app.emit("ryoko-code-output", CodeOutput {
-                session_id, stream, data: remaining,
-            });
+            let _ = app.emit(
+                "ryoko-code-output",
+                CodeOutput {
+                    session_id,
+                    stream,
+                    data: remaining,
+                },
+            );
         }
     });
 }
@@ -140,13 +163,17 @@ fn inspect_task(active: &mut Option<ActiveTask>) -> Result<CodeRunStatus, String
     };
     match task.child.try_wait() {
         Ok(None) => Ok(CodeRunStatus {
-            running: true, session_id: Some(task.id), exit_code: None,
+            running: true,
+            session_id: Some(task.id),
+            exit_code: None,
         }),
         Ok(Some(exit)) => {
             let id = task.id;
             *active = None;
             Ok(CodeRunStatus {
-                running: false, session_id: Some(id), exit_code: exit.code(),
+                running: false,
+                session_id: Some(id),
+                exit_code: exit.code(),
             })
         }
         Err(error) => Err(format!("cannot inspect code task: {error}")),
@@ -170,7 +197,9 @@ pub async fn code_run_start(
     {
         let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
         if inspect_task(&mut guard)?.running {
-            return Err("another code task is running; stop it before launching a new task".to_owned());
+            return Err(
+                "another code task is running; stop it before launching a new task".to_owned(),
+            );
         }
     }
 
@@ -216,19 +245,37 @@ pub async fn code_run_start(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("cannot start {program}: {error}. Check that the toolchain is installed and on PATH"))?;
+        .map_err(|error| {
+            format!(
+                "cannot start {program}: {error}. Check that the toolchain is installed and on PATH"
+            )
+        })?;
 
-    let id = state.next_id.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+    let id = state
+        .next_id
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
     let emitted = Arc::new(AtomicUsize::new(0));
     let truncated = Arc::new(AtomicBool::new(false));
     if let Some(stdout) = child.stdout.take() {
-        relay(stdout, app.clone(), id, "stdout", emitted.clone(), truncated.clone());
+        relay(
+            stdout,
+            app.clone(),
+            id,
+            "stdout",
+            emitted.clone(),
+            truncated.clone(),
+        );
     }
     if let Some(stderr) = child.stderr.take() {
         relay(stderr, app, id, "stderr", emitted, truncated);
     }
     *guard = Some(ActiveTask { id, root, child });
-    Ok(CodeRunStatus { running: true, session_id: Some(id), exit_code: None })
+    Ok(CodeRunStatus {
+        running: true,
+        session_id: Some(id),
+        exit_code: None,
+    })
 }
 
 #[tauri::command]
@@ -253,7 +300,9 @@ pub fn code_run_status(
 pub fn code_run_stop(state: State<'_, CodeRunState>) -> Result<(), String> {
     let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(mut task) = guard.take() {
-        task.child.kill().map_err(|error| format!("cannot stop code task: {error}"))?;
+        task.child
+            .kill()
+            .map_err(|error| format!("cannot stop code task: {error}"))?;
         let _ = task.child.wait();
     }
     Ok(())
@@ -276,13 +325,19 @@ mod tests {
         let file = Path::new("/workspace/src/main.py");
         let root = Path::new("/workspace");
         let args = vec![
-            "{file}".to_owned(), "{workspace}".to_owned(),
-            "$(touch /tmp/evil)".to_owned(), "{file}.backup".to_owned(),
+            "{file}".to_owned(),
+            "{workspace}".to_owned(),
+            "$(touch /tmp/evil)".to_owned(),
+            "{file}.backup".to_owned(),
         ];
         assert_eq!(
             prepare_argv("python3", &args, file, root).unwrap(),
-            vec!["/workspace/src/main.py", "/workspace",
-                 "$(touch /tmp/evil)", "{file}.backup"]
+            vec![
+                "/workspace/src/main.py",
+                "/workspace",
+                "$(touch /tmp/evil)",
+                "{file}.backup"
+            ]
         );
     }
 
