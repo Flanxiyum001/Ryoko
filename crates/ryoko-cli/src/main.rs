@@ -1931,12 +1931,18 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
     if built {
         plan.build(backend).await?;
     }
+    let pinned = if args.no_build {
+        None
+    } else {
+        Some(BuildSandbox::new(backend, None).image_id(&plan.image).await?)
+    };
     if args.json {
         println!(
             "{}",
             serde_json::json!({
                 "ecosystem": plan.ecosystem,
-                "image": plan.image,
+                "image": pinned.as_deref().unwrap_or(&plan.image),
+                "image_tag": plan.image,
                 "dockerfile": plan.dockerfile,
                 "frontend": plan.frontend,
                 "built": built,
@@ -1961,14 +1967,16 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 plan.image
             );
         } else if args.no_build {
-            println!("Skipped the image build; pass it to --sandbox-image after building it.");
+            println!("Skipped the image build; resolve its local sha256 image ID before using --sandbox-image.");
         } else {
             println!(
                 "Built {} and cached its dependencies for offline validation.",
                 plan.image
             );
         }
-        println!("Use: --sandbox-image {}", plan.image);
+        if let Some(image) = pinned {
+            println!("Use: --sandbox-image {image}");
+        }
     }
     Ok(())
 }
