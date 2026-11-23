@@ -9,6 +9,8 @@ import { issueAgentRequest, runIssuePipeline } from './pipeline.mjs';
 import { issueBotCommand, postBotComment, botStatus } from './bot.mjs';
 import { BotJobStore } from './durable-queue.mjs';
 import { ApprovalStore } from './approval-store.mjs';
+import { ProductionState } from './production-state.mjs';
+import { startGithubWorker } from './worker-loop.mjs';
 import { isAllowedOrigin, positiveId, validateProposal, verifyWebhookSignature } from './security.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -79,22 +81,30 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     projectsRoot: config?.projectsRoot || '',
     botStateFile: config?.botStateFile || '',
     approvalStateFile: config?.approvalStateFile || '',
+    stateDbFile: config?.stateDbFile || '',
+    stateKey: config?.stateKey || '',
+    workerMode: config?.workerMode || 'all',
     pipelineTimeoutMs: config?.pipelineTimeoutMs || 15 * 60_000,
     // Operator-owned MCP settings for pipeline runs. Absent means no MCP tools.
     mcp: config?.mcp && typeof config.mcp === 'object' ? config.mcp : null,
   };
   const client = broker || new GitHubBroker(config || {});
   const pagesRoot = frontendPath || resolve('apps/desktop');
-  const sessions = new Map();
-  const approvalStore = new ApprovalStore(settings.approvalStateFile);
+  const stateDb = settings.stateDbFile
+    ? new ProductionState(settings.stateDbFile, settings.stateKey) : null;
+  const sessions = stateDb?.sessions || new Map();
+  const approvalStore = stateDb?.approvalStore || new ApprovalStore(settings.approvalStateFile);
   const proposals = approvalStore.proposals;
   const events = [];
-  const botState = new BotJobStore(settings.botStateFile);
+  const botState = stateDb || new BotJobStore(settings.botStateFile);
   const deliveries = botState.deliveries;
   const subscribers = new Set();
-  const desktopPairings = new Map();
-  const desktopSessions = new Map();
+  const desktopPairings = stateDb?.desktopPairings || new Map();
+  const desktopSessions = stateDb?.desktopSessions || new Map();
   const pipelineJobs = botState.jobs;
+  if (stateDb && !['api','worker','all'].includes(settings.workerMode)) {
+    throw new Error('invalid GitHub worker mode');
+  }
   const isSecure = new URL(settings.origin).protocol === 'https:';
 
   function sessionFor(req) {
@@ -160,6 +170,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     }
     const key = jobKey(request);
     const previous = pipelineJobs.get(key);
+    if (stateDb) return stateDb.enqueueJob(request, retry);
     if (retry ? !['failed', 'interrupted'].includes(previous?.status)
       : Boolean(previous)) throw bad('job already recorded; inspect status before retrying', 409);
     botState.pruneJobs();
@@ -227,6 +238,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     return session;
   }
   function expireDesktopEntries() {
+    if (stateDb) { stateDb.prune(); return; }
     for (const [code, item] of desktopPairings) {
       if (item.expires <= Date.now() || !sessions.has(item.sessionId)) desktopPairings.delete(code);
     }
@@ -306,7 +318,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       let id = cookieId(req);
       if (!current) {
         if (sessions.size >= 500) {
-          for (const [key, record] of sessions) {
+          if (stateDb) stateDb.prune();
+          else for (const [key, record] of sessions) {
             if (Date.now() > record.expires) sessions.delete(key);
           }
         }
@@ -317,6 +330,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       }
       const state = random();
       current.oauth = { state, expires: Date.now() + 10 * 60 * 1000 };
+      sessions.set(id, current);
       const authorize = new URL('https://github.com/login/oauth/authorize');
       authorize.searchParams.set('client_id', client.clientId);
       authorize.searchParams.set('state', state);
@@ -331,6 +345,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
         throw bad('invalid OAuth state', 403);
       }
       session.oauth = null; // one-shot
+      sessions.set(cookieId(req), session); // one-shot across all broker processes
       if (!code) throw bad('missing GitHub OAuth code');
       const token = await client.exchangeCode(code, settings.origin + '/auth/github/callback');
       const user = await client.user(token);
@@ -339,6 +354,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       session.token = token; // server-side memory only
       session.csrf = random();
       session.expires = Date.now() + TTL;
+      sessions.set(cookieId(req), session);
       return redirect(res, '/');
     }
     if (req.method === 'GET' && path === '/api/session') {
@@ -377,8 +393,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
         throw bad('invalid desktop pairing code', 401);
       }
       expireDesktopEntries();
-      const item = desktopPairings.get(body.code);
-      desktopPairings.delete(body.code); // single use, including denied attempts
+      const item = stateDb ? stateDb.takePairing(body.code) : desktopPairings.get(body.code);
+      if (!stateDb) desktopPairings.delete(body.code); // consume exactly once
       if (!item || Date.now() > item.expires) throw bad('desktop code expired', 401);
       const session = sessions.get(item.sessionId);
       if (!session || !session.token || !session.user
