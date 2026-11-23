@@ -21,7 +21,7 @@ use ryoko_core::{
     CodeReviewSummary, EventSink, FileSummary, Language, ModelAgent, Orchestrator,
     OrchestratorConfig, OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange,
     RETRY_FEEDBACK_METADATA, SharedMemory, SourceFile, StagedChanges, Task, TaskContext,
-    WorkspaceIndex, extract_files, goal_terms, render_markdown_summary,
+    WorkspaceIndex, extract_files, render_markdown_summary,
     spec_link::SpecIndex,
     team::{application_plan, dynamic_plan, standard_team},
     validation::ValidationReport,
