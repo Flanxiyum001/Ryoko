@@ -153,7 +153,9 @@ function plan(options) {
     out: options.out,
     routes: options.routes.map((route) => ({
       route,
-      directory: path.join(options.out, routeSlug(route)),
+      // The harness is installed inside a Linux sandbox; describe artifact
+      // paths with POSIX separators even when --check-config runs on Windows.
+      directory: path.posix.join(options.out, routeSlug(route)),
       artifacts: ["desktop.png", "mobile.png", "aria-tree.json", "console-errors.json"],
     })),
     viewports: { desktop: DESKTOP, mobile: MOBILE },
