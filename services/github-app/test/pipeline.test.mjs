@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { buildPullRequestBody, buildRunArgs, issueAgentRequest, runIssuePipeline } from '../src/pipeline.mjs';
+import { buildPullRequestBody, buildRunArgs, issueAgentRequest, runIssuePipeline, selectIntegratedSuccess } from '../src/pipeline.mjs';
 
 const payload = {
   action: 'labeled',
@@ -86,6 +86,28 @@ test('pull request body attaches the pre-merge security audit', () => {
   assert.match(empty, /no security audit output was recorded/);
 });
 
+test('only the final Integrator result can be published as a GitHub draft PR', () => {
+  const integrated = { role: 'integrator', branch: 'ryoko/final', task_id: 'final-id' };
+  assert.equal(selectIntegratedSuccess({
+    run: { succeeded: [{ role: 'architect', branch: 'ryoko/architect' }, integrated] },
+  }), integrated);
+  assert.throws(() => selectIntegratedSuccess({
+    run: { succeeded: [{ role: 'architect', branch: 'ryoko/architect' }] },
+  }), /integrated branch/);
+  assert.throws(() => selectIntegratedSuccess({
+    run: { succeeded: [integrated], failed: [{ role: 'qa_engineer' }] },
+  }), /incomplete/);
+  assert.throws(() => selectIntegratedSuccess({
+    run: { succeeded: [integrated], skipped: [{ role: 'security_engineer' }] },
+  }), /incomplete/);
+  assert.throws(() => selectIntegratedSuccess({
+    run: { succeeded: [integrated], needs_human_review: [{ task_id: 'x' }] },
+  }), /incomplete/);
+  assert.throws(() => selectIntegratedSuccess({
+    run: { succeeded: [integrated, integrated] },
+  }), /unique integrated branch/);
+});
+
 test('run arguments forward the operator MCP policy', () => {
   const args = buildRunArgs({
     cwd: '/repo',
@@ -155,7 +177,8 @@ test('pipeline clones, runs the team, pushes the branch and opens a draft PR', a
       runCli: async ({ reportPath, goal }) => {
         runArgs = { reportPath, goal };
         await writeFile(reportPath, JSON.stringify({
-          run: { succeeded: [{ branch: 'ryoko/issue-9', task_id: 'task-1' }] },
+          run: { succeeded: [{ role: 'architect', branch: 'ryoko/partial', task_id: 'task-0' },
+            { role: 'integrator', branch: 'ryoko/issue-9', task_id: 'task-1' }] },
           ledger: { total: { requests: 3 } },
           validation: [{ passed: true }],
         }));
