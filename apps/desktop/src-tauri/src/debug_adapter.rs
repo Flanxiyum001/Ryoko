@@ -141,7 +141,13 @@ pub fn dap_start(
                         }
                     }
                     Err(_) => {
-                        let _ = output_app.emit("ryoko-dap-log", DapLog { session_id: id, message: "debug adapter emitted non-UTF-8".to_owned() });
+                        let _ = output_app.emit(
+                            "ryoko-dap-log",
+                            DapLog {
+                                session_id: id,
+                                message: "debug adapter emitted non-UTF-8".to_owned(),
+                            },
+                        );
                         break;
                     }
                 },
@@ -149,7 +155,10 @@ pub fn dap_start(
                 Err(error) => {
                     let _ = output_app.emit(
                         "ryoko-dap-log",
-                        DapLog { session_id: id, message: format!("debug adapter protocol error: {error}") },
+                        DapLog {
+                            session_id: id,
+                            message: format!("debug adapter protocol error: {error}"),
+                        },
                     );
                     break;
                 }
@@ -168,25 +177,45 @@ pub fn dap_start(
                     let take = complete.map_or(buffer.len(), |position| position + 1);
                     let available = MAX_STDERR_LINE_BYTES.saturating_sub(line.len());
                     line.extend_from_slice(&buffer[..take.min(available)]);
-                    if take > available { truncated = true; }
+                    if take > available {
+                        truncated = true;
+                    }
                     (take, complete.is_some(), false)
                 }
                 Err(_) => break,
             };
-            if empty { break; }
+            if empty {
+                break;
+            }
             reader.consume(take);
             if complete {
                 let mut message = String::from_utf8_lossy(&line).trim_end().to_owned();
-                if truncated { message.push_str(" [truncated]"); }
-                let _ = app.emit("ryoko-dap-log", DapLog { session_id: id, message });
+                if truncated {
+                    message.push_str(" [truncated]");
+                }
+                let _ = app.emit(
+                    "ryoko-dap-log",
+                    DapLog {
+                        session_id: id,
+                        message,
+                    },
+                );
                 line.clear();
                 truncated = false;
             }
         }
         if !line.is_empty() || truncated {
             let mut message = String::from_utf8_lossy(&line).trim_end().to_owned();
-            if truncated { message.push_str(" [truncated]"); }
-            let _ = app.emit("ryoko-dap-log", DapLog { session_id: id, message });
+            if truncated {
+                message.push_str(" [truncated]");
+            }
+            let _ = app.emit(
+                "ryoko-dap-log",
+                DapLog {
+                    session_id: id,
+                    message,
+                },
+            );
         }
     });
 
@@ -243,7 +272,10 @@ pub fn dap_status(state: State<'_, DebugState>) -> Result<DapStatus, String> {
         .is_none();
     if !running {
         guard.take();
-        return Ok(DapStatus { running: false, session_id: None });
+        return Ok(DapStatus {
+            running: false,
+            session_id: None,
+        });
     }
     Ok(DapStatus {
         running,
