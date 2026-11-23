@@ -1982,6 +1982,10 @@ mod tests {
         git(dir.path(), &["init", "-b", "main"]).await;
         git(dir.path(), &["config", "user.name", "Test"]).await;
         git(dir.path(), &["config", "user.email", "test@example.com"]).await;
+        // These fixtures compare exact source bytes after checkout/merge.
+        // Disable the runner's Windows CRLF conversion in this scratch
+        // repository; never change line-ending settings in user projects.
+        git(dir.path(), &["config", "core.autocrlf", "false"]).await;
         tokio::fs::write(dir.path().join("README.md"), "# project\n")
             .await
             .unwrap();
