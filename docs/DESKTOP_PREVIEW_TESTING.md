@@ -164,3 +164,45 @@ the correct public share link is
 
 The signed-production `Desktop installers` workflow is separate and requires
 Apple and Windows signing credentials. No auto-updater is provided yet.
+
+## In-app updates
+
+Once a build with the updater is installed, Ryoko checks for new releases
+shortly after launch and then every few hours. When one is found, it shows
+**A new update is available**, with release notes, **Download and install**,
+**Skip this version** and **Later**. Ryoko downloads nothing until you choose
+**Download and install**. It verifies the download's signature, installs it and
+restarts. You can also use **Help › Check for Updates**, or turn off automatic
+checks under **Settings › Updates**.
+
+Builds installed before in-app updates existed (version `0.1.0`) must be
+replaced once by hand. The design is recorded in
+[ADR-017](decisions/017-in-app-updates.md).
+
+### Maintainer setup (once)
+
+Until these three values exist, release builds ship without the updater and the
+workflow publishes no update manifest.
+
+1. On your own machine, generate a signing key pair. Never paste the private key
+   into an issue, chat or commit:
+
+   ```sh
+   cd apps/desktop
+   npx tauri signer generate -w ~/.tauri/ryoko-updater.key
+   ```
+
+   Choose a password when asked. Keep the key file and the password backed up
+   offline. Losing them means installed apps can no longer update in-app.
+2. In GitHub, open **Settings › Secrets and variables › Actions**:
+   - **Secrets:** `TAURI_SIGNING_PRIVATE_KEY` (the contents of
+     `~/.tauri/ryoko-updater.key`) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+   - **Variables:** `RYOKO_UPDATER_PUBKEY` (the contents of
+     `~/.tauri/ryoko-updater.key.pub`).
+3. Publish a release as usual, by pushing a `desktop-preview-v<version>` tag or
+   letting the workflow run on `main`. The workflow signs the updater artifacts,
+   attaches them to the versioned release and uploads `latest.json` to the
+   `desktop-updates` prerelease.
+
+Keep versions increasing. An installed app is offered only versions newer than
+its own.
