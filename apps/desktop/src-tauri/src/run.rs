@@ -149,11 +149,7 @@ fn desktop_provider_catalog(
 /// Mission Control delegates execution to the ryoko CLI. Forward the chosen
 /// model and ephemeral credentials to that child process only. The on-disk
 /// provider catalog contains an environment variable NAME, never the API key.
-fn configure_desktop_cli(
-    command: &mut Command,
-    logs: &Path,
-    stamp: u64,
-) -> Result<(), String> {
+fn configure_desktop_cli(command: &mut Command, logs: &Path, stamp: u64) -> Result<(), String> {
     let setup = crate::onboarding::load()?;
     if !setup.configured {
         return Ok(());
@@ -162,20 +158,25 @@ fn configure_desktop_cli(
     let secret = if setup.provider == "ollama" {
         None
     } else {
-        Some(crate::credential_store::retrieve(&setup.provider)?
-            .ok_or("API key is missing from the OS keychain. Configure the provider again on Welcome.")?)
+        Some(crate::credential_store::retrieve(&setup.provider)?.ok_or(
+            "API key is missing from the OS keychain. Configure the provider again on Welcome.",
+        )?)
     };
     let path = logs.join(format!("desktop-provider-{stamp}.json"));
     let mut file = private_file(&path)?;
     if let Err(error) = (|| -> Result<(), String> {
-        serde_json::to_writer_pretty(&mut file, &catalog)
-            .map_err(|error| error.to_string())?;
+        serde_json::to_writer_pretty(&mut file, &catalog).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())
     })() {
         let _ = std::fs::remove_file(&path);
-        return Err(format!("could not create private CLI provider catalog: {error}"));
+        return Err(format!(
+            "could not create private CLI provider catalog: {error}"
+        ));
     }
-    command.arg("--config").arg(&path).env("RYOKO_MODEL", &setup.model);
+    command
+        .arg("--config")
+        .arg(&path)
+        .env("RYOKO_MODEL", &setup.model);
     if let Some(secret) = secret {
         command.env("RYOKO_DESKTOP_API_KEY", secret);
     }
@@ -411,7 +412,8 @@ pub fn start_run(
         command.args(["--agent", agent]);
     }
     if let Some(config) = config_path
-        .map(|value| value.trim().to_owned())
+        .as_deref()
+        .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         let path = PathBuf::from(&config);
@@ -425,9 +427,12 @@ pub fn start_run(
         }
         command.args(["--config"]).arg(resolved);
     }
-    if config_path.as_deref().is_none_or(|config| config.trim().is_empty()) {
-        let workspace_catalog = crate::settings::settings_dir(&root)
-            .join(crate::settings::PROVIDERS_FILE);
+    if config_path
+        .as_deref()
+        .is_none_or(|config| config.trim().is_empty())
+    {
+        let workspace_catalog =
+            crate::settings::settings_dir(&root).join(crate::settings::PROVIDERS_FILE);
         if workspace_catalog.is_file() {
             command.arg("--config").arg(workspace_catalog);
             // The workspace catalog is an explicit override of onboarding.
@@ -749,7 +754,10 @@ mod tests {
             if provider == "ollama" {
                 assert!(catalog["providers"][0].get("api_key_env").is_none());
             } else {
-                assert_eq!(catalog["providers"][0]["api_key_env"], "RYOKO_DESKTOP_API_KEY");
+                assert_eq!(
+                    catalog["providers"][0]["api_key_env"],
+                    "RYOKO_DESKTOP_API_KEY"
+                );
             }
             if provider == "anthropic" || provider == "gemini" {
                 assert_eq!(catalog["providers"][0]["wire"], provider);
