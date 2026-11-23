@@ -1,0 +1,75 @@
+name: "Feature request"
+description: "Suggest a focused improvement to Ryoko's multi-agent IDE."
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ryoko is pre-alpha. Please describe the user problem and a testable outcome, rather than requesting a broad rewrite.
+        For substantial changes, see the [contributing guidelines](https://github.com/Flanxiyum001/Ryoko/blob/main/CONTRIBUTING.md). Do not post secrets or confidential project details.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Feature area
+      options:
+        - "Desktop editor / Tauri UI"
+        - "CLI / developer workflow"
+        - "Agent orchestration / Mission Control"
+        - "AI models / provider adapters"
+        - "Sandbox / validation / worktrees"
+        - "GitHub App / integration"
+        - "Installer / packaging / platform"
+        - "Documentation / developer experience"
+        - "Other"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Who needs this, and what problem are they encountering today?
+      placeholder: "When I try to ..., I cannot ... because ..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the user-facing or technical change, without assuming it already exists.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable behaviours that would demonstrate the feature is complete.
+      placeholder: |
+        - [ ] A user can ...
+        - [ ] The application ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: What approaches or workarounds have you considered? Optional.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Mockups, references, platform considerations, or related issues (public information only).
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Before submitting
+      options:
+        - label: "I searched existing issues and proposals for similar requests."
+          required: true
+        - label: "I understand this request is a proposal, not a commitment to implement it."
+          required: true
+        - label: "I agree to follow the project's Code of Conduct."
+          required: true
