@@ -63,6 +63,7 @@ struct ChatDone {
     cancelled: bool,
     input_tokens: u64,
     output_tokens: u64,
+    estimated_cost_usd: f64,
 }
 
 fn allowed_context_path(path: &str) -> bool {
@@ -192,12 +193,15 @@ pub async fn agent_chat(
         });
     }
     request = request.with_user(prompt);
+    let generation = chat_state.generation.clone();
+    let epoch = generation.fetch_add(1, Ordering::SeqCst).saturating_add(1);
     let mut stream = router
         .stream(request)
         .await
         .map_err(|error| format!("agent chat could not start: {error}"))?;
-    let generation = chat_state.generation.clone();
-    let epoch = generation.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+    if generation.load(Ordering::SeqCst) != epoch {
+        return Ok(());
+    }
     let request_id = args.request_id;
     tauri::async_runtime::spawn(async move {
         let mut tokens = (0_u64, 0_u64);
@@ -257,6 +261,7 @@ pub async fn agent_chat(
                     cancelled: false,
                     input_tokens: tokens.0,
                     output_tokens: tokens.1,
+                    estimated_cost_usd: router.ledger().snapshot().total.cost_usd,
                 },
             );
         }
