@@ -42,6 +42,9 @@ export function botStatus(request, job) {
   if (!job) {
     return `Ryoko has no recorded job for issue ${issue} in the broker ledger. To request work, an authorized maintainer can add the \`ryoko-fix\` label or comment \`/ryoko run\`.`;
   }
+  if (job.status === 'queued') {
+    return `Ryoko queued issue ${issue} for the next trusted worker. No remote writes or merges have happened yet.`;
+  }
   if (job.status === 'running') {
     return `Ryoko is working on issue ${issue}. A draft pull request will be created only if the engineering run succeeds. No changes are merged automatically.`;
   }
