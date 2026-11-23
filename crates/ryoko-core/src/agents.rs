@@ -8,10 +8,12 @@
 use async_trait::async_trait;
 use ryoko_models::{ChatRequest, ContentBlock, Message, ModelError, Role, ToolDefinition};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::agent::{AgentRuntime, TaskContext};
 use crate::error::CoreResult;
 use crate::model::{AgentIdentity, ProposedChange, Task, TaskResult};
+use crate::symbol_edit::{SymbolEdit, materialize_symbol_edits};
 use crate::workspace::validate_relative_path;
 
 /// Metadata key used by the orchestrator to carry validation or agent errors
@@ -38,6 +40,8 @@ pub struct StructuredProposal {
     pub summary: String,
     #[serde(default)]
     pub files: Vec<ProposedChange>,
+    #[serde(default)]
+    pub edits: Vec<SymbolEdit>,
 }
 
 impl StructuredProposal {
@@ -45,6 +49,7 @@ impl StructuredProposal {
         Self {
             summary: summary.into(),
             files,
+            edits: Vec::new(),
         }
     }
 }
@@ -65,12 +70,18 @@ The object has this shape:
       "language": "rust",
       "description": "what changed in this file"
     }
-  ]
+  ],
+  "edits": []
 }
 
 Rules:
 - Paths must be relative to the project root. Never return absolute paths or `..`.
-- Return every file you create or modify, with its complete content, not a diff.
+- For complete file changes, return the entire file content, not a diff.
+- Alternatively, send "edits": [{"path":"src/lib.rs","symbol":"functionName",
+  "before":"exact source declaration inspected","after":"complete replacement declaration"}].
+  Edits are matched against the parser and rejected if stale or ambiguous.
+  Keep "files":[] when using only symbol edits. Never mix edits and a
+  complete file for the same path.
 - For code-changing tasks, include at least one test file or an inline test block.
   Source-only proposals are rejected before they reach human review.
 - For read-only speculative checks, return a summary with "files": [] and do
@@ -264,7 +275,12 @@ impl AgentRuntime for ModelAgent {
                 return Ok(if visual_review {
                     task_result_from_critique(task.id, &completion.text)
                 } else {
-                    task_result_from_text(task.id, &completion.text, task.is_speculative())
+                    task_result_from_text(
+                        task.id,
+                        &completion.text,
+                        task.is_speculative(),
+                        Some(Path::new(&worktree_root)),
+                    )
                 });
             }
             let Some(mcp) = ctx.mcp.clone() else {
@@ -401,13 +417,32 @@ fn task_result_from_critique(task_id: uuid::Uuid, text: &str) -> TaskResult {
     }
 }
 
-fn task_result_from_text(task_id: uuid::Uuid, text: &str, speculative: bool) -> TaskResult {
-    let proposal = match parse_structured_proposal_inner(text, speculative) {
+fn task_result_from_text(
+    task_id: uuid::Uuid,
+    text: &str,
+    speculative: bool,
+    workspace_root: Option<&Path>,
+) -> TaskResult {
+    let mut proposal = match parse_structured_proposal_inner(text, speculative) {
         Ok(proposal) => proposal,
         Err(error) => {
             return TaskResult::failure(task_id, format!("invalid structured proposal: {error}"));
         }
     };
+    if !proposal.edits.is_empty() {
+        let Some(root) = workspace_root else {
+            return TaskResult::failure(task_id, "symbol edits require an active workspace lease");
+        };
+        match materialize_symbol_edits(root, &proposal.edits) {
+            Ok(changes) => proposal.files.extend(changes),
+            Err(error) => {
+                return TaskResult::failure(
+                    task_id,
+                    format!("symbol-aware edit rejected: {error}"),
+                );
+            }
+        }
+    }
     let summary = if proposal.summary.trim().is_empty() {
         "proposed code changes".to_owned()
     } else {
@@ -435,11 +470,21 @@ fn parse_structured_proposal_inner(
         extract_json(text).ok_or_else(|| "response contains no JSON object".to_owned())?;
     let proposal: StructuredProposal =
         serde_json::from_str(candidate).map_err(|error| error.to_string())?;
-    if proposal.files.is_empty() && !allow_empty_files {
-        return Err("files must contain at least one file".to_owned());
+    if proposal.files.is_empty() && proposal.edits.is_empty() && !allow_empty_files {
+        return Err("files or edits must contain at least one change".to_owned());
     }
+    let mut full_paths = std::collections::BTreeSet::new();
     for file in &proposal.files {
-        validate_relative_path(&file.path).map_err(|error| error.to_string())?;
+        let path = validate_relative_path(&file.path).map_err(|error| error.to_string())?;
+        if !full_paths.insert(path.to_string_lossy().to_ascii_lowercase()) {
+            return Err(format!("duplicate proposed file: {}", file.path));
+        }
+    }
+    for edit in &proposal.edits {
+        let path = validate_relative_path(&edit.path).map_err(|error| error.to_string())?;
+        if full_paths.contains(&path.to_string_lossy().to_ascii_lowercase()) {
+            return Err(format!("cannot mix full-file and symbol edits: {}", edit.path));
+        }
     }
     Ok(proposal)
 }
@@ -543,12 +588,59 @@ mod tests {
         let text = r#"{"summary":"dependency audit clean","files":[]}"#;
         assert!(parse_structured_proposal(text).is_err());
         let task_id = uuid::Uuid::new_v4();
-        let result = task_result_from_text(task_id, text, true);
+        let result = task_result_from_text(task_id, text, true, None);
         assert!(result.success);
         assert_eq!(result.output, "dependency audit clean");
         assert!(result.changes.is_empty());
-        let ordinary = task_result_from_text(task_id, text, false);
+        let ordinary = task_result_from_text(task_id, text, false, None);
         assert!(!ordinary.success);
+    }
+
+    #[test]
+    fn symbol_edits_materialize_before_task_result() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("lib.rs"), "fn alpha() -> i32 { 1 }\n").unwrap();
+        let proposal = serde_json::json!({
+            "summary": "modify a symbol",
+            "files": [],
+            "edits": [{
+                "path": "lib.rs",
+                "symbol": "alpha",
+                "before": "fn alpha() -> i32 { 1 }",
+                "after": "fn alpha() -> i32 { 2 }"
+            }]
+        });
+        let result = task_result_from_text(
+            uuid::Uuid::new_v4(),
+            &proposal.to_string(),
+            false,
+            Some(root.path()),
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.changes[0].content.contains("{ 2 }"));
+        assert!(parse_structured_proposal(&proposal.to_string()).is_ok());
+        assert!(!task_result_from_text(
+            uuid::Uuid::new_v4(),
+            &proposal.to_string(),
+            false,
+            None
+        )
+        .success);
+    }
+
+    #[test]
+    fn rejects_overlapping_full_file_and_symbol_proposal() {
+        let proposal = serde_json::json!({
+            "summary": "conflict",
+            "files": [{"path": "src/lib.rs", "content": "fn a() {}"}],
+            "edits": [{
+                "path": "src/lib.rs",
+                "symbol": "a",
+                "before": "fn a() {}",
+                "after": "fn a() { 1 }"
+            }]
+        });
+        assert!(parse_structured_proposal(&proposal.to_string()).is_err());
     }
 
     #[test]
