@@ -65,6 +65,7 @@ pub fn run() {
             github_queue::get_github_checks,
             github_queue::get_github_jobs,
             github_queue::start_github_job,
+            github_queue::start_github_goal,
             sessions::list_agent_sessions,
             review::list_review_hunks,
             review::stage_review_hunks,
