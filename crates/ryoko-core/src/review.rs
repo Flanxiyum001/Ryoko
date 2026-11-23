@@ -19,6 +19,10 @@ pub fn validation_evidence_key(task_id: Uuid) -> String {
     format!("ryoko.task.{task_id}.validation_evidence")
 }
 
+pub fn review_record_key(task_id: Uuid) -> String {
+    format!("ryoko.task.{task_id}.review_record")
+}
+
 /// Only a successful execution gate with a recorded command produces a proof.
 /// In particular, AllowAllValidator and a model's assertion of success do not.
 pub fn trusted_validation_evidence(task_id: Uuid, report: &ValidationReport) -> Option<String> {
