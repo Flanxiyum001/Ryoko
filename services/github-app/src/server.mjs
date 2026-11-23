@@ -422,6 +422,87 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
         issues: Array.isArray(issues) ? issues.slice(0, 30) : [],
       });
     }
+    // Native IDE: the paired desktop may inspect CI, queue proposals and
+    // explicitly approve/reject them. The bearer credential stays in Rust.
+    if (req.method === 'GET' && path === '/api/desktop/checks') {
+      const session = requireDesktop(req);
+      const installationId = positiveId(url.searchParams.get('installationId'), 'installation');
+      const repoId = positiveId(url.searchParams.get('repoId'), 'repository');
+      const number = positiveId(url.searchParams.get('number'), 'pull request');
+      return json(res, 200, await client.draftChecks(session.token, installationId, repoId, number));
+    }
+    if (req.method === 'GET' && path === '/api/desktop/jobs') {
+      const session = requireDesktop(req);
+      const installationId = positiveId(url.searchParams.get('installationId'), 'installation');
+      const repoId = positiveId(url.searchParams.get('repoId'), 'repository');
+      await client.authorizedRepo(session.token, installationId, repoId);
+      return json(res, 200, { jobs: [...pipelineJobs]
+        .filter(([key]) => key.startsWith(repoId + ':'))
+        .slice(-50).map(([key, value]) => ({ issue: Number(key.split(':')[1]), ...value })) });
+    }
+    if (req.method === 'POST' && path === '/api/desktop/jobs') {
+      const session = requireDesktop(req);
+      const input = await jsonBody(req);
+      const installationId = positiveId(input?.installationId, 'installation');
+      const repoId = positiveId(input?.repoId, 'repository');
+      const number = positiveId(input?.number, 'issue');
+      if (!settings.agentRepoIds.includes(repoId)) throw bad('repository not allowed for agent jobs', 403);
+      const issue = await client.issue(session.token, installationId, repoId, number);
+      return json(res, 202, startJob(issue, false));
+    }
+    if (req.method === 'GET' && path === '/api/desktop/proposals') {
+      const session = requireDesktop(req);
+      const installationId = positiveId(url.searchParams.get('installationId'), 'installation');
+      const repoId = positiveId(url.searchParams.get('repoId'), 'repository');
+      await client.authorizedRepo(session.token, installationId, repoId);
+      const list = [...proposals.values()]
+        .filter((item) => item.owner === session.user.login
+          && item.proposal.installationId === installationId && item.proposal.repoId === repoId
+          && Date.now() < item.expires && item.status === 'pending')
+        .slice(0, 2);
+      return json(res, 200, { proposals: list.map((item) => ({
+        id: item.id, source: item.source, status: item.status,
+        operation: item.proposal.operation, params: item.proposal.params,
+        createdAt: item.createdAt,
+      })) });
+    }
+    if (req.method === 'POST' && path === '/api/desktop/proposals') {
+      const session = requireDesktop(req);
+      const proposal = validateProposal(await jsonBody(req));
+      await client.authorizedRepo(session.token, proposal.installationId, proposal.repoId);
+      const item = addProposal(session.user, proposal, 'desktop');
+      return json(res, 201, { id: item.id, status: item.status });
+    }
+    const desktopDecision = path.match(/^\/api\/desktop\/proposals\/([a-f0-9-]{36})\/(approve|reject)$/);
+    if (req.method === 'POST' && desktopDecision) {
+      const session = requireDesktop(req);
+      const item = proposals.get(desktopDecision[1]);
+      if (!item || item.owner !== session.user.login) throw bad('proposal not found', 404);
+      if (item.status !== 'pending' || Date.now() > item.expires) {
+        throw bad('proposal expired or already decided', 409);
+      }
+      // Never use a stale installation permission merely because a proposal
+      // was valid when queued. Ownership and authorization are checked anew.
+      await client.authorizedRepo(session.token,
+        item.proposal.installationId, item.proposal.repoId);
+      if (desktopDecision[2] === 'reject') {
+        item.status = 'rejected';
+        return json(res, 200, { id: item.id, status: item.status });
+      }
+      item.status = 'executing'; // one-shot, before any network await
+      try {
+        const result = item.proposal.operation === 'clone_repository'
+          ? await client.clone(session.token, item.proposal, settings.projectsRoot)
+          : await client.execute(session.token, item.proposal);
+        item.status = 'completed';
+        item.result = result;
+        return json(res, 200, { id: item.id, status: item.status, result });
+      } catch (error) {
+        item.status = 'failed'; // uncertain GitHub writes must not be replayed
+        item.error = safeError(error).message;
+        throw error;
+      }
+    }
     if (req.method === 'GET' && path === '/api/installations') {
       const session = requireUser(req);
       return json(res, 200, await client.installations(session.token));
