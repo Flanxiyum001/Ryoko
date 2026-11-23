@@ -332,7 +332,7 @@ async fn run_review_action(
     max_hunks_in_report: usize,
     action: &'static str,
     state: &State<'_, WorkspaceState>,
-    app: &AppHandle,
+    app: AppHandle,
 ) -> Result<ReviewActionReport, String> {
     if expected_patch.len() > MAX_DIFF {
         return Err("hunk review exceeds 1 MiB".into());
@@ -426,7 +426,7 @@ pub async fn stage_review_hunks(
     state: State<'_, WorkspaceState>,
     app: AppHandle,
 ) -> Result<ReviewActionReport, String> {
-    run_review_action(ids, expected_patch, 12, "stage", &state, &app).await
+    run_review_action(ids, expected_patch, 12, "stage", &state, app).await
 }
 
 #[tauri::command]
@@ -436,7 +436,7 @@ pub async fn reject_review_hunks(
     state: State<'_, WorkspaceState>,
     app: AppHandle,
 ) -> Result<ReviewActionReport, String> {
-    run_review_action(ids, expected_patch, 12, "reject", &state, &app).await
+    run_review_action(ids, expected_patch, 12, "reject", &state, app).await
 }
 
 #[tauri::command]
