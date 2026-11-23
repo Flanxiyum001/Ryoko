@@ -43,7 +43,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWrit
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::check::{CommandValidator, detect_check_command};
+use crate::check::{CommandValidator, detect_check_command, detect_compile_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
 use crate::ui_capture::UiCapture;
 use ryoko_scripting::{
@@ -2259,6 +2259,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             Duration::from_secs(args.timeout_secs),
         )
         .with_sandbox(sandbox)
+        .with_compilation_gate(detect_compile_command(&root).map(str::to_owned))
         .with_perf(perf)
         .with_ui_capture(ui)
         .with_artifacts_root(root.join(".ryoko/artifacts")),
