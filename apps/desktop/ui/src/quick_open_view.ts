@@ -1,4 +1,9 @@
-import { rankFiles, nextQuickOpenSelection, type QuickOpenMatch } from './quick_open_model';
+import {
+  createQuickOpenIndexCache,
+  rankIndex,
+  nextQuickOpenSelection,
+  type QuickOpenMatch,
+} from './quick_open_model';
 import './quick_open.css';
 
 const RECENT_PREFIX = 'ryoko.quickOpen.recent.v1:';
@@ -80,6 +85,9 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
   let selected = 0;
   let previousFocus: HTMLElement | null = null;
   let recent: string[] = [];
+  // One index per loaded file list. A keystroke never rebuilds it and never
+  // touches the filesystem; only a new workspace file list does.
+  const currentIndex = createQuickOpenIndexCache();
 
   const close = (): void => {
     if (backdrop.hidden) return;
@@ -92,7 +100,7 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
 
   const remember = (path: string): void => {
     const root = deps.workspaceRoot();
-    if (!root || !deps.files().includes(path)) return;
+    if (!root || !currentIndex(deps.files()).pathSet.has(path)) return;
     recent = [path, ...readRecent(root).filter((other) => other !== path)].slice(0, MAX_RECENTS);
     writeRecent(root, recent);
   };
@@ -107,7 +115,7 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
   };
 
   const render = (): void => {
-    matches = rankFiles(deps.files(), input.value, recent);
+    matches = rankIndex(currentIndex(deps.files()), input.value, recent);
     selected = matches.length ? Math.min(selected, matches.length - 1) : -1;
     list.replaceChildren();
     if (matches.length === 0) {
@@ -169,7 +177,8 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
       return;
     }
     previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    recent = readRecent(root).filter((path) => deps.files().includes(path));
+    const available = currentIndex(deps.files()).pathSet;
+    recent = readRecent(root).filter((path) => available.has(path));
     selected = 0;
     input.value = '';
     backdrop.hidden = false;
