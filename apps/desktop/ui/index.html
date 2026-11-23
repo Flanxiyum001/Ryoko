@@ -14,12 +14,22 @@
       <div class="top-actions">
         <button id="openFolder" class="button primary" type="button">Open folder…</button>
         <button id="saveFile" class="button ghost" type="button" disabled>Save</button>
+        <button id="openMarketplace" class="button ghost" type="button">Marketplace</button>
+        <button id="openSettings" class="button ghost" type="button">Settings</button>
         <span class="shortcut-hint">⌘S / Ctrl+S</span>
       </div>
     </header>
 
-    <div class="layout">
-      <aside class="explorer" aria-label="Workspace explorer">
+    <div class="layout hide-inspector" data-active-view="explorer">
+      <nav class="activity-rail" aria-label="Workbench views">
+        <button class="rail-button active" type="button" data-view="explorer" aria-label="Show explorer" aria-pressed="true" title="Explorer">▤<span>Files</span></button>
+        <button class="rail-button" type="button" data-view="editor" aria-label="Show editor" aria-pressed="false" title="Editor">⌘<span>Editor</span></button>
+        <button class="rail-button" type="button" data-view="mission" aria-label="Show Mission Control" aria-pressed="false" title="Mission Control">◇<span>Mission</span></button>
+        <button class="rail-button" type="button" data-view="changes" aria-label="Show changes" aria-pressed="false" title="Changes">⑂<span>Changes</span></button>
+        <button class="rail-button" type="button" data-view="problems" aria-label="Show problems" aria-pressed="false" title="Problems">◉<span>Issues</span></button>
+        <button class="rail-button rail-bottom" type="button" data-view="settings" aria-label="Open settings" title="Settings">⚙<span>Setup</span></button>
+      </nav>
+      <aside class="explorer" id="explorerPane" aria-label="Workspace explorer">
         <div class="panel-head"><span>EXPLORER</span><span id="fileCount" class="counter">0 files</span></div>
         <label class="sr-only" for="fileFilter">Filter files</label>
         <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
@@ -46,13 +56,16 @@
           <div id="diffEditor" class="diff-editor"></div>
         </div>
         <div id="emptyEditor" class="empty-editor">
-          <div class="empty-mark" aria-hidden="true">⌘</div>
-          <h1>Ryoko Desktop</h1>
-          <p>Open a folder, edit files with Monaco, and see findings published by <code>ryoko-lsp</code>.</p>
+          <div class="empty-mark" aria-hidden="true">R</div>
+          <span class="empty-eyebrow">THE ENGINEERING WORKBENCH</span>
+          <h1>Build with clarity.</h1>
+          <p>Open a workspace to edit code, review changes and follow your agents from one place.</p>
+          <button id="emptyOpenFolder" class="button primary" type="button">Open a workspace</button>
         </div>
         <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
           <div class="bottom-tabs">
             <button id="terminalTab" class="bottom-tab active" type="button">TERMINAL</button>
+            <button id="searchTab" class="bottom-tab" type="button">SEARCH</button>
             <button id="debugTab" class="bottom-tab" type="button">DEBUG</button>
             <span id="bottomStatus" class="hint"></span>
             <span class="status-spacer"></span>
@@ -66,7 +79,19 @@
             </div>
             <div id="terminalHost" class="terminal-host"></div>
           </div>
-          <div id="debugPanel" class="bottom-content debug-panel hidden">
+                    <div id="searchPanel" class="bottom-content search-panel hidden">
+            <div class="search-controls">
+              <input id="searchInput" type="search" placeholder="Search workspace (regex…)" autocomplete="off" spellcheck="false">
+              <label class="run-check"><input id="searchCaseSensitive" type="checkbox"> Aa</label>
+              <button id="searchRun" class="button primary compact" type="button">Search</button>
+              <input id="searchReplace" type="text" placeholder="Replace with… ($1 groups)" autocomplete="off" spellcheck="false">
+              <button id="searchReplaceRun" class="button compact" type="button" disabled>Preview, then apply</button>
+            </div>
+            <div id="searchResults" class="search-results" aria-live="polite">
+              <p class="hint">Searches the open workspace with the Rust regex engine.</p>
+            </div>
+          </div>
+<div id="debugPanel" class="bottom-content debug-panel hidden">
             <div class="debug-toolbar">
               <label for="debugAdapter">Adapter</label>
               <input id="debugAdapter" type="text" spellcheck="false" placeholder="dlv">
@@ -90,7 +115,7 @@
         </section>
       </main>
 
-      <aside class="problems" aria-label="Mission Control and diagnostics">
+      <aside class="problems" id="inspectorPane" aria-label="Mission Control and diagnostics">
         <section class="agent-sessions" aria-label="Agent sessions">
           <div class="panel-head"><span>AGENT SESSIONS</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
           <div class="agent-session-toolbar">
@@ -179,7 +204,16 @@
           </div>
           <pre id="hunkValidation" class="hunk-validation hidden" aria-live="polite"></pre>
         </details>
-        <div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
+                <details class="changes" id="changesDetails">
+          <summary>CHANGES <span id="changesSummary" class="counter">no folder</span></summary>
+          <div class="hunk-toolbar">
+            <button id="changesRefresh" class="button ghost compact" type="button">Scan</button>
+          </div>
+          <div id="changesList" class="change-list" aria-label="Working tree changes">
+            <p class="hint">Open a Git repository to review every modified file.</p>
+          </div>
+        </details>
+<div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
         <div id="problemList" class="problem-list">
           <p class="hint">No diagnostics yet.</p>
         </div>
@@ -187,6 +221,7 @@
     </div>
 
     <footer class="statusbar">
+      <span id="lspPills" class="lsp-pills"></span>
       <span id="lspStatus" class="status-pill offline">ryoko-lsp offline</span>
       <span id="editorStatus" class="status-message" role="status" aria-live="polite">Ready</span>
       <span class="status-spacer"></span>
@@ -194,6 +229,45 @@
       <span id="languageMode">plaintext</span>
       <span>UTF-8</span>
     </footer>
+  </div>
+  <div id="settingsDialog" class="settings-dialog hidden" role="dialog" aria-modal="false" aria-label="Settings">
+    <div class="settings-bar">
+      <span class="settings-title">Settings</span>
+      <span id="settingsPath" class="hint"></span>
+      <span class="status-spacer"></span>
+      <button id="settingsClose" class="button ghost compact" type="button">Close</button>
+    </div>
+    <div class="settings-body">
+      <section class="settings-section">
+        <h2>Provider catalog</h2>
+        <p class="hint">A validated <code>ryoko.providers</code>-style catalog. API keys stay in environment variables referenced by <code>api_key_env</code>.</p>
+        <textarea id="settingsProviders" rows="10" spellcheck="false" placeholder="{}"></textarea>
+        <button id="settingsSaveProviders" class="button primary compact" type="button">Validate &amp; save</button>
+      </section>
+      <section class="settings-section">
+        <h2>Language servers</h2>
+        <p class="hint">Each language gets one owner server (columns: id, command, languages, args). <code>ryoko-lsp</code> always runs beside them.</p>
+        <div id="settingsServerRows" class="settings-server-rows"></div>
+        <div class="settings-actions">
+          <button id="settingsAddServer" class="button ghost compact" type="button">Add server</button>
+          <button id="settingsSaveServers" class="button primary compact" type="button">Validate &amp; save</button>
+        </div>
+      </section>
+      <section class="settings-section">
+        <h2>Keybindings</h2>
+        <p class="hint">Chords like <code>Mod+Shift+F</code> (Mod = Cmd on macOS, Ctrl elsewhere), stored per machine.</p>
+        <div id="settingsKeybindings" class="settings-keybindings"></div>
+      </section>
+    </div>
+  </div>
+  <div id="inlineEditOverlay" class="inline-edit-overlay hidden">
+    <span id="inlineEditHint" class="hint"></span>
+    <input id="inlineEditInput" type="text" placeholder="Edit the selection with the agent… (Enter to run)" autocomplete="off" spellcheck="false">
+    <div class="inline-edit-actions">
+      <button id="inlineEditRun" class="button primary compact" type="button">Edit</button>
+      <button id="inlineEditAccept" class="button compact hidden" type="button">Accept</button>
+      <button id="inlineEditCancel" class="button ghost compact" type="button">Cancel</button>
+    </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

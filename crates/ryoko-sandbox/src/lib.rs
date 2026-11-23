@@ -13,7 +13,8 @@ mod process;
 mod spec;
 
 pub use init::{
-    Ecosystem, FrontendProfile, InitError, SandboxPlan, VERIFY_UI_CONTAINER_PATH, verify_ui_script,
+    Ecosystem, Freshness, FrontendProfile, ImageState, InitError, SandboxPlan,
+    VERIFY_UI_CONTAINER_PATH, verify_ui_script,
 };
 pub use process::{ARTIFACT_MOUNT, BuildBackend, BuildSandbox, BuildSandboxError};
 
@@ -129,6 +130,20 @@ impl std::fmt::Debug for WasmSandbox {
 }
 
 impl WasmSandbox {
+    /// Native Windows Wasmtime 26 guest traps can abort the entire host process
+    /// (0xc0000409), including when signals-based traps are disabled. Until
+    /// execution is moved behind an independently monitored process boundary,
+    /// refuse this WASI validation mode rather than risking editor data loss.
+    /// Docker/Podman project checks use a separate container-backed runner.
+    #[cfg(windows)]
+    pub fn new(_limits: SandboxLimits) -> Result<Self, SandboxError> {
+        Err(SandboxError::Engine(
+            "native WASM execution unavailable on Windows pending isolated worker; use container-backed project checks"
+                .into(),
+        ))
+    }
+
+    #[cfg(not(windows))]
     pub fn new(limits: SandboxLimits) -> Result<Self, SandboxError> {
         let mut config = Config::new();
         config.consume_fuel(true);
@@ -307,6 +322,15 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn native_wasm_on_windows_fails_closed_instead_of_crashing_the_ide() {
+        let error = WasmSandbox::new(SandboxLimits::default()).unwrap_err();
+        assert!(error.to_string().contains("unavailable on Windows"));
+        assert!(SandboxValidator::static_module(b"(module)").is_err());
+    }
+
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn executes_clean_module() {
         let sandbox = WasmSandbox::new(SandboxLimits::default()).unwrap();
@@ -318,6 +342,7 @@ mod tests {
         assert!(outcome.fuel_consumed > 0);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn traps_fail_the_guardrail() {
         let validator =
@@ -328,6 +353,7 @@ mod tests {
         assert!(report.logs.join(" ").contains("execution failed"));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn infinite_loops_are_stopped_by_fuel() {
         let sandbox = WasmSandbox::new(SandboxLimits {
@@ -342,6 +368,7 @@ mod tests {
         assert!(outcome.is_err());
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn memory_limit_is_enforced() {
         let sandbox = WasmSandbox::new(SandboxLimits {
@@ -356,6 +383,7 @@ mod tests {
         assert!(outcome.is_err());
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn sandbox_validator_passes_clean_test_artifact() {
         let validator =
@@ -365,6 +393,7 @@ mod tests {
         assert!(report.duration_ms < 5_000);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn wasi_imports_are_available_without_host_preopens() {
         let sandbox = WasmSandbox::new(SandboxLimits {

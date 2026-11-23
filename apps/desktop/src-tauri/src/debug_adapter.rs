@@ -5,7 +5,7 @@
 //! and leaves launch/breakpoint semantics to the adapter. Every message is
 //! size-bounded and process arguments are never sourced from model output.
 
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +19,7 @@ use crate::workspace::{WorkspaceState, current_root};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_ARGS: usize = 32;
+const MAX_STDERR_LINE_BYTES: usize = 8 * 1024;
 
 #[derive(Default)]
 pub struct DebugState {
@@ -35,6 +36,13 @@ struct DapSession {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DapEvent {
+    session_id: u64,
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DapLog {
     session_id: u64,
     message: String,
 }
@@ -133,7 +141,13 @@ pub fn dap_start(
                         }
                     }
                     Err(_) => {
-                        let _ = output_app.emit("ryoko-dap-log", "debug adapter emitted non-UTF-8");
+                        let _ = output_app.emit(
+                            "ryoko-dap-log",
+                            DapLog {
+                                session_id: id,
+                                message: "debug adapter emitted non-UTF-8".to_owned(),
+                            },
+                        );
                         break;
                     }
                 },
@@ -141,7 +155,10 @@ pub fn dap_start(
                 Err(error) => {
                     let _ = output_app.emit(
                         "ryoko-dap-log",
-                        format!("debug adapter protocol error: {error}"),
+                        DapLog {
+                            session_id: id,
+                            message: format!("debug adapter protocol error: {error}"),
+                        },
                     );
                     break;
                 }
@@ -150,10 +167,55 @@ pub fn dap_start(
     });
     thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        while std::io::BufRead::read_line(&mut reader, &mut line).unwrap_or(0) > 0 {
-            let _ = app.emit("ryoko-dap-log", line.trim_end().to_owned());
-            line.clear();
+        let mut line = Vec::new();
+        let mut truncated = false;
+        loop {
+            let (take, complete, empty) = match reader.fill_buf() {
+                Ok(buffer) if buffer.is_empty() => (0, false, true),
+                Ok(buffer) => {
+                    let complete = buffer.iter().position(|byte| *byte == b'\n');
+                    let take = complete.map_or(buffer.len(), |position| position + 1);
+                    let available = MAX_STDERR_LINE_BYTES.saturating_sub(line.len());
+                    line.extend_from_slice(&buffer[..take.min(available)]);
+                    if take > available {
+                        truncated = true;
+                    }
+                    (take, complete.is_some(), false)
+                }
+                Err(_) => break,
+            };
+            if empty {
+                break;
+            }
+            reader.consume(take);
+            if complete {
+                let mut message = String::from_utf8_lossy(&line).trim_end().to_owned();
+                if truncated {
+                    message.push_str(" [truncated]");
+                }
+                let _ = app.emit(
+                    "ryoko-dap-log",
+                    DapLog {
+                        session_id: id,
+                        message,
+                    },
+                );
+                line.clear();
+                truncated = false;
+            }
+        }
+        if !line.is_empty() || truncated {
+            let mut message = String::from_utf8_lossy(&line).trim_end().to_owned();
+            if truncated {
+                message.push_str(" [truncated]");
+            }
+            let _ = app.emit(
+                "ryoko-dap-log",
+                DapLog {
+                    session_id: id,
+                    message,
+                },
+            );
         }
     });
 
@@ -208,6 +270,13 @@ pub fn dap_status(state: State<'_, DebugState>) -> Result<DapStatus, String> {
         .try_wait()
         .map_err(|error| format!("cannot inspect debug adapter: {error}"))?
         .is_none();
+    if !running {
+        guard.take();
+        return Ok(DapStatus {
+            running: false,
+            session_id: None,
+        });
+    }
     Ok(DapStatus {
         running,
         session_id: Some(session.id),

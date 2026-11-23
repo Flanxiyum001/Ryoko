@@ -65,6 +65,8 @@ async fn init_repo() -> (TempDir, GitWorktreeManager) {
     git_ok(root, &["config", "user.name", "Test"]).await;
     git_ok(root, &["config", "user.email", "test@example.com"]).await;
     git_ok(root, &["config", "commit.gpgsign", "false"]).await;
+    // Byte-exact content assertions must not depend on Windows line endings.
+    git_ok(root, &["config", "core.autocrlf", "false"]).await;
     // Rename detection is asserted below; a global config must not decide it.
     git_ok(root, &["config", "diff.renames", "true"]).await;
     tokio::fs::write(root.join("README.md"), "# project\n")

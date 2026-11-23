@@ -1,7 +1,6 @@
 # Ryoko 2.0 — master blueprint
 
-Status: architecture proposal. Ryoko is pre-alpha. This document records scope and
-milestones; it does not assert that any proposed subsystem exists.
+Status: architectural blueprint, **not a live implementation ledger**. Ryoko remains pre-alpha. Several foundations originally marked planned below now exist experimentally; use the [root README](../README.md) and [desktop preview testing guide](DESKTOP_PREVIEW_TESTING.md) for supported current usage. No unsigned preview is evidence of production release readiness.
 
 Product vision: a developer environment where a human developer and a team of
 specialised AI engineers work together inside one professional IDE, with the human
@@ -43,17 +42,17 @@ These are views over one shared application state, not separate products.
 | Layer | Choice | Status |
 | --- | --- | --- |
 | Core backend | Rust (2024 edition) | exists |
-| Desktop shell | Tauri 2 | planned |
-| Frontend | React + TypeScript | planned |
-| Editor | Monaco | planned |
+| Desktop shell | Tauri 2 | pre-alpha shell and unsigned preview installers exist |
+| Frontend | Vite + TypeScript | implemented without React; desktop workbench is experimental |
+| Editor | Monaco | editor integrated into the experimental desktop |
 | Language intelligence | LSP (`tower-lsp`) | server exists in `ryoko-native` |
 | Parsing/indexing | tree-sitter | exists for Rust, TS/TSX, JS, Python, Go, C/C++, Java, Kotlin, C#, Swift and SQL in `ryoko-core` context extraction |
 | Async runtime | Tokio | exists |
-| Local storage | SQLite via SQLx | planned |
+| Local storage | SQLite | symbol index and worktree/session state exist; unified migrations remain a gap |
 | Serialization | Serde | exists |
 | Inter-agent protocol | IACP | v1 implemented, v2 proposed |
-| Sandbox | WASM validation + restricted runner | WASM validator exists; project runner planned |
-| IPC | typed Tauri commands and versioned events | planned |
+| Sandbox | WASI guardrails + Docker/Podman | restricted offline project checks exist; not a VM |
+| IPC | typed Tauri commands and events | commands/events exist; complete contract stabilisation pending |
 | GitHub | separate `services/github-app` broker | experimental |
 
 Monaco is the editor, not the IDE. File management, language-server lifecycle,
@@ -159,7 +158,7 @@ document synchronisation, patch validation and worktree isolation are dependable
 
 ## What not to build yet
 
-Plugin marketplace, cloud agent hosting, real-time team collaboration, fully
+A trusted, production-grade plugin marketplace, cloud agent hosting, real-time team collaboration, fully
 autonomous deployment, custom model training, a custom editor engine, a large
 agent catalogue, a complex vector database and an AI UI builder. Each depends on
 foundations that do not exist yet.
@@ -180,12 +179,12 @@ recovery; reproducible AI evaluation; signed, tested cross-platform releases.
 
 | Blueprint area | Today | Gap |
 | --- | --- | --- |
-| Editor UI | LSP server and virtual document store only | No desktop shell, no Monaco |
-| Preview | none | Preview runner, screenshot and console capture |
+| Editor UI | Tauri + Monaco workbench, file explorer, search, Git review, LSP multiplexer | Stable splits, accessibility validation, crash recovery and everyday IDE polish |
+| Preview | Opt-in headless UI capture with screenshots | Reliable cross-platform visual validation and artifact review |
 | Code review | CLI diff review in isolated worktrees | Structured findings with file/line refs |
 | Architecture designer | none | Model, diagram generation, decision sync |
 | AI debugging | LSP diagnostics channel | Runner output capture and feedback loop |
-| Extensions | `ryoko-scripting` WASI host with policy allowlists and typed payloads | Signing, SDKs and a marketplace |
-| Project memory | In-process `SharedMemory` blackboard | Durable, searchable, provenance-tracked store |
-| Multi-agent | Review-only team preview | Real parallel execution with durable state |
-| Persistence | none | SQLite schema, migrations, event journal |
+| Extensions | WASI host and experimental marketplace CLI | Signed publisher trust, curated registry, safe install/update lifecycle and SDKs |
+| Project memory | In-process blackboard and human-editable `.ryoko/memory/` files | Searchable, provenance-tracked semantic memory |
+| Multi-agent | Executable worktree-isolated task DAG with repair cycles and integrator | Durable resumable orchestration, stronger task selection and reproducible task evaluations |
+| Persistence | Worktree state and symbol index in SQLite; optional JSONL run events | Unified event journal, recovery and migrations |

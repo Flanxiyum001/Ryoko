@@ -17,13 +17,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ignore::WalkBuilder;
 use ryoko_core::{
-    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeValidator, EventSink,
-    FileContext, Language, ModelAgent, Orchestrator, OrchestratorConfig, OrchestratorEvent,
-    ProjectContext, ProjectMemory, ProposedChange, RETRY_FEEDBACK_METADATA, SharedMemory,
-    SourceFile, StagedChanges, Task, TaskContext, WorkspaceIndex, extract_files, goal_terms,
+    AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeType, ChangeValidator,
+    CodeReviewSummary, EventSink, FileSummary, Language, ModelAgent, Orchestrator,
+    OrchestratorConfig, OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange,
+    RETRY_FEEDBACK_METADATA, ReviewConfig, SharedMemory, SourceFile, StagedChanges, Task,
+    TaskContext, WorkspaceIndex, extract_files, render_markdown_summary,
     spec_link::SpecIndex,
-    team::{application_plan, dynamic_plan, standard_team},
+    team::{application_plan, dynamic_plan_with_reviews, standard_team},
     validation::ValidationReport,
+};
+use ryoko_marketplace::{
+    DownloadResultWrapper, InstallationRecord, MarketplaceClient, MarketplaceLock, MarketplaceType,
 };
 use ryoko_models::{
     Budget, ChatRequest, ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog,
@@ -39,7 +43,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWrit
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::check::{CommandValidator, detect_check_command};
+use crate::check::{CommandValidator, detect_check_command, detect_compile_command};
 use crate::experience::{TeamReport, TeamSettings, TeamTurn, create_private_file};
 use crate::ui_capture::UiCapture;
 use ryoko_scripting::{
@@ -86,6 +90,10 @@ enum Commands {
     Sandbox(SandboxArgs),
     /// Review published worktrees and accept, reject, or send feedback.
     Review(ReviewArgs),
+    /// Generate a structured summary of a published task's changes.
+    Summarize(SummarizeArgs),
+    /// Marketplace operations for extensions and skills.
+    Marketplace(MarketplaceArgs),
     /// Operator-controlled MCP stdio discovery and tool invocation.
     Mcp(McpArgs),
     /// Inspect, scaffold and toggle external MCP connectors.
@@ -102,6 +110,52 @@ enum Commands {
     Spec(SpecArgs),
     /// Sign and verify merge provenance attestations stored in Git notes.
     Attest(AttestArgs),
+}
+
+#[derive(Debug, Args)]
+struct MarketplaceArgs {
+    #[command(subcommand)]
+    command: MarketplaceCmds,
+}
+
+#[derive(Debug, Subcommand)]
+enum MarketplaceCmds {
+    /// List available extensions or skills.
+    List {
+        /// Item type: 'extension' or 'skill'
+        #[arg(value_enum)]
+        r#type: MarketplaceType,
+        /// Print machine-readable registry items for the desktop catalog.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search the marketplace.
+    Search {
+        /// Search term
+        query: String,
+        /// Item type: 'extension' or 'skill'
+        #[arg(value_enum)]
+        r#type: MarketplaceType,
+    },
+    /// Install an extension or skill.
+    Install {
+        /// Item ID to install
+        id: String,
+    },
+    /// Check for updates to installed items.
+    Update {
+        /// Update all installed items
+        #[arg(long)]
+        all: bool,
+        /// Specific item to update
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Show information about an item.
+    Info {
+        /// Item ID to look up
+        id: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -503,6 +557,12 @@ struct RunArgs {
     /// Number of concurrent agents in team mode, between 1 and 4.
     #[arg(long, default_value_t = 2)]
     max_concurrency: usize,
+    /// Omit the independent code reviewer (does not disable ordinary QA).
+    #[arg(long = "no-code-review", requires = "team")]
+    no_code_review: bool,
+    /// Omit the independent security reviewer (does not disable security tests).
+    #[arg(long = "no-security-review", requires = "team")]
+    no_security_review: bool,
     /// Times a failed QA or Security review may send its findings back to the
     /// producing agent before escalating to human review. 0 disables the loop.
     #[arg(long, default_value_t = 1)]
@@ -561,6 +621,8 @@ struct SandboxArgs {
 enum SandboxCommands {
     /// Generate and build an offline OCI image for this checkout.
     Init(SandboxInitArgs),
+    /// Report the container runtime, the image and whether it is out of date.
+    Status(SandboxInitArgs),
 }
 
 #[derive(Debug, Args)]
@@ -579,6 +641,10 @@ struct SandboxInitArgs {
     /// Only write the Dockerfile; do not build it.
     #[arg(long)]
     no_build: bool,
+    /// Skip the build when the image exists and no manifest, lockfile or
+    /// generated Dockerfile changed since the last successful build.
+    #[arg(long)]
+    if_stale: bool,
     #[arg(long)]
     json: bool,
 }
@@ -655,6 +721,22 @@ struct ReviewArgs {
     timeout_secs: u64,
     #[command(flatten)]
     isolation: IsolationArgs,
+}
+
+#[derive(Debug, Args)]
+struct SummarizeArgs {
+    /// Published task to summarize.
+    #[arg(long)]
+    task: Uuid,
+    /// Project checkout that owns the worktrees.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Print as JSON instead of markdown.
+    #[arg(long)]
+    json: bool,
+    /// Include detailed diff in the output.
+    #[arg(long)]
+    diff: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -856,6 +938,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Index(args) => index_workspace(args).await,
         Commands::Sandbox(args) => sandbox(args).await,
         Commands::Review(args) => review(args).await,
+        Commands::Summarize(args) => summarize(args).await,
         Commands::Mcp(args) => mcp_command(args).await,
         Commands::Connectors(args) => connectors_command(args).await,
         Commands::Plugin(args) => plugin_command(args).await,
@@ -864,6 +947,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Sessions(args) => sessions(args).await,
         Commands::Spec(args) => spec(args).await,
         Commands::Attest(args) => attest(args).await,
+        Commands::Marketplace(args) => marketplace_command(args).await,
     }
 }
 
@@ -1489,6 +1573,65 @@ async fn sessions(args: SessionsArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn summarize(args: SummarizeArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+
+    // Check if the task exists by looking at the worktrees
+    let manager = GitWorktreeManager::new(&root);
+    let records = manager.open_sessions()?;
+
+    let task_record = records
+        .iter()
+        .find(|r| r.session.id == args.task)
+        .ok_or_else(|| cli_error(format!("task {} not found in worktree sessions", args.task)))?;
+
+    // Get the branch and generate summary
+    let branch = &task_record.session.branch_name;
+    let files = &task_record.files;
+    let summary_text = &task_record.summary;
+
+    // Build a basic summary from the worktree record
+    let summary = CodeReviewSummary {
+        task_id: args.task.to_string(),
+        task_description: summary_text.clone().unwrap_or_default(),
+        role: "developer".to_string(),
+        agent: "ai-agent".to_string(),
+        files: files
+            .iter()
+            .map(|path| FileSummary {
+                path: path.clone(),
+                change_type: ChangeType::from_path(path),
+                lines_added: 0,
+                lines_removed: 0,
+                is_test: ChangeType::from_path(path) == ChangeType::Test,
+                description: None,
+            })
+            .collect(),
+        total_lines_added: 0,
+        total_lines_removed: 0,
+        impact_analysis: Vec::new(),
+        changelog: files.iter().map(|f| format!("- {}", f)).collect(),
+        validated: task_record.state == WorktreeState::Published,
+        branch: Some(branch.clone()),
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        println!("{}", render_markdown_summary(&summary));
+    }
+
+    if args.diff {
+        // Show a simple diff preview
+        eprintln!("\n## Diff Preview");
+        for file in files {
+            eprintln!("--- {}", file);
+        }
+    }
+
+    Ok(())
+}
+
 fn load_team_settings(path: Option<&Path>) -> Result<TeamSettings, Box<dyn Error>> {
     match path {
         Some(path) => {
@@ -1697,21 +1840,45 @@ async fn changed_paths(root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
 async fn sandbox(args: SandboxArgs) -> Result<(), Box<dyn Error>> {
     match args.command {
         SandboxCommands::Init(args) => sandbox_init(args).await,
+        SandboxCommands::Status(args) => sandbox_status(args).await,
     }
 }
 
-async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
-    let root = canonical_root(&args.repo)?;
-    let plan = SandboxPlan::inspect(&root, args.tag, args.dockerfile)?;
-    plan.write()?;
-    let backend = match args.backend {
+fn init_backend(arg: SandboxBackendArg) -> BuildBackend {
+    match arg {
         SandboxBackendArg::Auto => BuildBackend::Auto,
         SandboxBackendArg::Docker => BuildBackend::Docker,
         SandboxBackendArg::Podman => BuildBackend::Podman,
-    };
-    if !args.no_build {
-        plan.build(backend).await?;
     }
+}
+
+/// Whether the image is missing or built from different dependency inputs.
+/// An unreachable runtime counts as "needs a build" so the build reports it.
+async fn image_is_current(
+    plan: &SandboxPlan,
+    backend: BuildBackend,
+) -> Result<bool, Box<dyn Error>> {
+    if plan.freshness()?.needs_build() {
+        return Ok(false);
+    }
+    Ok(BuildSandbox::new(backend, None)
+        .image_exists(&plan.image)
+        .await
+        .unwrap_or(false))
+}
+
+async fn sandbox_status(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let plan = SandboxPlan::inspect(&root, args.tag, args.dockerfile)?;
+    let backend = init_backend(args.backend);
+    let probe = BuildSandbox::new(backend, None);
+    let runtime = probe.runtime().await.ok();
+    let image_present = match runtime {
+        Some(_) => probe.image_exists(&plan.image).await.ok(),
+        None => None,
+    };
+    let freshness = plan.freshness()?;
+    let ready = runtime.is_some() && image_present == Some(true) && !freshness.needs_build();
     if args.json {
         println!(
             "{}",
@@ -1719,8 +1886,77 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 "ecosystem": plan.ecosystem,
                 "image": plan.image,
                 "dockerfile": plan.dockerfile,
+                "runtime": runtime,
+                "image_present": image_present,
+                "freshness": freshness,
+                "ready": ready,
+            })
+        );
+        return Ok(());
+    }
+    match runtime {
+        Some(runtime) => println!("Container runtime: {runtime}"),
+        None => println!(
+            "Container runtime: none found. Start Docker or Podman; checks never fall back to the host."
+        ),
+    }
+    match image_present {
+        Some(true) => println!("Image {}: present", plan.image),
+        Some(false) => println!("Image {}: not built", plan.image),
+        None => println!("Image {}: unknown (no runtime)", plan.image),
+    }
+    match &freshness {
+        ryoko_sandbox::Freshness::NeverBuilt => {
+            println!("Dependencies: no recorded build for this plan")
+        }
+        ryoko_sandbox::Freshness::Fresh => println!("Dependencies: unchanged since the last build"),
+        ryoko_sandbox::Freshness::Stale { changed } => {
+            println!(
+                "Dependencies: changed since the last build: {}",
+                changed.join(", ")
+            )
+        }
+    }
+    if ready {
+        println!("Ready. Use: --sandbox-image {}", plan.image);
+    } else {
+        println!("Run `ryoko sandbox init --if-stale` to rebuild.");
+    }
+    Ok(())
+}
+
+async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    let plan = SandboxPlan::inspect(&root, args.tag, args.dockerfile)?;
+    let backend = init_backend(args.backend);
+    // Freshness is checked before writing so a regenerated Dockerfile that
+    // differs from the built one is still detected.
+    let skipped = args.if_stale && !args.no_build && image_is_current(&plan, backend).await?;
+    plan.write()?;
+    let built = !args.no_build && !skipped;
+    if built {
+        plan.build(backend).await?;
+    }
+    let pinned = if args.no_build {
+        None
+    } else {
+        Some(
+            BuildSandbox::new(backend, None)
+                .image_id(&plan.image)
+                .await?,
+        )
+    };
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ecosystem": plan.ecosystem,
+                "image": pinned.as_deref().unwrap_or(&plan.image),
+                "image_tag": plan.image,
+                "dockerfile": plan.dockerfile,
                 "frontend": plan.frontend,
-                "built": !args.no_build,
+                "built": built,
+                "up_to_date": skipped,
             })
         );
     } else {
@@ -1735,15 +1971,24 @@ async fn sandbox_init(args: SandboxInitArgs) -> Result<(), Box<dyn Error>> {
                 plan.frontend.frameworks.join(", ")
             );
         }
-        if args.no_build {
-            println!("Skipped the image build; pass it to --sandbox-image after building it.");
+        if skipped {
+            println!(
+                "{} is up to date; no manifest or lockfile changed since it was built.",
+                plan.image
+            );
+        } else if args.no_build {
+            println!(
+                "Skipped the image build; resolve its local sha256 image ID before using --sandbox-image."
+            );
         } else {
             println!(
                 "Built {} and cached its dependencies for offline validation.",
                 plan.image
             );
         }
-        println!("Use: --sandbox-image {}", plan.image);
+        if let Some(image) = pinned {
+            println!("Use: --sandbox-image {image}");
+        }
     }
     Ok(())
 }
@@ -1850,7 +2095,7 @@ async fn check_worktree(args: CheckArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
+fn symbol_candidates(root: &Path) -> Result<Vec<SourceFile>, Box<dyn Error>> {
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
@@ -1892,10 +2137,7 @@ fn workspace_symbols(root: &Path) -> Result<Vec<FileContext>, Box<dyn Error>> {
         }
         candidates.push((path, entry.path().to_path_buf()));
     }
-    // Parsing dominates here, and tree-sitter parsers cannot be shared, so each
-    // worker owns one. The input order is preserved, which keeps the index the
-    // same on every machine regardless of how the walk interleaves.
-    Ok(extract_files(candidates))
+    Ok(candidates)
 }
 
 fn symbol_index_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
@@ -1930,20 +2172,34 @@ fn symbol_index_path(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn build_symbol_index(root: &Path) -> Result<(WorkspaceIndex, usize), Box<dyn Error>> {
-    let files = workspace_symbols(root)?;
     let index_path = symbol_index_path(root)?;
     let mut index = WorkspaceIndex::open(&index_path)?;
-    let count = index.rebuild(files.iter())?;
-    Ok((index, count))
-}
+    let candidates = symbol_candidates(root)?;
 
-fn indexed_context(root: &Path, goal: &str) -> Result<String, Box<dyn Error>> {
-    let terms = goal_terms(goal);
-    if terms.is_empty() {
-        return Ok(String::new());
+    // Hash bytes before invoking tree-sitter. Parsing is only needed for files
+    // that have changed since the last successful index pass.
+    let mut present = std::collections::BTreeSet::new();
+    let mut changed = Vec::new();
+    let mut hashes = HashMap::new();
+    for (path, disk_path) in candidates {
+        present.insert(path.clone());
+        let Ok(bytes) = std::fs::read(&disk_path) else {
+            continue;
+        };
+        let hash = sha256_hex(&bytes);
+        if index.content_hash(&path)?.as_deref() != Some(hash.as_str()) {
+            hashes.insert(path.clone(), hash);
+            changed.push((path, disk_path));
+        }
     }
-    let (index, _) = build_symbol_index(root)?;
-    Ok(index.context_for_terms(&terms, 6_000)?)
+
+    // The parser's existing bounded, ordered extraction remains unchanged.
+    let parsed = extract_files(changed)
+        .into_iter()
+        .filter_map(|file| hashes.remove(&file.path).map(|hash| (file, hash)))
+        .collect::<Vec<_>>();
+    index.sync_files(&parsed, &present)?;
+    Ok((index, present.len()))
 }
 
 async fn index_workspace(args: IndexArgs) -> Result<(), Box<dyn Error>> {
@@ -2023,6 +2279,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             Duration::from_secs(args.timeout_secs),
         )
         .with_sandbox(sandbox)
+        .with_compilation_gate(detect_compile_command(&root).map(str::to_owned))
         .with_perf(perf)
         .with_ui_capture(ui)
         .with_artifacts_root(root.join(".ryoko/artifacts")),
@@ -2034,7 +2291,15 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     // Dynamic routing: the project-manager decomposition decides which
     // specialists this goal actually needs, so a UI/UX or DevOps agent is only
     // registered (and only allocated a worktree) when the plan activates it.
-    let dynamic = args.team.then(|| dynamic_plan(&goal));
+    let dynamic = args.team.then(|| {
+        dynamic_plan_with_reviews(
+            &goal,
+            ReviewConfig {
+                code: !args.no_code_review,
+                security: !args.no_security_review,
+            },
+        )
+    });
     let activated = dynamic
         .as_ref()
         .map(|plan| plan.activated_roles().into_iter().collect::<HashSet<_>>());
@@ -2088,21 +2353,34 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         None => vec![Task::new(goal.clone(), AgentRole::SeniorDeveloper)],
     };
     let project_outline = project_brief(&root).await;
-    let symbol_context = match indexed_context(&root, &goal) {
-        Ok(context) => context,
+    // Parse the repository once, but retrieve context separately for each
+    // specialized task. A QA task needs different symbols than a backend task.
+    let symbol_index = match build_symbol_index(&root) {
+        Ok((index, _)) => Some(index),
         Err(error) => {
             eprintln!("warning: workspace symbol index unavailable: {error}");
-            String::new()
+            None
         }
     };
-    let project_context = if symbol_context.is_empty() {
-        project_outline
-    } else {
-        format!("{project_outline}\n\n{symbol_context}")
-    };
     for task in &mut tasks {
+        let task_goal = format!("{goal}\n{}", task.description);
+        let symbol_context = symbol_index
+            .as_ref()
+            .and_then(|index| match index.context_for_goal(&task_goal, 6_000) {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    eprintln!("warning: symbol context unavailable: {error}");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let project_context = if symbol_context.is_empty() {
+            project_outline.clone()
+        } else {
+            format!("{project_outline}\n\n{symbol_context}")
+        };
         task.metadata
-            .insert(CONTEXT_METADATA.to_owned(), project_context.clone());
+            .insert(CONTEXT_METADATA.to_owned(), project_context);
     }
     println!(
         "Creating isolated worktrees for {} agent task(s)...",
@@ -2238,6 +2516,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             "run": &report,
             "ledger": router.ledger().snapshot(),
             "validation": values,
+            "independent_reviews": &report.review_records,
         });
         let path = if path.is_absolute() {
             path.clone()
@@ -3224,6 +3503,7 @@ fn cli_error(message: impl Into<String>) -> Box<dyn Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -3688,5 +3968,280 @@ mod tests {
         assert_eq!(verified.approvers[0].name, "Pourush Nair");
         assert_eq!(verified.approvers[0].email, "pourushnair6@gmail.com");
         assert_eq!(verified.files, vec!["feature.rs".to_owned()]);
+    }
+}
+
+fn record_marketplace_install(
+    entry: &ryoko_marketplace::MarketplaceEntry,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut lock = MarketplaceLock::load().map_err(|e| cli_error(e.to_string()))?;
+    lock.installed
+        .retain(|item| !(item.id == entry.id && item.kind == entry.kind));
+    lock.installed.push(InstallationRecord {
+        id: entry.id.clone(),
+        kind: entry.kind,
+        version: entry.version.clone(),
+        installed_at: chrono::Utc::now(),
+        source_url: entry.asset_url.clone(),
+        install_path: path.to_string_lossy().into_owned(),
+    });
+    match entry.kind {
+        MarketplaceType::Extension => {
+            lock.extensions
+                .insert(entry.id.clone(), entry.version.clone());
+        }
+        MarketplaceType::Skill => {
+            lock.skills.insert(entry.id.clone(), entry.version.clone());
+        }
+    }
+    lock.last_checked = chrono::Utc::now();
+    lock.save().map_err(|e| cli_error(e.to_string()))?;
+    Ok(())
+}
+
+async fn marketplace_command(cmd: MarketplaceArgs) -> Result<(), Box<dyn Error>> {
+    let client = MarketplaceClient::new().map_err(|e| cli_error(e.to_string()))?;
+
+    match cmd.command {
+        MarketplaceCmds::List { r#type, json } => {
+            let index = client.fetch_index().await?;
+            let entries: Vec<_> = match r#type {
+                MarketplaceType::Extension => index.extensions,
+                MarketplaceType::Skill => index.skills,
+            };
+
+            if json {
+                println!("{}", serde_json::to_string(&entries)?);
+                return Ok(());
+            }
+            println!("Found {} {}s:", entries.len(), r#type);
+            for entry in entries {
+                println!(
+                    "  {} v{} - {} ({})\n    {}",
+                    entry.name, entry.version, entry.id, r#type, entry.description
+                );
+                if let Some(homepage) = &entry.homepage {
+                    println!("    Homepage: {}", homepage);
+                }
+            }
+            Ok(())
+        }
+
+        MarketplaceCmds::Search { query, r#type } => {
+            let entries = match r#type {
+                MarketplaceType::Extension => client.search_extensions(&query).await?,
+                MarketplaceType::Skill => client.search_skills(&query).await?,
+            };
+
+            if entries.is_empty() {
+                println!("No {}s found matching '{}'", r#type, query);
+                return Ok(());
+            }
+
+            println!("Found {} matches for '{}':\n", entries.len(), query);
+            for entry in entries {
+                println!(
+                    "  {} v{} - {}\n    {}",
+                    entry.name, entry.version, entry.id, entry.description
+                );
+            }
+            Ok(())
+        }
+
+        MarketplaceCmds::Install { id } => {
+            eprintln!("Installing {}...", id);
+            let entry = client
+                .find_item(&id)
+                .await?
+                .ok_or_else(|| cli_error(format!("item {} not found", id)))?;
+
+            let result = match entry.kind {
+                MarketplaceType::Extension => {
+                    let result = client
+                        .install_extension(&id)
+                        .await
+                        .map_err(|e| cli_error(e.to_string()))?;
+                    DownloadResultWrapper::Extension(result)
+                }
+                MarketplaceType::Skill => {
+                    let path = client
+                        .install_skill(&id)
+                        .await
+                        .map_err(|e| cli_error(e.to_string()))?;
+                    DownloadResultWrapper::Skill(path)
+                }
+            };
+
+            record_marketplace_install(
+                &entry,
+                match &result {
+                    DownloadResultWrapper::Extension(r) => &r.path,
+                    DownloadResultWrapper::Skill(p) => p,
+                },
+            )?;
+
+            let (display_path, checksum) = match &result {
+                DownloadResultWrapper::Extension(r) => {
+                    (r.path.display().to_string(), r.checksum.clone())
+                }
+                DownloadResultWrapper::Skill(p) => (p.display().to_string(), String::new()),
+            };
+            println!("✅ Installed {} to {}", id, display_path);
+            eprintln!("   Type: {}", entry.kind);
+            if !checksum.is_empty() {
+                eprintln!("   SHA-256: {}", checksum);
+            }
+
+            Ok(())
+        }
+
+        MarketplaceCmds::Update { all, id } => {
+            let lock = MarketplaceLock::load().map_err(cli_error)?;
+
+            if all {
+                let updates = client.check_for_updates(&lock).await?;
+                if updates.is_empty() {
+                    println!("All items are up to date!");
+                    return Ok(());
+                }
+
+                println!("Found {} updates available:", updates.len());
+                for update in &updates {
+                    println!(
+                        "  {} -> {} {} ({})",
+                        update.current_version,
+                        update.latest_version,
+                        update.entry.name,
+                        update.entry.id
+                    );
+                }
+
+                for update in updates {
+                    eprintln!("\nUpdating {}...", update.entry.id);
+                    let result = match update.entry.kind {
+                        MarketplaceType::Extension => {
+                            let result = client
+                                .install_extension(&update.entry.id)
+                                .await
+                                .map_err(|e| cli_error(e.to_string()))?;
+                            DownloadResultWrapper::Extension(result)
+                        }
+                        MarketplaceType::Skill => {
+                            let path = client
+                                .install_skill(&update.entry.id)
+                                .await
+                                .map_err(|e| cli_error(e.to_string()))?;
+                            DownloadResultWrapper::Skill(path)
+                        }
+                    };
+                    let display_path = match &result {
+                        DownloadResultWrapper::Extension(r) => r.path.display().to_string(),
+                        DownloadResultWrapper::Skill(p) => p.display().to_string(),
+                    };
+                    record_marketplace_install(
+                        &update.entry,
+                        match &result {
+                            DownloadResultWrapper::Extension(r) => &r.path,
+                            DownloadResultWrapper::Skill(p) => p,
+                        },
+                    )?;
+                    println!("✅ Updated to {}", display_path);
+                }
+            } else if let Some(id) = id {
+                let entry = client
+                    .find_item(&id)
+                    .await
+                    .map_err(|e| cli_error(e.to_string()))?
+                    .ok_or_else(|| cli_error(format!("{} not found", id)))?;
+                let result = match entry.kind {
+                    MarketplaceType::Extension => {
+                        let result = client
+                            .install_extension(&id)
+                            .await
+                            .map_err(|e| cli_error(e.to_string()))?;
+                        DownloadResultWrapper::Extension(result)
+                    }
+                    MarketplaceType::Skill => {
+                        let path = client
+                            .install_skill(&id)
+                            .await
+                            .map_err(|e| cli_error(e.to_string()))?;
+                        DownloadResultWrapper::Skill(path)
+                    }
+                };
+                let display_path = match &result {
+                    DownloadResultWrapper::Extension(r) => r.path.display().to_string(),
+                    DownloadResultWrapper::Skill(p) => p.display().to_string(),
+                };
+                record_marketplace_install(
+                    &entry,
+                    match &result {
+                        DownloadResultWrapper::Extension(r) => &r.path,
+                        DownloadResultWrapper::Skill(p) => p,
+                    },
+                )?;
+                println!("✅ Updated {} to {}", id, display_path);
+            } else {
+                return Err(cli_error("--id is required when not using --all"));
+            }
+
+            Ok(())
+        }
+
+        MarketplaceCmds::Info { id } => {
+            let entry = client
+                .find_item(&id)
+                .await
+                .map_err(|e| cli_error(e.to_string()))?
+                .ok_or_else(|| cli_error(format!("{} not found in marketplace", id)))?;
+
+            println!("Name: {}", entry.name);
+            println!("ID: {}", entry.id);
+            println!("Version: {}", entry.version);
+            println!("Type: {}", entry.kind);
+            println!("Author: {}", entry.author);
+            println!("Description: {}", entry.description);
+
+            if let Some(homepage) = &entry.homepage {
+                println!("Homepage: {}", homepage);
+            }
+            if let Some(repo) = &entry.repository {
+                println!("Repository: {}", repo);
+            }
+            if let Some(license) = &entry.license {
+                println!("License: {}", license);
+            }
+
+            println!("\nTags: {}", entry.tags.join(", "));
+            println!("Downloads: {}", entry.downloads);
+
+            if !entry.compatible_with.is_empty() {
+                println!("Compatible with: {}", entry.compatible_with.join(", "));
+            }
+
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod marketplace_browser_cli_tests {
+    use super::*;
+
+    #[test]
+    fn supports_machine_readable_catalog_for_both_item_kinds() {
+        for item_kind in ["extension", "skill"] {
+            let cli = Cli::try_parse_from(["ryoko", "marketplace", "list", item_kind, "--json"])
+                .expect("marketplace list must accept --json");
+
+            let Commands::Marketplace(args) = cli.command else {
+                panic!("marketplace subcommand expected");
+            };
+            assert!(matches!(
+                args.command,
+                MarketplaceCmds::List { json: true, .. }
+            ));
+        }
     }
 }

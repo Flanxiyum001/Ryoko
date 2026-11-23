@@ -17,6 +17,8 @@ use crate::perf::{PerfConfig, PerfOutcome};
 #[derive(Debug, Clone)]
 pub struct CommandValidator {
     command: String,
+    /// Optional compilation gate that runs before the full regression suite.
+    compilation: Option<String>,
     policy: SpecPolicy,
     timeout: Duration,
     sandbox: BuildSandbox,
@@ -34,6 +36,7 @@ impl CommandValidator {
     pub fn new(command: impl Into<String>, policy: SpecPolicy, timeout: Duration) -> Self {
         Self {
             command: command.into(),
+            compilation: None,
             policy,
             timeout: timeout.max(Duration::from_secs(1)),
             sandbox: BuildSandbox::new(BuildBackend::Auto, None),
@@ -41,6 +44,14 @@ impl CommandValidator {
             artifacts_root: None,
             ui: None,
         }
+    }
+
+    /// Run a compilation/static build before expensive full-suite tests.
+    /// Both commands execute through the same isolated build sandbox.
+    pub fn with_compilation_gate(mut self, command: Option<String>) -> Self {
+        self.compilation =
+            command.filter(|value| !value.trim().is_empty() && value != &self.command);
+        self
     }
 
     /// Renders UI-touching changes with the sandbox's headless browser, writing
@@ -107,6 +118,37 @@ impl ChangeValidator for CommandValidator {
                 .with_artifacts(root.join(changes.task_id.to_string())),
             None => self.sandbox.clone(),
         };
+        // Fast, actionable compilation evidence should reach the agent before
+        // it pays for the full regression suite. A failure stops here, leaving
+        // the orchestrator to retry in a fresh isolated worktree.
+        let mut stage_logs = Vec::new();
+        if let Some(compile) = &self.compilation {
+            let compilation = match sandbox.run(compile, root, self.timeout).await {
+                Ok(result) => result,
+                Err(error) => {
+                    return Ok(ValidationReport::failed(
+                        format!("compilation could not run: {compile}"),
+                        vec![error.to_string()],
+                        started.elapsed(),
+                    ));
+                }
+            };
+            if !compilation.status.success() {
+                let status = compilation
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_owned());
+                let mut logs = summarize_output(&compilation);
+                logs.insert(0, format!("compilation command: {compile}"));
+                return Ok(ValidationReport::failed(
+                    format!("compilation failed: {compile} (exit {status})"),
+                    logs,
+                    started.elapsed(),
+                ));
+            }
+            stage_logs.push(format!("compilation passed: {compile}"));
+        }
         let output = match sandbox.run(&self.command, root, self.timeout).await {
             Ok(output) => output,
             Err(error) => {
@@ -118,6 +160,7 @@ impl ChangeValidator for CommandValidator {
             }
         };
         let mut logs = summarize_output(&output);
+        logs.splice(0..0, stage_logs);
         if output.status.success() {
             logs.insert(
                 0,
@@ -190,7 +233,10 @@ impl ChangeValidator for CommandValidator {
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "signal".to_owned());
             Ok(ValidationReport::failed(
-                format!("pre-flight failed: {} (exit {status})", self.command),
+                format!(
+                    "regression verification failed: {} (exit {status})",
+                    self.command
+                ),
                 logs,
                 started.elapsed(),
             ))
@@ -227,6 +273,27 @@ pub(crate) fn summarize_output(output: &Output) -> Vec<String> {
     }
     kept.reverse();
     kept
+}
+
+/// Picks a safe conventional compiler/static-build command for the first
+/// validation gate. The full --check-command remains the regression gate.
+pub fn detect_compile_command(root: &Path) -> Option<&'static str> {
+    if root.join("Cargo.toml").is_file() {
+        Some("cargo check --workspace --all-targets")
+    } else if root.join("go.mod").is_file() {
+        Some("go build ./...")
+    } else if root.join("package.json").is_file() {
+        let bytes = std::fs::read(root.join("package.json")).ok()?;
+        let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        manifest
+            .get("scripts")
+            .and_then(|scripts| scripts.get("build"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|script| !script.trim().is_empty())
+            .map(|_| "npm run build")
+    } else {
+        None
+    }
 }
 
 /// Picks the conventional test command for a project. An explicit
@@ -281,6 +348,76 @@ mod tests {
         assert!(report.passed);
         assert!(report.summary.contains("pre-flight passed"));
         assert!(report.logs[0].contains("tests/lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn compiler_failure_prevents_regression_command_and_preserves_diagnostics() {
+        let dir = TempDir::new().unwrap();
+        let validator = CommandValidator::new(
+            "touch should-not-run",
+            SpecPolicy::default(),
+            Duration::from_secs(5),
+        )
+        .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None))
+        .with_compilation_gate(Some(
+            "echo 'error[E0425]: unresolved name' >&2; exit 9".into(),
+        ));
+        let report = validator
+            .validate(&changes(dir.path(), true))
+            .await
+            .unwrap();
+        assert!(!report.passed);
+        assert!(report.summary.contains("compilation failed"));
+        assert!(report.logs.iter().any(|line| line.contains("E0425")));
+        assert!(!dir.path().join("should-not-run").exists());
+    }
+
+    #[tokio::test]
+    async fn passing_compilation_still_rejects_failing_regression_suite() {
+        let dir = TempDir::new().unwrap();
+        let validator = CommandValidator::new(
+            "echo 'test payment_flow FAILED' >&2; exit 2",
+            SpecPolicy::default(),
+            Duration::from_secs(5),
+        )
+        .with_sandbox(BuildSandbox::new(BuildBackend::UnsafeHost, None))
+        .with_compilation_gate(Some("true".into()));
+        let report = validator
+            .validate(&changes(dir.path(), true))
+            .await
+            .unwrap();
+        assert!(!report.passed);
+        assert!(report.summary.contains("regression verification failed"));
+        assert!(
+            report
+                .logs
+                .iter()
+                .any(|line| line.contains("compilation passed"))
+        );
+        assert!(report.logs.iter().any(|line| line.contains("payment_flow")));
+    }
+
+    #[test]
+    fn detects_compile_command_only_for_supported_manifests() {
+        let root = TempDir::new().unwrap();
+        assert_eq!(detect_compile_command(root.path()), None);
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"test":"vitest"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_compile_command(root.path()), None);
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"tsc","test":"vitest"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_compile_command(root.path()), Some("npm run build"));
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        assert_eq!(
+            detect_compile_command(root.path()),
+            Some("cargo check --workspace --all-targets")
+        );
     }
 
     #[tokio::test]
