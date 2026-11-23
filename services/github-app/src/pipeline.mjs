@@ -176,6 +176,7 @@ async function defaultRunCli({ binary, cwd, goal, reportPath, timeoutMs, mcp, gi
         // Host-created scope; never derived from issue body or model arguments.
         RYOKO_GITHUB_INSTALLATION_ID: String(githubScope.installationId),
         RYOKO_GITHUB_REPO_ID: String(githubScope.repoId),
+        RYOKO_GITHUB_BROKER_URL: process.env.RYOKO_GITHUB_BROKER_URL || 'http://127.0.0.1:4173',
       },
     });
   } catch (error) {
