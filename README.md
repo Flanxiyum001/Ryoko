@@ -9,7 +9,7 @@
 
 These experimental installers are **unsigned** and not intended for production. Test with a disposable project. The separate [testing and installation guide](docs/DESKTOP_PREVIEW_TESTING.md) includes the smoke-test checklist.
 
-**Windows WASM execution:** Windows uses Wasmtime's portable Pulley interpreter for WASI/WASM guardrails rather than the native compiled-code trap path that previously aborted the process. The same fuel, timeout, memory and test-evidence checks run on all three operating systems. Interpreter startup errors still fail closed. Container-backed project checks remain a separate option. This is CI-level validation, not a certification of Windows preview feature parity or installer safety; see [Phase 5 release trust](docs/PHASE_5_RELEASE_TRUST.md).
+**Windows WASM safety limitation:** Native WASI/WASM guardrail execution is deliberately unavailable on Windows in this preview because Wasmtime 26 guest traps can abort the host process. Ryoko fails closed rather than treating an unverified test as passed. Container-backed project checks remain separately available with Docker/Podman. See [Phase 5 release trust](docs/PHASE_5_RELEASE_TRUST.md). The Windows preview is not feature-parity certified.
 
 For headless Linux x64 use, the optional **Ryoko CLI-only** GitHub Packages image is published at `ghcr.io/flanxiyum001/ryoko-cli:preview` when the package workflow succeeds and visibility is set to public; **it is not the desktop application**.
 
