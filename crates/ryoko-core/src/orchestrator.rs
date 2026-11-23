@@ -1017,10 +1017,12 @@ async fn execute_task(
             task_id: task.id,
             file_count: result.changes.len(),
         });
-        let staged = StagedChanges::new(task.id, result.changes.clone())
-            .with_root(lease.root().to_path_buf());
         let report = match lease.seal().await {
-            Ok(()) => context.validator.validate(&staged).await,
+            Ok(()) => {
+                let staged = StagedChanges::new(task.id, result.changes.clone())
+                    .with_root(lease.validation_root());
+                context.validator.validate(&staged).await
+            }
             Err(error) => Err(error),
         };
         let report = match report {
