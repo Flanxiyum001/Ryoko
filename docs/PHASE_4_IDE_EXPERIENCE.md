@@ -66,3 +66,35 @@ The Tauri tests also require platform-native prerequisites. After CI, run intera
 3. Inline agent workflow with cancellation, provenance and conflict-aware previews.
 4. Durable editor state and opt-in recovery/resume semantics.
 5. DAP feature parity, multi-session PTY and measured performance/accessibility release gates.
+
+## Workbench chrome
+
+The desktop workbench follows familiar editor conventions. Every action below
+is a registered command (`apps/desktop/ui/src/commands.ts`), so the command
+palette, menus and keybindings all run the same code.
+
+| Feature | How to use it | Where it lives |
+| --- | --- | --- |
+| Command palette | `Ctrl+Shift+P` / `⇧⌘P`. Fuzzy search over every command, with its shortcut. Recent commands are listed first. | `command_palette.ts` |
+| Menu bar | File / Edit / View / Run / Help. In-window on Windows and Linux, native on macOS. | `menu_bar.ts`, `src-tauri/src/menu.rs` |
+| Resizable panes | Drag the edges of the side bar, the Mission Control side bar and the bottom panel. Arrow keys resize a focused edge. Double-click resets it. Dragging the side bar very narrow collapses it; `Ctrl+B` toggles it and `Ctrl+J` toggles the panel. | `layout_state.ts` |
+| File tree | Folders with expand arrows; files and tabs show a file-type badge. Git changes are coloured and marked A / M / D. | `file_icons.ts`, `tree.ts` |
+| Breadcrumbs and minimap | The path of the active file and the symbols around the cursor appear above the editor. Click a symbol to jump to it. View › Toggle Minimap. | `breadcrumbs.ts` |
+| Colour themes | Dark, Light and High Contrast, from View › Color Theme, the palette (`Theme:`) or Settings. Monaco's built-in theme changes with the chrome. | `themes.ts` |
+
+Sizes, the collapsed side bar, the minimap setting and the theme are stored in
+`localStorage` under `ryoko.layout.v1` and `ryoko.theme.v1`. Stored values are
+clamped or replaced with defaults when invalid.
+
+Known limitations:
+
+- **Breadcrumb symbols need a language server.** They come from
+  `textDocument/documentSymbol`. Without a running server for the file's
+  language, breadcrumbs show only the path.
+- **macOS native menu.** On macOS the renderer hides its menu bar and Rust
+  installs a native one. Its command ids must match `MENUS` in `menu_bar.ts`
+  (a Rust test checks this). Native accelerators use the default keybindings,
+  so a rebound shortcut is not reflected in the macOS menu. The macOS build is
+  compiled only in the macOS CI job.
+- The renderer runs a menu event only when its id is a registered command.
+  Unknown ids are ignored.

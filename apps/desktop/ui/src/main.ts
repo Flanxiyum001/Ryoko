@@ -10,6 +10,16 @@ import './styles.css';
 import { mountEditorTabs, selectionAfterClose } from './editor_tabs';
 import { LspClient, type LspState, type LspServerStatus } from './lsp';
 import { registerMonacoCapabilities } from './lsp_bridge';
+import { CommandRegistry, formatChord, type WorkbenchCommand } from './commands';
+import { mountCommandPalette } from './command_palette';
+import { mountUpdates } from './update_view';
+import { mountMenuBar } from './menu_bar';
+import { DEFAULT_LAYOUT, loadLayout, resizeBy, saveLayout } from './layout_state';
+import { fileIconElement } from './file_icons';
+import { THEMES, applyThemeToDocument, loadTheme, saveTheme, themeById, type ThemeDefinition } from './themes';
+import {
+  breadcrumbItems, fromLspDocumentSymbols, symbolChain, type OutlineSymbol,
+} from './breadcrumbs';
 import { LANGUAGE_IDS, defaultRunProfile, parseTaskArgs } from './languages';
 import { buildTree, changeKind, filterTreePaths } from './tree';
 import { mountQuickOpen } from './quick_open_view';
@@ -359,12 +369,15 @@ const quickOpen = mountQuickOpen({
   setStatus,
 });
 
+const initialTheme = loadTheme(localStorage);
+applyThemeToDocument(initialTheme);
+const layoutState = loadLayout(localStorage);
 const editor = monaco.editor.create(editorHost, {
-  theme: 'vs-dark',
+  theme: initialTheme.monaco,
   automaticLayout: true,
   fontSize: 13.5,
   lineHeight: 21,
-  minimap: { enabled: false },
+  minimap: { enabled: layoutState.minimap, renderCharacters: false, showSlider: 'mouseover' },
   scrollBeyondLastLine: false,
   renderWhitespace: 'selection',
   padding: { top: 10 },
@@ -480,7 +493,7 @@ function acceptFim(): void {
 }
 
 const diffEditor = monaco.editor.createDiffEditor(diffEditorHost, {
-  theme: 'vs-dark',
+  theme: initialTheme.monaco,
   automaticLayout: true,
   readOnly: true,
   originalEditable: false,
@@ -801,8 +814,19 @@ function renderFiles(): void {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'tree-dir';
-      button.style.paddingLeft = `${8 + node.depth * 14}px`;
-      button.textContent = `${expandedDirectories.has(node.path) ? '▾' : '▸'} ${node.name}`;
+      const expanded = expandedDirectories.has(node.path);
+      button.style.paddingLeft = `${4 + node.depth * 12}px`;
+      button.setAttribute('aria-expanded', String(expanded));
+      const chevron = document.createElement('span');
+      chevron.className = 'tree-chevron' + (expanded ? ' open' : '');
+      chevron.setAttribute('aria-hidden', 'true');
+      const folder = document.createElement('span');
+      folder.className = 'folder-icon' + (expanded ? ' open' : '');
+      folder.setAttribute('aria-hidden', 'true');
+      const dirName = document.createElement('span');
+      dirName.className = 'tree-label';
+      dirName.textContent = node.name;
+      button.append(chevron, folder, dirName);
       button.title = node.path;
       button.addEventListener('click', () => {
         if (expandedDirectories.has(node.path)) expandedDirectories.delete(node.path);
@@ -816,8 +840,17 @@ function renderFiles(): void {
       button.className = 'file-link tree-file'
         + (state.current?.path === node.path ? ' active' : '')
         + (node.change ? ` change-${node.change}` : '');
-      button.style.paddingLeft = `${8 + node.depth * 14}px`;
-      button.textContent = node.change ? `${node.name} · ${node.change.charAt(0).toUpperCase()}` : node.name;
+      button.style.paddingLeft = `${20 + node.depth * 12}px`;
+      const fileName = document.createElement('span');
+      fileName.className = 'tree-label';
+      fileName.textContent = node.name;
+      button.append(fileIconElement(node.path), fileName);
+      if (node.change) {
+        const badge = document.createElement('span');
+        badge.className = 'tree-badge';
+        badge.textContent = node.change.charAt(0).toUpperCase();
+        button.append(badge);
+      }
       button.title = node.change ? `${node.path} (${node.change})` : node.path;
       button.addEventListener('click', () => {
         void openFile(node.path);
@@ -2091,6 +2124,7 @@ function dispatchBinding(action: string): void {
       inlineEdit.open();
       break;
     default:
+      void commands.execute(action);
       break;
   }
 }
@@ -2301,3 +2335,316 @@ languageMode.addEventListener('change', () => {
   setStatus('Language mode: ' + newLanguage + ' (syntax support depends on installed language tooling)');
 });
 registerMonacoCapabilities(monaco, lsp, availableLanguages);
+
+// ---------------------------------------------------------------------------
+// Workbench chrome: commands, menus, resizable layout, breadcrumbs, themes.
+// ---------------------------------------------------------------------------
+
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const commands = new CommandRegistry();
+let currentTheme: ThemeDefinition = initialTheme;
+
+function shortcutFor(id: string): string | null {
+  if (id === 'editor.save') return formatChord('MOD+S', isMac);
+  if (id === 'editor.undo') return formatChord('MOD+Z', isMac);
+  if (id === 'editor.redo') return formatChord(isMac ? 'MOD+SHIFT+Z' : 'MOD+Y', isMac);
+  if (id === 'editor.find') return formatChord('MOD+F', isMac);
+  if (id === 'editor.replace') return formatChord(isMac ? 'ALT+MOD+F' : 'MOD+H', isMac);
+  const chord = keybindings.byAction.get(id);
+  return chord ? formatChord(chord, isMac) : null;
+}
+
+function setTheme(theme: ThemeDefinition): void {
+  currentTheme = theme;
+  applyThemeToDocument(theme);
+  monaco.editor.setTheme(theme.monaco);
+  saveTheme(localStorage, theme.id);
+  const picker = document.getElementById('settingsTheme') as HTMLSelectElement | null;
+  if (picker) picker.value = theme.id;
+  setStatus(`Color theme: ${theme.label}`);
+}
+
+function persistLayout(): void {
+  saveLayout(localStorage, layoutState);
+}
+
+function applyLayout(): void {
+  workbenchLayout.style.setProperty('--sidebar-w', `${layoutState.sidebarWidth}px`);
+  workbenchLayout.style.setProperty('--inspector-w', `${layoutState.inspectorWidth}px`);
+  bottomPanel.style.setProperty('--panel-h', `${layoutState.panelHeight}px`);
+  requestAnimationFrame(() => { editor.layout(); fitTerminal(); });
+}
+
+function sidebarVisible(): boolean {
+  return !workbenchLayout.classList.contains('hide-explorer');
+}
+
+function toggleSidebar(): void {
+  if (sidebarVisible()) {
+    workbenchLayout.classList.add('hide-explorer');
+    layoutState.sidebarCollapsed = true;
+  } else {
+    activateView('explorer');
+    layoutState.sidebarCollapsed = false;
+  }
+  persistLayout();
+  requestAnimationFrame(() => editor.layout());
+}
+
+function togglePanel(): void {
+  if (bottomPanel.classList.contains('hidden')) showBottom('terminal');
+  else bottomPanel.classList.add('hidden');
+  requestAnimationFrame(() => editor.layout());
+}
+
+function toggleMinimap(): void {
+  layoutState.minimap = !layoutState.minimap;
+  editor.updateOptions({ minimap: { enabled: layoutState.minimap } });
+  persistLayout();
+  setStatus(layoutState.minimap ? 'Minimap shown' : 'Minimap hidden');
+}
+
+function resetLayout(): void {
+  Object.assign(layoutState, DEFAULT_LAYOUT);
+  editor.updateOptions({ minimap: { enabled: layoutState.minimap } });
+  applyLayout();
+  persistLayout();
+  activateView('explorer');
+  setStatus('Layout reset');
+}
+
+/** Wires a drag handle. `sign` is +1 when moving right/down grows the pane. */
+function wireSash(
+  sash: HTMLElement,
+  key: 'sidebarWidth' | 'inspectorWidth' | 'panelHeight',
+  axis: 'x' | 'y',
+  sign: 1 | -1,
+  onCollapse?: () => void,
+): void {
+  sash.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    sash.setPointerCapture(event.pointerId);
+    const origin = axis === 'x' ? event.clientX : event.clientY;
+    const start = layoutState[key];
+    document.body.classList.add(axis === 'x' ? 'resizing-x' : 'resizing-y');
+    sash.classList.add('active');
+    const move = (moveEvent: PointerEvent): void => {
+      const delta = ((axis === 'x' ? moveEvent.clientX : moveEvent.clientY) - origin) * sign;
+      const next = resizeBy(key, start, delta, !!onCollapse);
+      if (next.collapse && onCollapse) {
+        layoutState[key] = start;
+        finish();
+        onCollapse();
+        return;
+      }
+      layoutState[key] = next.size;
+      applyLayout();
+    };
+    const finish = (): void => {
+      sash.removeEventListener('pointermove', move);
+      sash.removeEventListener('pointerup', finish);
+      sash.removeEventListener('pointercancel', finish);
+      document.body.classList.remove('resizing-x', 'resizing-y');
+      sash.classList.remove('active');
+      sash.blur();
+      persistLayout();
+    };
+    sash.addEventListener('pointermove', move);
+    sash.addEventListener('pointerup', finish);
+    sash.addEventListener('pointercancel', finish);
+  });
+  sash.addEventListener('dblclick', () => {
+    layoutState[key] = DEFAULT_LAYOUT[key];
+    applyLayout();
+    persistLayout();
+  });
+  sash.addEventListener('keydown', (event) => {
+    const grow = axis === 'x' ? ['ArrowRight', 'ArrowLeft'] : ['ArrowDown', 'ArrowUp'];
+    const index = grow.indexOf(event.key);
+    if (index < 0) return;
+    event.preventDefault();
+    const step = (index === 0 ? 1 : -1) * sign * (event.shiftKey ? 50 : 10);
+    layoutState[key] = resizeBy(key, layoutState[key], step).size;
+    applyLayout();
+    persistLayout();
+  });
+}
+
+wireSash(element('sidebarSash'), 'sidebarWidth', 'x', 1, () => {
+  workbenchLayout.classList.add('hide-explorer');
+  layoutState.sidebarCollapsed = true;
+  persistLayout();
+  requestAnimationFrame(() => editor.layout());
+});
+wireSash(element('inspectorSash'), 'inspectorWidth', 'x', -1);
+wireSash(element('panelSash'), 'panelHeight', 'y', -1);
+applyLayout();
+if (layoutState.sidebarCollapsed) workbenchLayout.classList.add('hide-explorer');
+
+// Breadcrumbs ---------------------------------------------------------------
+
+const breadcrumbsHost = element('breadcrumbs');
+let outline: { uri: string; version: number; symbols: OutlineSymbol[] } | null = null;
+let outlineTicket = 0;
+let outlineTimer: number | undefined;
+
+/**
+ * Symbols come from the language's server (`textDocument/documentSymbol`).
+ * Without a running server that supports it, breadcrumbs show the path only.
+ */
+async function loadOutline(file: OpenFile): Promise<OutlineSymbol[]> {
+  const response = await lsp.requestForLanguage(file.model.getLanguageId(), 'textDocument/documentSymbol', {
+    textDocument: { uri: file.uri },
+  });
+  return response && !response.error ? fromLspDocumentSymbols(response.result) : [];
+}
+
+function scheduleOutline(): void {
+  window.clearTimeout(outlineTimer);
+  outlineTimer = window.setTimeout(() => void refreshOutline(), 350);
+}
+
+async function refreshOutline(): Promise<void> {
+  const file = state.current;
+  if (!file) { outline = null; renderBreadcrumbs(); return; }
+  const version = file.model.getVersionId();
+  if (outline && outline.uri === file.uri && outline.version === version) { renderBreadcrumbs(); return; }
+  const ticket = ++outlineTicket;
+  try {
+    const symbols = await loadOutline(file);
+    if (ticket !== outlineTicket || state.current !== file) return;
+    outline = { uri: file.uri, version, symbols };
+  } catch {
+    if (ticket === outlineTicket) outline = { uri: file.uri, version, symbols: [] };
+  }
+  renderBreadcrumbs();
+}
+
+function renderBreadcrumbs(): void {
+  const file = state.current;
+  breadcrumbsHost.replaceChildren();
+  if (!file) return;
+  const position = editor.getPosition();
+  const chain = outline && outline.uri === file.uri && position
+    ? symbolChain(outline.symbols, position.lineNumber, position.column)
+    : [];
+  const items = breadcrumbItems(file.path, chain);
+  const list = document.createElement('ol');
+  items.forEach((item, index) => {
+    const entry = document.createElement('li');
+    entry.className = `crumb crumb-${item.kind}`;
+    if (item.kind === 'file') entry.append(fileIconElement(file.path));
+    if (item.kind === 'symbol') {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = item.label;
+      button.title = `Go to ${item.label}`;
+      button.addEventListener('click', () => {
+        if (item.line === undefined) return;
+        const target = { lineNumber: item.line, column: item.column ?? 1 };
+        editor.setPosition(target);
+        editor.revealPositionInCenterIfOutsideViewport(target);
+        editor.focus();
+      });
+      entry.append(button);
+    } else {
+      const label = document.createElement('span');
+      label.textContent = item.label;
+      entry.append(label);
+    }
+    if (index === items.length - 1) entry.setAttribute('aria-current', 'location');
+    list.append(entry);
+  });
+  breadcrumbsHost.append(list);
+}
+
+editor.onDidChangeModel(() => { outline = null; renderBreadcrumbs(); scheduleOutline(); });
+editor.onDidChangeModelContent(scheduleOutline);
+editor.onDidChangeCursorPosition(renderBreadcrumbs);
+
+// Commands ------------------------------------------------------------------
+
+function showWelcome(): void {
+  editorHost.classList.add('hidden');
+  emptyEditor.classList.remove('hidden');
+}
+
+const definitions: WorkbenchCommand[] = [
+  { id: 'workbench.commandPalette', category: 'View', title: 'Command Palette…', run: () => palette.open() },
+  { id: 'workbench.quickOpen', category: 'File', title: 'Go to File…', run: () => quickOpen.open() },
+  { id: 'workspace.openFolder', category: 'File', title: 'Open Folder…', run: () => openFolderButton.click() },
+  { id: 'editor.save', category: 'File', title: 'Save', run: () => saveButton.click(), enabled: () => !saveButton.disabled },
+  { id: 'editor.close', category: 'File', title: 'Close Editor', run: () => { if (state.current) closeOpenFile(state.current.path); }, enabled: () => !!state.current },
+  { id: 'workbench.settings', category: 'Preferences', title: 'Open Settings', run: () => openSettings.click() },
+  { id: 'editor.undo', category: 'Edit', title: 'Undo', run: () => editor.trigger('menu', 'undo', null), enabled: () => !!state.current },
+  { id: 'editor.redo', category: 'Edit', title: 'Redo', run: () => editor.trigger('menu', 'redo', null), enabled: () => !!state.current },
+  { id: 'editor.find', category: 'Edit', title: 'Find', run: () => { editor.focus(); void editor.getAction('actions.find')?.run(); }, enabled: () => !!state.current },
+  { id: 'editor.replace', category: 'Edit', title: 'Replace', run: () => { editor.focus(); void editor.getAction('editor.action.startFindReplaceAction')?.run(); }, enabled: () => !!state.current },
+  { id: 'workbench.search', category: 'Search', title: 'Find in Files', run: () => dispatchBinding('workbench.search') },
+  { id: 'workbench.replace', category: 'Search', title: 'Replace in Files', run: () => dispatchBinding('workbench.replace') },
+  { id: 'editor.inlineEdit', category: 'Agent', title: 'Inline Edit with Agent', run: () => inlineEdit.open(), enabled: () => !!state.current },
+  { id: 'view.explorer', category: 'View', title: 'Explorer', run: () => activateView('explorer') },
+  { id: 'workbench.changes', category: 'View', title: 'Source Control Changes', run: () => activateView('changes') },
+  { id: 'view.mission', category: 'View', title: 'Mission Control', run: () => activateView('mission') },
+  { id: 'view.problems', category: 'View', title: 'Problems', run: () => activateView('problems') },
+  { id: 'view.extensions', category: 'View', title: 'Extensions', run: () => element('openMarketplace').click() },
+  { id: 'view.toggleSidebar', category: 'View', title: 'Toggle Primary Side Bar', run: toggleSidebar },
+  { id: 'view.toggleInspector', category: 'View', title: 'Toggle Mission Control Side Bar', run: () => activateView(workbenchLayout.classList.contains('hide-inspector') ? 'mission' : 'editor') },
+  { id: 'view.togglePanel', category: 'View', title: 'Toggle Panel', run: togglePanel },
+  { id: 'view.toggleMinimap', category: 'View', title: 'Toggle Minimap', run: toggleMinimap },
+  { id: 'view.resetLayout', category: 'View', title: 'Reset Layout', run: resetLayout },
+  { id: 'theme.pick', category: 'Preferences', title: 'Color Theme…', run: () => palette.open('Theme: ') },
+  ...THEMES.map((theme): WorkbenchCommand => ({
+    id: `theme.${theme.id.replace(/-(\w)/g, (_, char: string) => char.toUpperCase())}`,
+    category: 'Theme',
+    title: theme.label,
+    run: () => setTheme(theme),
+  })),
+  { id: 'run.activeFile', category: 'Run', title: 'Run Active File', run: () => runActiveFile.click(), enabled: () => !runActiveFile.disabled },
+  { id: 'workbench.debug', category: 'Run', title: 'Toggle Debug Panel', run: () => showBottom('debug') },
+  { id: 'terminal.show', category: 'Terminal', title: 'Show Terminal', run: () => showBottom('terminal') },
+  { id: 'help.welcome', category: 'Help', title: 'Welcome', run: showWelcome },
+  {
+    id: 'help.keyboardShortcuts',
+    category: 'Help',
+    title: 'Keyboard Shortcuts',
+    run: () => {
+      openSettings.click();
+      document.getElementById('settingsKeybindings')?.scrollIntoView({ block: 'start' });
+    },
+  },
+];
+const updates = mountUpdates({
+  setStatus,
+  unsavedFiles: () => [...openFiles.values()].filter((file) => file.dirty).map((file) => file.path),
+  statusHost: document.querySelector<HTMLElement>('.statusbar')!,
+  settingsHost: document.getElementById('settingsUpdates'),
+});
+definitions.push({ id: 'help.checkForUpdates', category: 'Help', title: 'Check for Updates…', run: () => updates.checkNow() });
+for (const command of definitions) commands.register(command);
+
+const palette = mountCommandPalette({ registry: commands, shortcutFor, setStatus });
+mountMenuBar(element('menuBar'), { registry: commands, shortcutFor, setStatus });
+
+// Settings › Color theme.
+const themePicker = element<HTMLSelectElement>('settingsTheme');
+for (const theme of THEMES) {
+  const option = document.createElement('option');
+  option.value = theme.id;
+  option.textContent = theme.label;
+  themePicker.append(option);
+}
+themePicker.value = currentTheme.id;
+themePicker.addEventListener('change', () => setTheme(themeById(themePicker.value)));
+
+// macOS shows the native application menu (built in Rust with the same
+// command ids) instead of the in-window menu bar. Menu events carry only a
+// command id; unknown ids are ignored by the registry.
+if (isMac && '__TAURI_INTERNALS__' in window) {
+  document.body.classList.add('native-menu');
+  void listen<string>('ryoko://menu', (event) => {
+    void commands.execute(event.payload);
+  });
+}
+
