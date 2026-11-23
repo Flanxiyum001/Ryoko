@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="title">
+<title id="title">Ryoko dragon code mark</title>
+<defs><linearGradient id="scale" x1="21" y1="20" x2="107" y2="104" gradientUnits="userSpaceOnUse"><stop stop-color="#78DAF7"/><stop offset="1" stop-color="#8B80FF"/></linearGradient></defs>
+<rect width="128" height="128" rx="28" fill="#111827"/>
+<path d="M92 32c-6-11-22-17-36-9-8 5-12 12-10 18 9-8 19-8 26-2-15 0-27 10-29 26-3 16 6 28 23 33 20 5 38-8 41-27-10 13-23 17-35 12-10-4-13-12-9-20 3-7 10-12 21-13l-7-8 16-1-1-9z" fill="url(#scale)" fill-opacity=".16" stroke="url(#scale)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="m39 46-14 18 14 18M88 46l14 18-14 18" stroke="#C7D9ED" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="m71 50-15 29" stroke="#78DAF7" stroke-width="6" stroke-linecap="round"/>
+<path d="m72 39 7-3" stroke="#C7D9ED" stroke-width="5" stroke-linecap="round"/>
+</svg>
