@@ -25,6 +25,10 @@ use tokio::process::Command;
 use crate::hunks::HunkPatch;
 use uuid::Uuid;
 
+/// How often a git command is retried when another process was mid-way through
+/// writing a worktree administration entry.
+const ADMIN_RACE_ATTEMPTS: usize = 3;
+
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS worktree_sessions (
     task_id TEXT PRIMARY KEY,
@@ -146,6 +150,8 @@ pub enum WorktreeError {
     UncommittedChanges,
     #[error("main checkout has uncommitted changes; commit or stash them before merging")]
     DirtyMainCheckout,
+    #[error("merge would overwrite untracked files; commit, stash or move them first: {0}")]
+    UntrackedOverwrite(String),
     #[error("target branch `{0}` is checked out in another worktree")]
     TargetCheckedOut(String),
     #[error("merge conflict integrating `{branch}`: {details}")]
@@ -337,10 +343,14 @@ impl GitWorktreeManager {
         self.ensure_managed_session(&session)?;
 
         if let Some((path, _)) = self.worktree_checkout(&session.branch_name).await? {
-            if path == session.path {
+            // A registration whose directory was deleted is stale metadata, not
+            // a live checkout: it must not be reported as a resumed lease.
+            if path == session.path && path.exists() {
                 return Ok(session);
             }
-            return Err(WorktreeError::TargetCheckedOut(path.display().to_string()));
+            if path != session.path {
+                return Err(WorktreeError::TargetCheckedOut(path.display().to_string()));
+            }
         }
         if session.path.exists() {
             return Err(WorktreeError::PathExists(
@@ -353,6 +363,12 @@ impl GitWorktreeManager {
         if let Some(parent) = session.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        // A crash or a manual `rm -rf` leaves `.git/worktrees/<id>` behind, and
+        // `worktree add` then refuses the path as "missing but already
+        // registered". Pruning drops only registrations whose directory is gone.
+        let _ = self
+            .git(&self.base_project_path, &["worktree", "prune"])
+            .await;
         let path = session.path.to_string_lossy().into_owned();
         let output = self
             .git(
@@ -848,6 +864,17 @@ impl GitWorktreeManager {
         if checkout.is_some() && self.is_dirty_tracked(&self.base_project_path).await? {
             return Err(WorktreeError::DirtyMainCheckout);
         }
+        // `git reset --hard` overwrites an untracked (or ignored) file that sits
+        // at a path the merge writes, without any warning. Refuse before the
+        // target ref moves so the user keeps their file and their history.
+        if checkout.is_some() {
+            let overwrites = self
+                .untracked_overwrites(&target_tip, &merge_commit)
+                .await?;
+            if !overwrites.is_empty() {
+                return Err(WorktreeError::UntrackedOverwrite(overwrites.join(", ")));
+            }
+        }
 
         let update = self
             .git(
@@ -1192,6 +1219,75 @@ impl GitWorktreeManager {
         Ok(!output.is_empty())
     }
 
+    /// Merged paths whose slot in the main checkout holds something the merge
+    /// cannot safely replace. `git reset --hard` overwrites an untracked file,
+    /// an ignored file and a file standing where a directory belongs, so every
+    /// such path is refused before the target ref moves. An untracked path that
+    /// is absent from disk is safe: the sync simply creates it.
+    async fn untracked_overwrites(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<String>, WorktreeError> {
+        let changed = self
+            .checked(
+                "list merged paths",
+                &["diff", "--name-only", "-z", "--no-renames", from, to],
+                &self.base_project_path,
+            )
+            .await?;
+        let tracked = self
+            .checked(
+                "list tracked paths",
+                &["ls-files", "-z", "--cached"],
+                &self.base_project_path,
+            )
+            .await?;
+        let tracked: BTreeSet<&str> = tracked
+            .split('\0')
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .collect();
+        let mut conflicts = Vec::new();
+        for path in changed
+            .split('\0')
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            // A tracked file is either clean (the merge replaces it on purpose)
+            // or dirty, which the tracked-changes check already rejected.
+            if !tracked.contains(path) && self.checkout_slot_occupied(path).await {
+                conflicts.push(path.to_owned());
+            }
+        }
+        conflicts.sort();
+        conflicts.dedup();
+        Ok(conflicts)
+    }
+
+    /// True when the checkout holds a file at `path`, or a non-directory where
+    /// one of its parent directories would have to go.
+    async fn checkout_slot_occupied(&self, path: &str) -> bool {
+        let mut candidate = PathBuf::from(path);
+        loop {
+            let metadata = tokio::fs::symlink_metadata(self.base_project_path.join(&candidate))
+                .await
+                .ok();
+            if let Some(metadata) = metadata {
+                let blocks = candidate == Path::new(path) || !metadata.is_dir();
+                if blocks {
+                    return true;
+                }
+            }
+            match candidate.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => {
+                    candidate = parent.to_path_buf();
+                }
+                _ => return false,
+            }
+        }
+    }
+
     async fn worktree_checkout(
         &self,
         branch: &str,
@@ -1233,22 +1329,36 @@ impl GitWorktreeManager {
     }
 
     async fn git(&self, cwd: &Path, args: &[&str]) -> Result<Output, WorktreeError> {
-        Command::new("git")
-            .current_dir(cwd)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C")
-            .env("GIT_AUTHOR_NAME", "Ryoko Agent")
-            .env("GIT_AUTHOR_EMAIL", "agent@ryoko.local")
-            .env("GIT_COMMITTER_NAME", "Ryoko Agent")
-            .env("GIT_COMMITTER_EMAIL", "agent@ryoko.local")
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(WorktreeError::Io)
+        // Separately constructed managers (a daemon and a CLI run, say) do not
+        // share `worktree_admin`, so git can still observe a half-written
+        // `.git/worktrees` sibling from the other process. That failure happens
+        // before the command does its work and succeeds on retry.
+        for attempt in 1..=ADMIN_RACE_ATTEMPTS {
+            let output = Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("LC_ALL", "C")
+                .env("GIT_AUTHOR_NAME", "Ryoko Agent")
+                .env("GIT_AUTHOR_EMAIL", "agent@ryoko.local")
+                .env("GIT_COMMITTER_NAME", "Ryoko Agent")
+                .env("GIT_COMMITTER_EMAIL", "agent@ryoko.local")
+                .kill_on_drop(true)
+                .output()
+                .await
+                .map_err(WorktreeError::Io)?;
+            if output.status.success()
+                || attempt == ADMIN_RACE_ATTEMPTS
+                || !is_worktree_admin_race(&output)
+            {
+                return Ok(output);
+            }
+            tokio::time::sleep(Duration::from_millis(20 * attempt as u64)).await;
+        }
+        unreachable!("the retry loop always returns")
     }
 
     fn git_error(&self, action: &str, output: Output) -> WorktreeError {
@@ -1309,6 +1419,17 @@ fn conversion_error(
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(error))
+}
+
+/// Git creates `.git/worktrees/<id>/` and writes its `commondir` file after the
+/// directory exists. Every other command in the repository enumerates those
+/// siblings, so a concurrent creation can make one read fail. Such a failure
+/// happens while git resolves the repository, before it does any work, which is
+/// what makes a retry safe. Persistent conditions (a missing but registered
+/// worktree, a branch that already exists) are deliberately not retried so their
+/// real error reaches the caller.
+fn is_worktree_admin_race(output: &Output) -> bool {
+    String::from_utf8_lossy(&output.stderr).contains("commondir")
 }
 
 fn unix_now() -> i64 {
