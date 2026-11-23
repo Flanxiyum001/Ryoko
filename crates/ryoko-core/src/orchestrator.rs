@@ -1019,7 +1019,11 @@ async fn execute_task(
         });
         let staged = StagedChanges::new(task.id, result.changes.clone())
             .with_root(lease.root().to_path_buf());
-        let report = match context.validator.validate(&staged).await {
+        let report = match lease.seal().await {
+            Ok(()) => context.validator.validate(&staged).await,
+            Err(error) => Err(error),
+        };
+        let report = match report {
             Ok(report) => report,
             Err(err) => ValidationReport {
                 passed: false,
@@ -1028,6 +1032,16 @@ async fn execute_task(
                 duration_ms: 0,
             },
         };
+        let report = if report.passed {
+            match lease.verify_seal().await {
+                Ok(()) => report,
+                Err(error) => ValidationReport::failed(
+                    format!("source changed during validation: {error}"),
+                    report.logs,
+                    std::time::Duration::from_millis(report.duration_ms),
+                ),
+            }
+        } else { report };
         events.emit(OrchestratorEvent::ValidationFinished {
             task_id: task.id,
             passed: report.passed,
