@@ -504,176 +504,165 @@ fn test_token_bucket_burst_limit() {
     ]
 }
 
-/// Deterministic validator for evaluation fixtures.
+/// The built-in offline fixtures are *runner smoke tests*, not agent intelligence
+/// benchmarks. Only repository-owned, byte-for-byte known scripts may be executed
+/// by the host's Rust toolchain. Live or external proposals require a sandboxed
+/// validator and are never allowed through this trusted-fixture runner.
 struct FixtureValidator {
     fixture: EvaluationFixture,
+    timeout: Duration,
+}
+
+struct FixtureDir(std::path::PathBuf);
+
+impl Drop for FixtureDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn run_fixture_command(
+    mut command: tokio::process::Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    command.kill_on_drop(true);
+    tokio::time::timeout(timeout, command.output())
+        .await
+        .map_err(|_| "fixture command timed out".to_owned())?
+        .map_err(|error| format!("fixture command failed to start: {error}"))
 }
 
 #[async_trait::async_trait]
 impl ChangeValidator for FixtureValidator {
     async fn validate(&self, changes: &StagedChanges) -> CoreResult<ValidationReport> {
         let started = Instant::now();
+        let failed = |reason: &str| {
+            ValidationReport::failed(reason, vec![reason.to_owned()], started.elapsed())
+        };
 
-        // 1. Path safety check
+        // No matching a test-name substring and claiming it ran. Only the
+        // unmodified built-in fixture can run on the host without isolation.
+        let Some(builtin) = builtin_evaluation_fixtures()
+            .into_iter()
+            .find(|f| f.id == self.fixture.id)
+        else {
+            return Ok(failed("unknown fixture; sandboxed execution is required"));
+        };
+        let Some(expected_proposal) = builtin.mock_proposal else {
+            return Ok(failed("fixture has no trusted deterministic proposal"));
+        };
+        if self.fixture.source_revision != builtin.source_revision
+            || changes.files != expected_proposal.files
+            || self.fixture.expected_acceptance_tests != builtin.expected_acceptance_tests
+        {
+            return Ok(failed("proposal differs from trusted offline fixture; sandboxed execution is required"));
+        }
+        if changes.files.is_empty() || self.fixture.expected_acceptance_tests.is_empty() {
+            return Ok(failed("no executable acceptance tests supplied"));
+        }
         for change in &changes.files {
-            if let Err(err) = validate_relative_path(&change.path) {
-                return Ok(ValidationReport::failed(
-                    "path validation rejected unsafe change",
-                    vec![format!("Unsafe path rejected: {err}")],
-                    started.elapsed(),
-                ));
+            if validate_relative_path(&change.path).is_err() {
+                return Ok(failed("unsafe fixture path rejected"));
             }
         }
 
-        // 2. Reject empty changes for tasks expecting implementation
-        if changes.files.is_empty() {
+        let test_file = match self.fixture.id.as_str() {
+            "eval-bugfix-pagination" => "tests/test_pagination.rs",
+            "eval-multifile-token-bucket" => "tests/test_rate_limiter.rs",
+            _ => return Ok(failed("fixture is not an executable code-test case")),
+        };
+        let root = std::env::temp_dir().join(format!("ryoko-trusted-eval-{}", uuid::Uuid::new_v4()));
+        if let Err(error) = std::fs::create_dir(&root) {
+            return Ok(failed(&format!("cannot create isolated fixture directory: {error}")));
+        }
+        let _cleanup = FixtureDir(root.clone());
+
+        for change in &changes.files {
+            let relative = match validate_relative_path(&change.path) {
+                Ok(path) => path,
+                Err(error) => return Ok(failed(&format!("invalid fixture source path: {error}"))),
+            };
+            let destination = root.join(relative);
+            if let Some(parent) = destination.parent() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    return Ok(failed(&format!("cannot prepare fixture source: {error}")));
+                }
+            }
+            let prefix = if change.path == test_file {
+                match self.fixture.id.as_str() {
+                    "eval-bugfix-pagination" => {
+                        "#[path = \"../src/pagination.rs\"]\nmod pagination;\nuse pagination::paginate_items;\n"
+                    }
+                    _ => {
+                        "#[path = \"../src/rate_limiter/mod.rs\"]\nmod rate_limiter;\nuse rate_limiter::TokenBucket;\n"
+                    }
+                }
+            } else {
+                ""
+            };
+            if let Err(error) = std::fs::write(destination, format!("{prefix}{}", change.content)) {
+                return Ok(failed(&format!("cannot write trusted fixture: {error}")));
+            }
+        }
+
+        let executable = root.join(if cfg!(windows) { "fixture-tests.exe" } else { "fixture-tests" });
+        let mut compile = tokio::process::Command::new("rustc");
+        compile.arg("--edition=2021")
+            .arg("--test")
+            .arg(root.join(test_file))
+            .arg("-o")
+            .arg(&executable);
+        let built = match run_fixture_command(compile, self.timeout).await {
+            Ok(output) => output,
+            Err(error) => return Ok(failed(&error)),
+        };
+        if !built.status.success() {
             return Ok(ValidationReport::failed(
-                "proposal contains no file changes",
-                vec!["No files proposed for task".to_owned()],
+                "trusted fixture failed compilation",
+                vec![String::from_utf8_lossy(&built.stderr).chars().take(4000).collect()],
                 started.elapsed(),
             ));
         }
 
-        // 3. Spec check: must carry tests
-        let test_changes: Vec<_> = changes.files.iter().filter(|c| c.is_test()).collect();
-        let has_tests = !test_changes.is_empty()
-            || self
-                .fixture
-                .initial_files
-                .iter()
-                .any(|c| c.is_test() && !changes.files.iter().any(|u| u.path == c.path));
-
-        if !has_tests && !self.fixture.expected_acceptance_tests.is_empty() {
+        let mut run = tokio::process::Command::new(&executable);
+        run.arg("--test-threads=1");
+        let tested = match run_fixture_command(run, self.timeout).await {
+            Ok(output) => output,
+            Err(error) => return Ok(failed(&error)),
+        };
+        let output = String::from_utf8_lossy(&tested.stdout);
+        let mut executed = Vec::new();
+        for test in &self.fixture.expected_acceptance_tests {
+            let succeeded = output.lines().any(|line| {
+                line.trim() == format!("test {test} ... ok")
+            });
+            if succeeded {
+                executed.push(test.clone());
+            }
+        }
+        if !tested.status.success()
+            || executed.len() != self.fixture.expected_acceptance_tests.len()
+        {
             return Ok(ValidationReport::failed(
-                "spec check failed: no test files found",
-                vec!["Missing tests for code change".to_owned()],
+                "trusted fixture tests failed or acceptance test was not executed",
+                vec![
+                    output.chars().take(4000).collect(),
+                    String::from_utf8_lossy(&tested.stderr).chars().take(2000).collect(),
+                ],
                 started.elapsed(),
             ));
         }
 
-        // 4. Check specific acceptance criteria by fixture ID
-        match self.fixture.id.as_str() {
-            "eval-bugfix-pagination" => {
-                let pagination_src = changes
-                    .files
-                    .iter()
-                    .find(|c| c.path == "src/pagination.rs")
-                    .map(|c| c.content.as_str())
-                    .unwrap_or("");
-                let test_src = changes
-                    .files
-                    .iter()
-                    .find(|c| c.path == "tests/test_pagination.rs")
-                    .map(|c| c.content.as_str())
-                    .unwrap_or("");
-
-                // Verify the off-by-one bug (+ 1) was fixed
-                if pagination_src.contains("(page - 1) * page_size + 1") {
-                    return Ok(ValidationReport::failed(
-                        "regression test failure: off-by-one boundary defect still present",
-                        vec![
-                            "assertion failed: paginate_items(&[1, 2], 1, 2) == [1, 2]".to_owned(),
-                        ],
-                        started.elapsed(),
-                    ));
-                }
-
-                // Verify required acceptance tests exist
-                let mut executed = Vec::new();
-                for test_name in &self.fixture.expected_acceptance_tests {
-                    if test_src.contains(test_name) {
-                        executed.push(test_name.clone());
-                    }
-                }
-
-                if executed.len() < self.fixture.expected_acceptance_tests.len() {
-                    return Ok(ValidationReport::failed(
-                        "missing acceptance tests in test suite",
-                        vec![format!(
-                            "Missing tests: {:?}",
-                            self.fixture.expected_acceptance_tests
-                        )],
-                        started.elapsed(),
-                    ));
-                }
-
-                Ok(ValidationReport::passed(
-                    "all pagination acceptance tests and regressions passed",
-                    vec![
-                        "spec test files: tests/test_pagination.rs; command: cargo test --test test_pagination".to_owned(),
-                        format!("executed: {}", executed.join(", ")),
-                        "test result: ok. 3 passed; 0 failed".to_owned(),
-                    ],
-                    started.elapsed(),
-                ))
-            }
-            "eval-multifile-token-bucket" => {
-                let has_bucket = changes
-                    .files
-                    .iter()
-                    .any(|c| c.path == "src/rate_limiter/bucket.rs");
-                let has_mod = changes
-                    .files
-                    .iter()
-                    .any(|c| c.path == "src/rate_limiter/mod.rs");
-                let test_src = changes
-                    .files
-                    .iter()
-                    .find(|c| c.path == "tests/test_rate_limiter.rs")
-                    .map(|c| c.content.as_str())
-                    .unwrap_or("");
-
-                if !has_bucket || !has_mod {
-                    return Ok(ValidationReport::failed(
-                        "multi-file structure incomplete: expected bucket.rs and mod.rs",
-                        vec!["Missing rate limiter module files".to_owned()],
-                        started.elapsed(),
-                    ));
-                }
-
-                let mut executed = Vec::new();
-                for test_name in &self.fixture.expected_acceptance_tests {
-                    if test_src.contains(test_name) {
-                        executed.push(test_name.clone());
-                    }
-                }
-
-                if executed.len() < self.fixture.expected_acceptance_tests.len() {
-                    return Ok(ValidationReport::failed(
-                        "missing rate limiter acceptance tests",
-                        vec![format!(
-                            "Missing tests: {:?}",
-                            self.fixture.expected_acceptance_tests
-                        )],
-                        started.elapsed(),
-                    ));
-                }
-
-                Ok(ValidationReport::passed(
-                    "multi-file token bucket implementation and tests passed",
-                    vec![
-                        "spec test files: tests/test_rate_limiter.rs; command: cargo test --test test_rate_limiter".to_owned(),
-                        format!("executed: {}", executed.join(", ")),
-                        "test result: ok. 2 passed; 0 failed".to_owned(),
-                    ],
-                    started.elapsed(),
-                ))
-            }
-            "eval-rejected-unsafe-traversal" => {
-                // Should have been rejected before reaching here by path validation,
-                // but if reached, fail.
-                Ok(ValidationReport::failed(
-                    "rejected unsafe edit",
-                    vec!["Path traversal detected in proposed changes".to_owned()],
-                    started.elapsed(),
-                ))
-            }
-            _ => Ok(ValidationReport::failed(
-                "unvalidated fixture",
-                vec!["No validation rule matched".to_owned()],
-                started.elapsed(),
-            )),
-        }
+        let mut logs = vec![
+            "runner: rustc --test, executed trusted builtin source".to_owned(),
+            format!("executed: {}", executed.join(", ")),
+        ];
+        logs.extend(output.lines().take(30).map(str::to_owned));
+        Ok(ValidationReport::passed(
+            "all required tests passed in executed Rust test process",
+            logs,
+            started.elapsed(),
+        ))
     }
 }
 
@@ -790,6 +779,7 @@ pub async fn run_evaluation_fixture(
 
     let validator: Arc<dyn ChangeValidator> = Arc::new(FixtureValidator {
         fixture: fixture.clone(),
+        timeout: config.timeout,
     });
 
     let context = TaskContext {
