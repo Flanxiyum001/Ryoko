@@ -443,6 +443,15 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
         .filter(([key]) => key.startsWith(repoId + ':'))
         .slice(-50).map(([key, value]) => ({ issue: Number(key.split(':')[1]), ...value })) });
     }
+    if (req.method === 'GET' && path === '/api/desktop/issue') {
+      const session = requireDesktop(req);
+      const installationId = positiveId(url.searchParams.get('installationId'), 'installation');
+      const repoId = positiveId(url.searchParams.get('repoId'), 'repository');
+      const number = positiveId(url.searchParams.get('number'), 'issue');
+      if (!settings.agentRepoIds.includes(repoId)) throw bad('repository not allowed for agent jobs', 403);
+      const issue = await client.issue(session.token, installationId, repoId, number);
+      return json(res, 200, { repository: issue.fullName, number: issue.number, title: issue.title });
+    }
     if (req.method === 'POST' && path === '/api/desktop/jobs') {
       const session = requireDesktop(req);
       const input = await jsonBody(req);
