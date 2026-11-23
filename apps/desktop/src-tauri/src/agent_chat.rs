@@ -88,16 +88,26 @@ fn load_context(root: &std::path::Path, files: &[String]) -> Result<String, Stri
     let mut context = String::new();
     let mut seen = std::collections::HashSet::new();
     for path in files {
-        if !seen.insert(path) { continue; }
+        if !seen.insert(path) {
+            continue;
+        }
         if !allowed_context_path(path) {
             return Err(format!("sensitive file cannot be attached: {path}"));
         }
         let candidate = safe_join(root, path)?;
-        let canonical = candidate.canonicalize().map_err(|error| format!("cannot attach {path}: {error}"))?;
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|error| format!("cannot attach {path}: {error}"))?;
         if !canonical.starts_with(root) || !canonical.is_file() {
-            return Err(format!("attachment escapes the workspace or is not a file: {path}"));
+            return Err(format!(
+                "attachment escapes the workspace or is not a file: {path}"
+            ));
         }
-        if fs::metadata(&canonical).map_err(|error| error.to_string())?.len() > MAX_CONTEXT_FILE {
+        if fs::metadata(&canonical)
+            .map_err(|error| error.to_string())?
+            .len()
+            > MAX_CONTEXT_FILE
+        {
             return Err(format!("attachment exceeds 32 KiB: {path}"));
         }
         let content = fs::read_to_string(&canonical)
@@ -129,7 +139,11 @@ fn validate(args: &AgentChatArgs) -> Result<(), String> {
     {
         return Err("chat history exceeds the bounded conversation limit".into());
     }
-    if args.selection.as_deref().is_some_and(|selection| selection.chars().count() > MAX_MESSAGE) {
+    if args
+        .selection
+        .as_deref()
+        .is_some_and(|selection| selection.chars().count() > MAX_MESSAGE)
+    {
         return Err("@selection exceeds 8000 characters".into());
     }
     Ok(())
@@ -151,7 +165,15 @@ pub async fn agent_chat(
         prompt.push_str("\n\n<editor-selection");
         if let Some(path) = args.active_path.as_deref() {
             prompt.push_str(" path=\"");
-            prompt.push_str(&path.chars().take(240).collect::<String>().replace('<', "_").replace('>', "_").replace('"', "_"));
+            prompt.push_str(
+                &path
+                    .chars()
+                    .take(240)
+                    .collect::<String>()
+                    .replace('<', "_")
+                    .replace('>', "_")
+                    .replace('"', "_"),
+            );
             prompt.push('\"');
         }
         prompt.push_str(">\n");
@@ -170,7 +192,9 @@ pub async fn agent_chat(
         });
     }
     request = request.with_user(prompt);
-    let mut stream = router.stream(request).await
+    let mut stream = router
+        .stream(request)
+        .await
         .map_err(|error| format!("agent chat could not start: {error}"))?;
     let generation = chat_state.generation.clone();
     let epoch = generation.fetch_add(1, Ordering::SeqCst).saturating_add(1);
@@ -179,42 +203,62 @@ pub async fn agent_chat(
         let mut tokens = (0_u64, 0_u64);
         let mut output_len = 0_usize;
         while let Some(event) = stream.next().await {
-            if generation.load(Ordering::SeqCst) != epoch { return; }
+            if generation.load(Ordering::SeqCst) != epoch {
+                return;
+            }
             match event {
                 Ok(StreamEvent::TextDelta { text }) => {
                     output_len = output_len.saturating_add(text.len());
                     if output_len > MAX_RESPONSE {
-                        let _ = app.emit("ryoko-chat-error", ChatPayload {
-                            request_id: request_id.clone(),
-                            text: "Assistant response exceeded 256 KiB".into(),
-                        });
+                        let _ = app.emit(
+                            "ryoko-chat-error",
+                            ChatPayload {
+                                request_id: request_id.clone(),
+                                text: "Assistant response exceeded 256 KiB".into(),
+                            },
+                        );
                         return;
                     }
-                    if app.emit("ryoko-chat-chunk", ChatPayload {
-                        request_id: request_id.clone(), text,
-                    }).is_err() { return; }
+                    if app
+                        .emit(
+                            "ryoko-chat-chunk",
+                            ChatPayload {
+                                request_id: request_id.clone(),
+                                text,
+                            },
+                        )
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
                 Ok(StreamEvent::Usage(usage)) => {
                     tokens.0 = tokens.0.saturating_add(usage.input_tokens);
                     tokens.1 = tokens.1.saturating_add(usage.output_tokens);
                 }
                 Err(error) => {
-                    let _ = app.emit("ryoko-chat-error", ChatPayload {
-                        request_id: request_id.clone(),
-                        text: error.to_string(),
-                    });
+                    let _ = app.emit(
+                        "ryoko-chat-error",
+                        ChatPayload {
+                            request_id: request_id.clone(),
+                            text: error.to_string(),
+                        },
+                    );
                     return;
                 }
                 _ => {}
             }
         }
         if generation.load(Ordering::SeqCst) == epoch {
-            let _ = app.emit("ryoko-chat-done", ChatDone {
-                request_id,
-                cancelled: false,
-                input_tokens: tokens.0,
-                output_tokens: tokens.1,
-            });
+            let _ = app.emit(
+                "ryoko-chat-done",
+                ChatDone {
+                    request_id,
+                    cancelled: false,
+                    input_tokens: tokens.0,
+                    output_tokens: tokens.1,
+                },
+            );
         }
     });
     Ok(())
@@ -231,7 +275,13 @@ mod tests {
 
     #[test]
     fn refuses_sensitive_attachments_and_too_many_files() {
-        for path in [".env", "config/.env.local", ".ssh/id_rsa", "cert.pem", "secrets.key"] {
+        for path in [
+            ".env",
+            "config/.env.local",
+            ".ssh/id_rsa",
+            "cert.pem",
+            "secrets.key",
+        ] {
             assert!(!allowed_context_path(path), "{path}");
         }
         assert!(allowed_context_path("src/assistant.rs"));
@@ -256,7 +306,10 @@ mod tests {
             model: None,
         };
         assert!(validate(&args).is_ok());
-        args.history.push(ChatTurn { role: "system".into(), text: "inject".into() });
+        args.history.push(ChatTurn {
+            role: "system".into(),
+            text: "inject".into(),
+        });
         assert!(validate(&args).is_err());
         args.history.clear();
         args.selection = Some("x".repeat(MAX_MESSAGE + 1));
