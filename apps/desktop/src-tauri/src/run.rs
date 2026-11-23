@@ -121,6 +121,67 @@ pub(crate) fn resolve_cli(root: &Path) -> Result<PathBuf, String> {
         })
 }
 
+/// A provider-only CLI catalog. The secret itself never appears in this JSON.
+fn desktop_provider_catalog(
+    setup: &crate::onboarding::SetupState,
+) -> Result<serde_json::Value, String> {
+    let (base_url, wire) = crate::onboarding::provider_endpoint(&setup.provider)
+        .ok_or("unsupported desktop model provider")?;
+    let mut profile = serde_json::json!({
+        "id": setup.provider,
+        "base_url": base_url,
+    });
+    if setup.provider != "ollama" {
+        profile["api_key_env"] = serde_json::json!("RYOKO_DESKTOP_API_KEY");
+    }
+    if wire != "openai" {
+        profile["wire"] = serde_json::json!(wire);
+    }
+    let catalog = serde_json::json!({
+        "default_provider": setup.provider,
+        "providers": [profile],
+    });
+    ryoko_models::ProviderCatalog::parse_json(&catalog.to_string())
+        .map_err(|error| format!("invalid native model setup: {error}"))?;
+    Ok(catalog)
+}
+
+/// Mission Control delegates execution to the ryoko CLI. Forward the chosen
+/// model and ephemeral credentials to that child process only. The on-disk
+/// provider catalog contains an environment variable NAME, never the API key.
+fn configure_desktop_cli(
+    command: &mut Command,
+    logs: &Path,
+    stamp: u64,
+) -> Result<(), String> {
+    let setup = crate::onboarding::load()?;
+    if !setup.configured {
+        return Ok(());
+    }
+    let catalog = desktop_provider_catalog(&setup)?;
+    let secret = if setup.provider == "ollama" {
+        None
+    } else {
+        Some(crate::credential_store::retrieve(&setup.provider)?
+            .ok_or("API key is missing from the OS keychain. Configure the provider again on Welcome.")?)
+    };
+    let path = logs.join(format!("desktop-provider-{stamp}.json"));
+    let mut file = private_file(&path)?;
+    if let Err(error) = (|| -> Result<(), String> {
+        serde_json::to_writer_pretty(&mut file, &catalog)
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())
+    })() {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("could not create private CLI provider catalog: {error}"));
+    }
+    command.arg("--config").arg(&path).env("RYOKO_MODEL", &setup.model);
+    if let Some(secret) = secret {
+        command.env("RYOKO_DESKTOP_API_KEY", secret);
+    }
+    Ok(())
+}
+
 fn private_file(path: &Path) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -363,6 +424,21 @@ pub fn start_run(
             return Err("provider config file does not exist".to_owned());
         }
         command.args(["--config"]).arg(resolved);
+    }
+    if config_path.as_deref().is_none_or(|config| config.trim().is_empty()) {
+        let workspace_catalog = crate::settings::settings_dir(&root)
+            .join(crate::settings::PROVIDERS_FILE);
+        if workspace_catalog.is_file() {
+            command.arg("--config").arg(workspace_catalog);
+            // The workspace catalog is an explicit override of onboarding.
+            if let Ok(setup) = crate::onboarding::load() {
+                if setup.configured {
+                    command.env("RYOKO_MODEL", setup.model);
+                }
+            }
+        } else {
+            configure_desktop_cli(&mut command, &logs, stamp)?;
+        }
     }
     if let Some(check) = check_command
         .map(|value| value.trim().to_owned())
@@ -655,7 +731,31 @@ pub fn shutdown(state: &RunState) {
 
 #[cfg(test)]
 mod tests {
-    use super::executable_name;
+    use super::{desktop_provider_catalog, executable_name};
+    use crate::onboarding::SetupState;
+
+    #[test]
+    fn cli_provider_catalog_does_not_contain_any_secrets() {
+        for provider in ["openai", "anthropic", "gemini", "ollama"] {
+            let setup = SetupState {
+                provider: provider.to_owned(),
+                model: "sample-model".to_owned(),
+                configured: true,
+                recent_folders: vec![],
+            };
+            let catalog = desktop_provider_catalog(&setup).expect("catalog is valid");
+            let json = catalog.to_string();
+            assert!(!json.contains("api-key-secret"));
+            if provider == "ollama" {
+                assert!(catalog["providers"][0].get("api_key_env").is_none());
+            } else {
+                assert_eq!(catalog["providers"][0]["api_key_env"], "RYOKO_DESKTOP_API_KEY");
+            }
+            if provider == "anthropic" || provider == "gemini" {
+                assert_eq!(catalog["providers"][0]["wire"], provider);
+            }
+        }
+    }
 
     #[test]
     fn cli_name_matches_the_host() {
