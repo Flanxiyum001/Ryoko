@@ -196,10 +196,12 @@ In the native panel you can:
 - Browse an authorized repository's issues and PRs and inspect fresh PR CI.
 - Explicitly start an issue engineering job with **Run agent** (only for
   repository IDs in `RYOKO_AGENT_ALLOWED_REPO_IDS`).
-- Queue safe `ryoko/` branch creation, UTF-8 file commits, **draft** PR
+- Queue an explicitly reviewed local clone into `RYOKO_PROJECTS_ROOT`,
+  safe `ryoko/` branch creation, UTF-8 file commits, **draft** PR
   creation and review comments, or promote a draft PR to Ready for review.
 - Inspect the **full parameters** of pending proposals (including trusted
-  agent proposals) and deliberately **Approve write** or **Reject**. Merely
+  agent proposals) and deliberately **Approve write** or **Reject**. Each native **Approve**
+  requires a second, OS-owned confirmation (not only a webview dialog). Merely
   queuing never executes a GitHub mutation; approvals are one-shot and
   re-authorize the repository at execution time.
 
