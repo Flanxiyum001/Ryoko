@@ -315,6 +315,10 @@ test('paired native GitHub proposals require separate human approval and recheck
   const inbox = await req('/api/desktop/proposals?installationId=17&repoId=41', { headers });
   assert.equal(inbox.status, 200);
   assert.ok((await inbox.json()).proposals.some((item) => item.id === id));
+  const trustedPreview = await req('/api/desktop/proposals/' + id, { headers });
+  assert.equal(trustedPreview.status, 200);
+  assert.equal((await trustedPreview.json()).repository, 'approved-owner/repo');
+  assert.equal((await req('/api/desktop/proposals/' + id)).status, 401);
   const gate = await req('/api/desktop/checks?installationId=17&repoId=41&number=9', { headers });
   assert.equal((await gate.json()).ready, true);
 
