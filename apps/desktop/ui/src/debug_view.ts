@@ -584,7 +584,7 @@ export class DebugViewController {
       return;
     }
 
-    for (const [ref, vars] of this.state.variables) {
+    for (const vars of this.state.variables.values()) {
       for (const variable of vars) {
         const row = document.createElement('div');
         row.className = 'debug-item debug-var-item';
@@ -670,7 +670,7 @@ export class DebugViewController {
       return;
     }
 
-    for (const [path, bps] of this.state.breakpoints) {
+    for (const bps of this.state.breakpoints.values()) {
       for (const bp of bps) {
         const row = document.createElement('div');
         row.className = 'debug-item debug-bp-item';
