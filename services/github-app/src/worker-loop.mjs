@@ -17,6 +17,7 @@ export function startGithubWorker({
   const workerId = randomUUID();
   let active = true;
   let current = null;
+  let nextMaintenance = 0;
 
   async function notify(request, message) {
     if (request.kind === 'goal') return;
@@ -60,6 +61,11 @@ export function startGithubWorker({
     while (active) {
       try {
         store.recoverStale();
+        if (Date.now() >= nextMaintenance) {
+          store.prune();
+          store.pruneJobs();
+          nextMaintenance = Date.now() + 60_000;
+        }
         const job = store.claimJob(workerId, leaseMs);
         if (job) {
           current = job;
