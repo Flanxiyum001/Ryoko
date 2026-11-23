@@ -378,7 +378,11 @@ pub fn dynamic_plan_with_reviews(goal: &str, reviews: ReviewConfig) -> DynamicPl
     .depends_on(&security);
 
     for (enabled, role, discipline) in [
-        (reviews.code, CODE_REVIEW_ROLE, "code quality and regression risks"),
+        (
+            reviews.code,
+            CODE_REVIEW_ROLE,
+            "code quality and regression risks",
+        ),
         (
             reviews.security,
             SECURITY_REVIEW_ROLE,
@@ -492,10 +496,12 @@ mod tests {
                 security: false,
             },
         );
-        assert!(!without
-            .tasks
-            .iter()
-            .any(|task| task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA)));
+        assert!(
+            !without
+                .tasks
+                .iter()
+                .any(|task| task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA))
+        );
         Orchestrator::validate_plan(&without.all_tasks()).unwrap();
     }
 
