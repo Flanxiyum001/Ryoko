@@ -1,5 +1,5 @@
 import { cloneWithInstallationToken } from './clone.mjs';
-import { positiveId, READ_PERMISSIONS, WRITE_PERMISSIONS, PR_PERMISSIONS, CLONE_PERMISSIONS, safeBranch, safeGitHubApiPath, safePath, signAppJwt } from './security.mjs';
+import { positiveId, READ_PERMISSIONS, WRITE_PERMISSIONS, PR_PERMISSIONS, CLONE_PERMISSIONS, safeBranch, safeGitHubApiPath, safePath, signAppJwt, ISSUE_PERMISSIONS } from './security.mjs';
 
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
@@ -147,7 +147,7 @@ export class GitHubBroker {
     const install = positiveId(installationId, 'installation');
     const repository = positiveId(repoId, 'repository');
     const available = { read: READ_PERMISSIONS, contents: WRITE_PERMISSIONS,
-      pull_requests: PR_PERMISSIONS, clone: CLONE_PERMISSIONS };
+      pull_requests: PR_PERMISSIONS, issues: ISSUE_PERMISSIONS, clone: CLONE_PERMISSIONS };
     const scope = available[mode];
     if (!scope) throw bad('unsupported GitHub token scope');
     const cacheKey = install + ':' + repository + ':' + mode;
