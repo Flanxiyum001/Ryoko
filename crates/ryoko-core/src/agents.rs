@@ -264,11 +264,16 @@ impl AgentRuntime for ModelAgent {
                     "\n<untrusted_validated_change_patch>\n{diff}\n</untrusted_validated_change_patch>\n"
                 ));
         }
-        let tools = ctx
-            .mcp
-            .as_ref()
-            .map(|mcp| mcp.definitions())
-            .unwrap_or_default();
+        // Reviewers are strictly read-only: even approved MCP mutations must
+        // not be exposed in an independent review context.
+        let tools = if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+            Vec::new()
+        } else {
+            ctx.mcp
+                .as_ref()
+                .map(|mcp| mcp.definitions())
+                .unwrap_or_default()
+        };
         if tools.len() > 64 {
             return Ok(TaskResult::failure(
                 task.id,
@@ -330,6 +335,14 @@ impl AgentRuntime for ModelAgent {
                     return Ok(TaskResult::failure(task.id, format_model_error(&error)));
                 }
             };
+            if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA)
+                && !completion.tool_calls.is_empty()
+            {
+                return Ok(TaskResult::failure(
+                    task.id,
+                    "independent review cannot invoke external tools",
+                ));
+            }
             if completion.tool_calls.is_empty() {
                 return Ok(if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
                     task_result_from_independent_review(task.id, &completion.text)
