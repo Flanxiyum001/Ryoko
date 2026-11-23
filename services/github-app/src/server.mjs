@@ -580,15 +580,15 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
         const rejected = approvalStore.save({ ...current, status: 'rejected' });
         return json(res, 200, { id: rejected.id, status: rejected.status });
       }
-      approvalStore.save({ ...current, status: 'executing' }); // persist before any remote mutation
+      const claimed = approvalStore.claim(current.id); // atomic even across processes
       try {
-        const result = current.proposal.operation === 'clone_repository'
-          ? await client.clone(session.token, current.proposal, settings.projectsRoot)
-          : await client.execute(session.token, current.proposal);
-        approvalStore.save({ ...current, status: 'completed', result });
-        return json(res, 200, { id: current.id, status: 'completed', result });
+        const result = claimed.proposal.operation === 'clone_repository'
+          ? await client.clone(session.token, claimed.proposal, settings.projectsRoot)
+          : await client.execute(session.token, claimed.proposal);
+        approvalStore.save({ ...claimed, status: 'completed', result });
+        return json(res, 200, { id: claimed.id, status: 'completed', result });
       } catch (error) {
-        approvalStore.save({ ...current, status: 'failed', error: safeError(error).message });
+        approvalStore.save({ ...claimed, status: 'failed', error: safeError(error).message });
         throw error;
       }
     }
@@ -651,19 +651,26 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       const item = proposals.get(proposalMatch[1]);
       if (!item || item.owner !== session.user.login) throw bad('proposal not found', 404);
       if (Date.now() > item.expires || item.status !== 'pending') throw bad('proposal expired or already resolved', 409);
+      // Web-based approvals must re-check current GitHub installation scope.
+      await client.authorizedRepo(session.token,
+        item.proposal.installationId, item.proposal.repoId);
+      const current = proposals.get(item.id);
+      if (!current || current.status !== 'pending' || Date.now() > current.expires) {
+        throw bad('proposal already decided or expired', 409);
+      }
       if (proposalMatch[2] === 'reject') {
-        const rejected = approvalStore.save({ ...item, status: 'rejected' });
+        const rejected = approvalStore.save({ ...current, status: 'rejected' });
         return json(res, 200, { id: rejected.id, status: rejected.status });
       }
-      approvalStore.save({ ...item, status: 'executing' });
+      const claimed = approvalStore.claim(current.id);
       try {
-        const result = item.proposal.operation === 'clone_repository'
-          ? await client.clone(session.token, item.proposal, settings.projectsRoot)
-          : await client.execute(session.token, item.proposal);
-        approvalStore.save({ ...item, status: 'completed', result });
-        return json(res, 200, { id: item.id, status: 'completed', result });
+        const result = claimed.proposal.operation === 'clone_repository'
+          ? await client.clone(session.token, claimed.proposal, settings.projectsRoot)
+          : await client.execute(session.token, claimed.proposal);
+        approvalStore.save({ ...claimed, status: 'completed', result });
+        return json(res, 200, { id: claimed.id, status: 'completed', result });
       } catch (error) {
-        approvalStore.save({ ...item, status: 'failed', error: safeError(error).message });
+        approvalStore.save({ ...claimed, status: 'failed', error: safeError(error).message });
         throw error;
       }
     }
