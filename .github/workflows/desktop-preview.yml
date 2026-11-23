@@ -166,6 +166,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -180,6 +182,17 @@ jobs:
           cd dist
           find . -type f ! -name 'SHA256SUMS.txt' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           test -s SHA256SUMS.txt
+
+      - name: Verify complete checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum --check SHA256SUMS.txt)
+
+      - name: Attest preview release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
 
       - name: Publish strictly prerelease assets
         id: publish
@@ -218,7 +231,11 @@ jobs:
           | Linux x64 | `.AppImage` or `.deb` | Install dependencies as needed |
 
           Download a file from **Assets**, then use `SHA256SUMS.txt` to
-          verify the download. Both the `ryoko-lsp` server and `ryoko` CLI
+          verify the download. GitHub also records build provenance for the
+          published assets; verify a downloaded file with
+          `gh attestation verify FILE --repo Flanxiyum001/Ryoko`.
+          This attests the GitHub workflow, **not** platform code signing.
+          Both the `ryoko-lsp` server and `ryoko` CLI
           are bundled with the desktop app. The container package is a
           separate **CLI-only** distribution (not a graphical IDE).
 
