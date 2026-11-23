@@ -34,6 +34,13 @@ pub trait WorkspaceLease: Send + Sync {
     /// Writes changes into the isolated workspace (not the project root).
     async fn apply(&self, changes: &[ProposedChange]) -> CoreResult<()>;
 
+    /// Seal the exact source tree before validation. Providers that publish
+    /// actual Git worktrees must publish this sealed tree, never reread files.
+    async fn seal(&self) -> CoreResult<()> { Ok(()) }
+
+    /// Reject a validation pass if the source changed while checks ran.
+    async fn verify_seal(&self) -> CoreResult<()> { Ok(()) }
+
     /// Commits the staged changes and returns a reviewable pull request. A
     /// provider may retain its branch after publishing so the pull request can
     /// still be merged later.
