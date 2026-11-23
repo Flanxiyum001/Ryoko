@@ -1041,7 +1041,9 @@ async fn execute_task(
                     std::time::Duration::from_millis(report.duration_ms),
                 ),
             }
-        } else { report };
+        } else {
+            report
+        };
         events.emit(OrchestratorEvent::ValidationFinished {
             task_id: task.id,
             passed: report.passed,
