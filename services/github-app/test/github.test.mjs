@@ -119,6 +119,14 @@ const fakeBroker = {
     return { id: 41, name: 'repo', full_name: 'approved-owner/repo', default_branch: 'main' };
   },
   async view() { return []; },
+  async draftChecks(_userToken, _installationId, _repoId, number) {
+    return { ready: true, reason: 'All checks successful', sha: 'a'.repeat(40), number };
+  },
+  async issue(_userToken, _installationId, _repoId, number) {
+    return { installationId: 17, repoId: 41, owner: 'approved-owner', name: 'repo',
+      fullName: 'approved-owner/repo', number, title: 'Improve editor', body: 'Add search',
+      defaultBranch: 'main' };
+  },
   executionCount: 0,
   async execute(_token, proposal) {
     this.executionCount++;
@@ -279,5 +287,51 @@ test('desktop pairing requires browser CSRF, is single-use, read-only and revoke
   assert.equal(forbidden.status, 403);
   await req('/api/disconnect', { method: 'POST', sessionCookie: cookie, csrf });
   const revoked = await req('/api/desktop/repositories', { headers });
+  assert.equal(revoked.status, 401);
+});
+
+test('paired native GitHub proposals require separate human approval and recheck scope', async () => {
+  const { cookie, csrf } = await login();
+  const created = await req('/api/desktop/pair', { method: 'POST', sessionCookie: cookie, csrf });
+  const { code } = await created.json();
+  const paired = await req('/api/desktop/exchange', { method: 'POST', body: { code } });
+  const headers = { Authorization: 'Bearer ' + (await paired.json()).token };
+  const proposed = { installationId: 17, repoId: 41,
+    operation: 'create_branch', params: { branch: 'ryoko/native-review' } };
+  const initialWrites = fakeBroker.executionCount;
+
+  const unauthenticated = await req('/api/desktop/proposals', { method: 'POST', body: proposed });
+  assert.equal(unauthenticated.status, 401);
+  const invalidRepo = await req('/api/desktop/proposals', {
+    method: 'POST', headers, body: { ...proposed, repoId: 999 },
+  });
+  assert.equal(invalidRepo.status, 403);
+  const queued = await req('/api/desktop/proposals', { method: 'POST', headers, body: proposed });
+  assert.equal(queued.status, 201);
+  const { id, status } = await queued.json();
+  assert.equal(status, 'pending');
+  assert.equal(fakeBroker.executionCount, initialWrites);
+
+  const inbox = await req('/api/desktop/proposals?installationId=17&repoId=41', { headers });
+  assert.equal(inbox.status, 200);
+  assert.ok((await inbox.json()).proposals.some((item) => item.id === id));
+  const gate = await req('/api/desktop/checks?installationId=17&repoId=41&number=9', { headers });
+  assert.equal((await gate.json()).ready, true);
+
+  const approved = await req('/api/desktop/proposals/' + id + '/approve', { method: 'POST', headers });
+  assert.equal(approved.status, 200);
+  assert.equal((await approved.json()).status, 'completed');
+  assert.equal(fakeBroker.executionCount, initialWrites + 1);
+  const replay = await req('/api/desktop/proposals/' + id + '/approve', { method: 'POST', headers });
+  assert.equal(replay.status, 409);
+  assert.equal(fakeBroker.executionCount, initialWrites + 1);
+
+  const queuedOther = await req('/api/desktop/proposals', { method: 'POST', headers, body: proposed });
+  const other = (await queuedOther.json()).id;
+  const rejected = await req('/api/desktop/proposals/' + other + '/reject', { method: 'POST', headers });
+  assert.equal((await rejected.json()).status, 'rejected');
+  assert.equal(fakeBroker.executionCount, initialWrites + 1);
+  await req('/api/disconnect', { method: 'POST', sessionCookie: cookie, csrf });
+  const revoked = await req('/api/desktop/proposals?installationId=17&repoId=41', { headers });
   assert.equal(revoked.status, 401);
 });
