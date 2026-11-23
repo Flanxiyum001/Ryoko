@@ -17,6 +17,10 @@ For headless Linux x64 use, the optional **Ryoko CLI-only** GitHub Packages imag
 
 The product and engineering plan for the desktop IDE, agent runtime and release gates is in [`docs/RYOKO_2_MASTER_BLUEPRINT.md`](docs/RYOKO_2_MASTER_BLUEPRINT.md). Phase 5 release trust, plugin publisher verification, recovery, and cross-platform acceptance gates are tracked in [`docs/PHASE_5_RELEASE_TRUST.md`](docs/PHASE_5_RELEASE_TRUST.md); the gates are targets, not completed release certifications. Those documents describe intent; only the crates and commands documented below are implemented. See [contributing](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), [security reporting](SECURITY.md), and [engineering rules](AGENTS.md) before opening a PR.
 
+## Polyglot desktop editing and execution (pre-alpha)
+
+The desktop recognizes dozens of file types and shebangs, offers a language-mode override and an opt-in native **Run file / Run task** panel with output, exit status and cancellation. Developers can use local compilers/interpreters and LSP servers without switching IDEs. **Toolchains are not bundled, semantic support differs by language, and native tasks execute with the user's local permissions after a confirmation prompt.** See the [polyglot workbench guide](docs/architecture/POLYGLOT_WORKBENCH.md) for supported workflows, limitations and release gates.
+
 ## License and commercial use
 
 Ryoko's currently published source code is licensed under the **[Apache License 2.0](LICENSE)**. It is permissive open source: commercial use, redistribution, modification, and the development of paid products are allowed under the license's conditions, including applicable notices and attribution. The license does not grant rights to use project trademarks.

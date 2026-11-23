@@ -1,3 +1,5 @@
+import { detectLanguage } from './languages';
+
 export interface LspPosition {
   line: number;
   character: number;
@@ -34,38 +36,8 @@ export interface JsonRpcMessage {
 /** LSP severities (1-4) mapped to Monaco marker severities. */
 const MARKER_SEVERITY: Record<number, number> = { 1: 8, 2: 4, 3: 2, 4: 1 };
 
-const LANGUAGE_BY_EXTENSION: Record<string, string> = {
-  c: 'c',
-  cc: 'cpp',
-  cpp: 'cpp',
-  cs: 'csharp',
-  css: 'css',
-  go: 'go',
-  h: 'cpp',
-  hpp: 'cpp',
-  html: 'html',
-  java: 'java',
-  js: 'javascript',
-  json: 'json',
-  jsx: 'javascript',
-  md: 'markdown',
-  mjs: 'javascript',
-  py: 'python',
-  rs: 'rust',
-  sh: 'shell',
-  sql: 'sql',
-  toml: 'ini',
-  ts: 'typescript',
-  tsx: 'typescript',
-  txt: 'plaintext',
-  yaml: 'yaml',
-  yml: 'yaml',
-};
-
-export function languageForPath(path: string): string {
-  const name = path.split(/[\\/]/).pop() ?? '';
-  const extension = name.includes('.') ? name.split('.').pop()?.toLowerCase() ?? '' : '';
-  return LANGUAGE_BY_EXTENSION[extension] ?? 'plaintext';
+export function languageForPath(path: string, contents = ''): string {
+  return detectLanguage(path, contents);
 }
 
 export function markerSeverityFor(severity: number | undefined): number {
