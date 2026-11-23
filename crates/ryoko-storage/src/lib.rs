@@ -443,6 +443,26 @@ mod tests {
         assert!(store.interrupted_tasks().unwrap().is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn resolves_symlinked_ancestors_but_rejects_symlinked_storage_directories() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let actual = temp.path().join("actual");
+        std::fs::create_dir_all(&actual).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+
+        // The storage directory itself is real; only an ancestor is an
+        // alias (as /var is on macOS). SQLite NOFOLLOW must still work.
+        let db = alias.join("state").join("tasks.sqlite3");
+        let store = DurableStore::open(&db).unwrap();
+        drop(store);
+        assert!(actual.join("state/tasks.sqlite3").is_file());
+
+        // A symlink directly at the storage directory must remain refused.
+        assert!(DurableStore::open(&alias.join("tasks.sqlite3")).is_err());
+    }
+
     #[test]
     fn rejects_oversized_events_and_symlinked_database_files() {
         let temp = tempfile::TempDir::new().unwrap();
