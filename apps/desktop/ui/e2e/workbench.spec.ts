@@ -107,6 +107,9 @@ test('navigation exposes search and browse-only extensions', async ({ page }) =>
   await expect(page.getByRole('heading', { name: 'Marketplace preview' })).toBeVisible();
   await expect(page.getByText('Installing third-party code is disabled during alpha testing.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Close', exact: true }).last().click();
+  // Quick open intentionally requires an active workspace; verify the native
+  // folder flow before expecting the palette to appear.
+  await openProject(page);
   await page.locator('#quickOpenButton').click();
   await expect(page.getByRole('dialog', { name: 'Quick open files' })).toBeVisible();
 });
