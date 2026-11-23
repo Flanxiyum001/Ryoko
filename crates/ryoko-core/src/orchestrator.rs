@@ -1621,6 +1621,104 @@ mod tests {
         AgentIdentity::new(AgentRole::SeniorDeveloper, "dev-01", "implementer")
     }
 
+    struct ReviewAgent {
+        identity: AgentIdentity,
+        propose_files: bool,
+    }
+
+    #[async_trait]
+    impl AgentRuntime for ReviewAgent {
+        fn identity(&self) -> AgentIdentity {
+            self.identity.clone()
+        }
+
+        async fn execute_task(&self, _ctx: TaskContext, task: Task) -> CoreResult<TaskResult> {
+            let target = task.dependencies[0];
+            let output = serde_json::json!({
+                "verdict": "pass",
+                "summary": "reviewed compiled source and regression evidence",
+                "findings": [],
+                "evidence_refs": [format!("validator:{target}")],
+            })
+            .to_string();
+            let mut result = TaskResult::success(task.id, output);
+            if self.propose_files {
+                result = result.with_changes(change());
+            }
+            Ok(result)
+        }
+    }
+
+    struct ExecutedValidator;
+
+    #[async_trait]
+    impl ChangeValidator for ExecutedValidator {
+        async fn validate(&self, _changes: &StagedChanges) -> CoreResult<ValidationReport> {
+            Ok(ValidationReport::passed(
+                "isolated regression suite passed",
+                vec!["spec test files: tests/smoke.rs; command: cargo test".to_owned()],
+                Duration::from_millis(1),
+            ))
+        }
+    }
+
+    async fn independent_review_run(
+        validator: Arc<dyn ChangeValidator>,
+        propose_files: bool,
+    ) -> OrchestrationReport {
+        let orchestrator = Orchestrator::new(workspace(), validator, router()).with_config(
+            OrchestratorConfig {
+                max_concurrency: 2,
+                max_attempts: 1,
+                max_repair_cycles: 0,
+            },
+        );
+        let producer = Task::new("producer", AgentRole::SeniorDeveloper);
+        let reviewer_role = AgentRole::Custom(CODE_REVIEW_ROLE.to_owned());
+        let reviewer = Task::new("review", reviewer_role.clone())
+            .depends_on(&producer)
+            .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
+            .with_metadata(REVIEW_TARGET_METADATA, producer.id.to_string());
+        orchestrator
+            .run(
+                vec![producer, reviewer],
+                vec![
+                    Arc::new(SleepAgent {
+                        identity: dev(),
+                        delay: Duration::ZERO,
+                    }),
+                    Arc::new(ReviewAgent {
+                        identity: AgentIdentity::new(reviewer_role, "reviewer", "read only"),
+                        propose_files,
+                    }),
+                ],
+                ProjectContext::default(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn independent_review_requires_executed_validation_evidence() {
+        let no_proof = independent_review_run(Arc::new(AllowAllValidator), false).await;
+        assert_eq!(no_proof.failed.len(), 1);
+        assert!(no_proof.failed[0].error.contains("no executed test evidence"));
+        assert!(no_proof.successful_reviews().is_empty());
+
+        let proved = independent_review_run(Arc::new(ExecutedValidator), false).await;
+        assert!(proved.all_succeeded(), "{:?}", proved.failed);
+        assert_eq!(proved.successful_reviews().len(), 1);
+        assert_eq!(proved.successful_reviews()[0].1.verdict, ReviewVerdict::Pass);
+    }
+
+    #[tokio::test]
+    async fn independent_review_cannot_publish_file_changes() {
+        let report = independent_review_run(Arc::new(ExecutedValidator), true).await;
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].error.contains("must not propose file changes"));
+        assert!(report.successful_reviews().is_empty());
+    }
+
     #[tokio::test]
     async fn independent_tasks_run_concurrently() {
         let orchestrator = Orchestrator::new(workspace(), Arc::new(AllowAllValidator), router())
