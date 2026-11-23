@@ -125,9 +125,10 @@ fn run_arguments(
 }
 
 fn pinned_digest(image: &str) -> Option<&str> {
-    let digest = image.strip_prefix("sha256:").or_else(|| image.rsplit_once("@sha256:").map(|(_, hash)| hash))?;
-    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some(digest)
+    let digest = image
+        .strip_prefix("sha256:")
+        .or_else(|| image.rsplit_once("@sha256:").map(|(_, hash)| hash))?;
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(digest)
 }
 
 impl BuildSandbox {
