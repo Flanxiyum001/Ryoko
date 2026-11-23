@@ -1,4 +1,5 @@
 import { cloneWithInstallationToken } from './clone.mjs';
+import { assertReadyForReview, inspectDraftChecks } from './ci-gates.mjs';
 import { positiveId, READ_PERMISSIONS, WRITE_PERMISSIONS, PR_PERMISSIONS, CLONE_PERMISSIONS, safeBranch, safeGitHubApiPath, safePath, signAppJwt, ISSUE_PERMISSIONS } from './security.mjs';
 
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -218,6 +219,27 @@ export class GitHubBroker {
     }
   }
 
+  async draftChecks(userToken, installationId, repoId, number) {
+    const repo = await this.authorizedRepo(userToken, installationId, repoId);
+    const token = await this.installationToken(installationId, repoId, 'read');
+    return inspectDraftChecks({ broker: this, root: repoPath(repo), repoId: Number(repoId),
+      number, readToken: token });
+  }
+
+  async issue(userToken, installationId, repoId, number) {
+    const repo = await this.authorizedRepo(userToken, installationId, repoId);
+    const token = await this.installationToken(installationId, repoId, 'read');
+    const issue = await this.request(repoPath(repo) + '/issues/' + positiveId(number, 'issue'), token);
+    if (!issue || issue.pull_request || issue.state !== 'open' || !issue.title) {
+      throw bad('issue is not open or is a pull request', 409);
+    }
+    return { installationId: Number(installationId), repoId: Number(repoId),
+      owner: repo.full_name.split('/')[0], name: repo.full_name.split('/')[1],
+      fullName: repo.full_name, defaultBranch: repo.default_branch,
+      number: issue.number, title: String(issue.title).slice(0, 180),
+      body: String(issue.body || '').slice(0, 12_000) };
+  }
+
   async clone(userToken, proposal, projectsRoot) {
     const repo = await this.authorizedRepo(userToken, proposal.installationId, proposal.repoId);
     const token = await this.installationToken(proposal.installationId, proposal.repoId, 'clone');
@@ -268,6 +290,24 @@ export class GitHubBroker {
           body: { head: safeBranch(params.head), base, title: params.title, body: params.body },
         });
         return { action: 'pull_request_opened', number: result.number, html_url: result.html_url };
+      }
+      case 'mark_ready_for_review': {
+        const readToken = await this.installationToken(installationId, repoId, 'read');
+        const draft = await assertReadyForReview({
+          broker: this, root, repoId: Number(repoId), number: params.number, readToken,
+        });
+        if (!draft.node_id) throw bad('GitHub did not return a PR node identifier', 502);
+        const result = await this.request('/graphql', token, {
+          method: 'POST',
+          body: {
+            query: 'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{number,isDraft}}}',
+            variables: { id: draft.node_id },
+          },
+        });
+        if (result?.errors?.length || result?.data?.markPullRequestReadyForReview?.pullRequest?.isDraft !== false) {
+          throw bad('GitHub refused to mark the draft PR ready', 409);
+        }
+        return { action: 'pull_request_ready_for_review', number: params.number };
       }
       case 'review_comment': {
         const num = positiveId(params.number, 'pull request');
