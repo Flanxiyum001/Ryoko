@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Report a security vulnerability privately"
+    url: "https://github.com/Flanxiyum001/Ryoko/security/policy"
+    about: "Do not open a public issue for security findings. Use private vulnerability reporting if available, or the confidential contact described in SECURITY.md."
+  - name: "Contribution and development guidance"
+    url: "https://github.com/Flanxiyum001/Ryoko/blob/main/CONTRIBUTING.md"
+    about: "Read setup steps, engineering checks, and contribution expectations before opening an issue or pull request."
