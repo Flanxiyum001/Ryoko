@@ -251,7 +251,80 @@ For a hosted broker on a different port, explicitly configure
 endpoint. Do not place the broker token in GitHub issues, a repo config,
 an IDE renderer, or a file committed to Git.
 
-### Durable GitHub approval inbox
+### Hosted database and multi-process workers (required for staging)
+
+Use **Node.js 24.15 or newer**, a trusted Linux/macOS local disk,
+a private directory (0700) and a new random 32-byte state encryption key:
+
+```sh
+mkdir -p /srv/ryoko/private
+chmod 700 /srv/ryoko/private
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+# Set the generated key in your secret manager, never in the repository:
+export RYOKO_STATE_KEY="PASTE_NEW_KEY_FROM_SECRET_MANAGER"
+export RYOKO_STATE_DB="/srv/ryoko/private/broker.sqlite3"
+export RYOKO_BROKER_MODE=api
+```
+
+Start the HTTP broker with `RYOKO_BROKER_MODE=api`, and one or more
+**separate** worker processes with `RYOKO_BROKER_MODE=worker`. All of
+them need the **same local SQLite WAL database path and encryption key**,
+the same GitHub App credentials and the same host-managed CLI and sandbox.
+For a simple single-process development installation, use
+`RYOKO_BROKER_MODE=all`.
+
+A database transaction atomically records each signed GitHub webhook and
+its queued job, or ignores a duplicate. Each worker obtains one
+`BEGIN IMMEDIATE`-guarded job lease and heartbeats while running. An
+expired lease becomes **interrupted**, never auto-requeued: a push or PR
+may have occurred before the crash. Explicit retry is permitted only
+after manually reconciling remote branches and PRs. Separate API
+instances share the same encrypted sessions, one-use pairing codes,
+desktop tokens, approvals, delivery IDs, and jobs.
+
+OAuth user credentials and CSRF session data are AES-256-GCM encrypted
+at rest; cookie and bearer lookup keys are SHA-256 hashed in the DB.
+The encryption key must remain available across restarts. **Losing it
+invalidates persisted authentication and job data.** Logout revokes
+the shared sessions. User sign-in is persistent across HTTP process
+restarts **only until its configured two-hour session expiry**; the
+30-minute desktop bearer expires independently. Users reauthenticate
+when expired. There is no automatic GitHub OAuth refresh-token handling.
+
+**Supported deployment boundary:** multiple API/worker **processes on
+one trusted machine with local disk**, not replicas on different hosts
+or network filesystems. SQLite WAL does not provide a distributed
+database. Do not spread these workers across separate Railway services
+with separate volumes, Kubernetes nodes or NFS mounts. A geographically
+distributed/multi-host deployment still requires PostgreSQL and a
+separate distributed queue adapter. This implementation is a
+single-host production candidate pending real GitHub staging, backup,
+observability and recovery validation—not a certification of
+multi-region production readiness.
+
+Before cutover, archive any previous JSON ledger files outside the
+active service and review all pending approvals/branches manually.
+There is intentionally **no automatic migration or replay** from the
+old `RYOKO_BOT_STATE_FILE` and `RYOKO_APPROVAL_STATE_FILE` files.
+Those legacy settings apply only when `RYOKO_STATE_DB` is absent
+(local development).
+
+### Independent GitHub engineering missions
+
+The native IDE's **Engineering mission** panel accepts a bounded goal
+for a human-selected, authorized repository. An **OS-native approval
+dialog** must confirm before the desktop submits it. The database
+queues the goal for a worker exactly like an issue-triggered job.
+A successful team run publishes only its integrated `ryoko/` branch
+and a **draft PR**; it never edits or merges the default branch. An
+identical goal cannot be queued a second time without inspecting
+the previous result and creating a genuinely new mission.
+
+The first-party proposal-only GitHub MCP tool remains scoped to the
+selected repository for both issue jobs and independent missions.
+Do not grant model agents direct App installation tokens.
+
+### Legacy single-process JSON approval inbox (development only)
 
 Set a **separate** owner-private ledger path in the same private directory
 as the bot job ledger:
@@ -267,12 +340,11 @@ completed, rejected, failed and interrupted items remain visible as read-only
 history for up to 24 hours. The records contain proposal parameters and may
 include source code: keep the file private (0600), never commit it.
 
-Both ledgers are **single-process** and use atomic file snapshots, not a
-distributed transactional queue. Run one broker instance only. The next
-production step is a database-backed queue with leases, GitHub remote
-reconciliation, and a durable audit log shared across replicas.
+These files are **not used when RYOKO_STATE_DB is set**. Their
+single-process behavior is retained only for local development and
+backward compatibility. Do not run multiple brokers against JSON ledgers.
 
-### Durable bot job ledger
+### Legacy JSON bot job ledger (development only)
 
 For any real bot installation configure a private persistent file on a
 single trusted host:
@@ -288,12 +360,10 @@ When restarted, previously running jobs become `interrupted`. Ryoko
 failure; inspect any pushed branch or draft PR before the explicit
 `/ryoko retry` command. An operator can also inspect jobs from the IDE.
 
-This ledger is **single-process only**. Multiple broker replicas, network
-filesystems, or automated crash recovery are not supported. A full
-production service needs transactional storage, worker leasing, outcome
-reconciliation and durable approval queues. Desktop approval proposals,
-OAuth sessions and bearer pairings are still in process memory. Never put
-the ledger or GitHub credentials in the repository.
+When `RYOKO_STATE_DB` is configured, jobs, proposals, signed delivery IDs,
+OAuth sessions, and pairing tokens are stored in the shared encrypted
+database instead. The JSON ledgers are not imported automatically.
+Never put the state files, keys or GitHub credentials in the repository.
 
 ### Registration and staging checklist
 
@@ -302,13 +372,22 @@ the ledger or GitHub credentials in the repository.
 2. Supply the backend private key, OAuth, webhook secret, owner allowlist,
    repository ID allowlist, model provider config, local Ryoko CLI and
    sandbox image. Keep these variables outside the UI and repository.
-3. Configure the private ledger path, start a **single** broker, sign in
-   and pair the native desktop.
+3. Configure the **private SQLite database and encryption key**, then
+   start an API process and at least one separately leased worker. Sign
+   in, restart an API instance, and verify the browser and native desktop
+   session survive until their documented expirations.
 4. Try a read, a rejected proposal, a branch proposal and an explicitly
    approved draft PR. Verify the CI gate blocks a pending or failing commit.
-5. Start a small issue job, inspect its progress and verify the draft PR
-   never merges. Restart the broker mid-job and ensure it reports
-   `interrupted`, with no automatic second run.
+5. Start a small issue job **and a standalone goal**. Verify the worker
+   creates draft PRs only and exposes progress to Mission Control.
+6. Run at least two API/worker processes against the same local database;
+   replay the same signed webhook and ensure exactly one job runs.
+7. Terminate the active worker during a push/PR attempt. After lease expiry,
+   verify **interrupted** status and no automatic remote retry, then manually
+   reconcile any remote branches.
+8. Test secret rotation, wrong-key startup, SQLite backup/restore using
+   SQLite's online backup facilities, logout, expired session
+   reauthentication, and at-rest file permissions.
 
 ## 8. Tests and release gates
 
