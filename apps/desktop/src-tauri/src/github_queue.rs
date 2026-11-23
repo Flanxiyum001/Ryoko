@@ -182,6 +182,210 @@ pub async fn get_github_queue(
     Ok(data)
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubProposal {
+    id: String,
+    source: String,
+    operation: String,
+    status: String,
+    params: serde_json::Value,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct ProposalList {
+    proposals: Vec<GitHubProposal>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubJob {
+    issue: u64,
+    status: String,
+    #[serde(default)]
+    number: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct JobList {
+    jobs: Vec<GitHubJob>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubChecks {
+    ready: bool,
+    #[serde(default)]
+    sha: Option<String>,
+    reason: String,
+    #[serde(default)]
+    checks: Option<u64>,
+    #[serde(default)]
+    statuses: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubDecision {
+    id: String,
+    status: String,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+}
+
+fn checked_repo(installation_id: u64, repo_id: u64) -> Result<(), String> {
+    if installation_id == 0 || repo_id == 0 {
+        return Err("choose an authorized GitHub App repository".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_github_proposals(
+    installation_id: u64,
+    repo_id: u64,
+    state: State<'_, GitHubQueueState>,
+) -> Result<Vec<GitHubProposal>, String> {
+    checked_repo(installation_id, repo_id)?;
+    let response = client()?
+        .get(format!(
+            "{BROKER}/api/desktop/proposals?installationId={installation_id}&repoId={repo_id}"
+        ))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    let list: ProposalList = bounded_json(response).await?;
+    if list.proposals.len() > 2 {
+        return Err("broker returned too many review proposals".into());
+    }
+    Ok(list.proposals)
+}
+
+#[tauri::command]
+pub async fn create_github_proposal(
+    installation_id: u64,
+    repo_id: u64,
+    operation: String,
+    params: serde_json::Value,
+    state: State<'_, GitHubQueueState>,
+) -> Result<String, String> {
+    checked_repo(installation_id, repo_id)?;
+    if ![
+        "create_branch",
+        "commit_file",
+        "open_pull_request",
+        "review_comment",
+        "mark_ready_for_review",
+    ]
+    .contains(&operation.as_str())
+    {
+        return Err("unsupported native GitHub write proposal".into());
+    }
+    let response = client()?
+        .post(format!("{BROKER}/api/desktop/proposals"))
+        .bearer_auth(token(&state)?)
+        .json(&serde_json::json!({
+            "installationId": installation_id,
+            "repoId": repo_id,
+            "operation": operation,
+            "params": params,
+        }))
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    let result: GitHubDecision = bounded_json(response).await?;
+    if result.status != "pending" {
+        return Err("broker did not queue a reviewable proposal".into());
+    }
+    Ok(result.id)
+}
+
+#[tauri::command]
+pub async fn decide_github_proposal(
+    id: String,
+    decision: String,
+    state: State<'_, GitHubQueueState>,
+) -> Result<serde_json::Value, String> {
+    if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+        || !["approve", "reject"].contains(&decision.as_str())
+    {
+        return Err("invalid GitHub proposal decision".into());
+    }
+    let response = client()?
+        .post(format!("{BROKER}/api/desktop/proposals/{id}/{decision}"))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    let result: GitHubDecision = bounded_json(response).await?;
+    Ok(serde_json::json!({
+        "id": result.id, "status": result.status, "result": result.result,
+    }))
+}
+
+#[tauri::command]
+pub async fn get_github_checks(
+    installation_id: u64,
+    repo_id: u64,
+    number: u64,
+    state: State<'_, GitHubQueueState>,
+) -> Result<GitHubChecks, String> {
+    checked_repo(installation_id, repo_id)?;
+    if number == 0 { return Err("invalid pull request number".into()); }
+    let response = client()?
+        .get(format!(
+            "{BROKER}/api/desktop/checks?installationId={installation_id}&repoId={repo_id}&number={number}"
+        ))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    bounded_json(response).await
+}
+
+#[tauri::command]
+pub async fn get_github_jobs(
+    installation_id: u64,
+    repo_id: u64,
+    state: State<'_, GitHubQueueState>,
+) -> Result<Vec<GitHubJob>, String> {
+    checked_repo(installation_id, repo_id)?;
+    let response = client()?
+        .get(format!(
+            "{BROKER}/api/desktop/jobs?installationId={installation_id}&repoId={repo_id}"
+        ))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    let jobs: JobList = bounded_json(response).await?;
+    if jobs.jobs.len() > 50 { return Err("too many GitHub jobs".into()); }
+    Ok(jobs.jobs)
+}
+
+#[tauri::command]
+pub async fn start_github_job(
+    installation_id: u64,
+    repo_id: u64,
+    number: u64,
+    state: State<'_, GitHubQueueState>,
+) -> Result<GitHubJob, String> {
+    checked_repo(installation_id, repo_id)?;
+    if number == 0 { return Err("invalid issue number".into()); }
+    let response = client()?
+        .post(format!("{BROKER}/api/desktop/jobs"))
+        .bearer_auth(token(&state)?)
+        .json(&serde_json::json!({
+            "installationId": installation_id, "repoId": repo_id, "number": number,
+        }))
+        .send()
+        .await
+        .map_err(|_| "cannot reach local GitHub App".to_owned())?;
+    bounded_json(response).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
