@@ -43,6 +43,7 @@
           <span id="activePath" class="active-path">No file open</span>
           <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
           <span class="status-spacer"></span>
+          <button id="runActiveFile" class="button primary compact" type="button" disabled>Run file</button>
           <button id="toggleTerminal" class="button ghost compact" type="button">Terminal</button>
           <button id="toggleDebug" class="button ghost compact" type="button">Debug</button>
         </div>
@@ -65,11 +66,24 @@
         <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
           <div class="bottom-tabs">
             <button id="terminalTab" class="bottom-tab active" type="button">TERMINAL</button>
+            <button id="taskTab" class="bottom-tab" type="button">OUTPUT</button>
             <button id="searchTab" class="bottom-tab" type="button">SEARCH</button>
             <button id="debugTab" class="bottom-tab" type="button">DEBUG</button>
             <span id="bottomStatus" class="hint"></span>
             <span class="status-spacer"></span>
             <button id="bottomClose" class="button ghost compact" type="button">Hide</button>
+          </div>
+          <div id="taskPanel" class="bottom-content code-task-panel hidden" aria-label="Code task output">
+            <div class="task-controls">
+              <label for="taskProgram">Executable</label>
+              <input id="taskProgram" spellcheck="false" autocomplete="off" placeholder="python3">
+              <label for="taskArgs">Arguments</label>
+              <input id="taskArgs" spellcheck="false" autocomplete="off" placeholder="-u {file}">
+              <button id="taskRun" type="button" class="button primary compact">Run task…</button>
+              <button id="taskStop" type="button" class="button ghost compact" disabled>Stop</button>
+            </div>
+            <p class="hint" id="taskLabel">Choose a source file. Tasks run locally after your approval. Use {file} or {workspace} as an argument.</p>
+            <pre id="taskOutput" class="task-output" role="log" aria-live="polite"></pre>
           </div>
           <div id="terminalPanel" class="bottom-content terminal-panel">
             <div class="terminal-toolbar">
@@ -226,7 +240,7 @@
       <span id="editorStatus" class="status-message" role="status" aria-live="polite">Ready</span>
       <span class="status-spacer"></span>
       <span id="cursorPos">Ln 1, Col 1</span>
-      <span id="languageMode">plaintext</span>
+      <label class="sr-only" for="languageMode">Language mode</label><select id="languageMode" aria-label="Language mode" title="Change this file’s language mode"></select>
       <span>UTF-8</span>
     </footer>
   </div>
