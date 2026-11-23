@@ -6,6 +6,7 @@ mod github_queue;
 mod inline_edit;
 mod lsp;
 mod lsp_frame;
+mod marketplace;
 mod mission;
 mod model_runtime;
 mod paths;
@@ -50,6 +51,7 @@ pub fn run() {
             lsp::lsp_send,
             lsp::lsp_registry,
             lsp::lsp_stop,
+            marketplace::marketplace_catalog,
             mission::list_mission_logs,
             mission::read_mission_log,
             github_queue::pair_github_queue,

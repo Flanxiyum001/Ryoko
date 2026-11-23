@@ -1,0 +1,17 @@
+[package]
+name = "ryoko-orchestrator"
+description = "Deterministic durable DAG task planner for Ryoko"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryoko-storage = { path = "../ryoko-storage" }
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -23,6 +23,7 @@ import {
   resolveKeybindings,
 } from './keybindings';
 import { mountConnectors } from './connectors_panel';
+import { mountMarketplaceBrowser } from './marketplace_browser';
 import { mountGithubQueue } from './github_queue';
 import {
   focusMissionTasks,
@@ -251,11 +252,14 @@ const workbenchLayout = document.querySelector<HTMLElement>('.layout')!;
 const inspectorPane = element('inspectorPane');
 const railButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.rail-button'));
 
-function activateView(view: string): void {
+type WorkbenchView = 'explorer' | 'editor' | 'mission' | 'changes' | 'problems' | 'settings';
+
+function activateView(view: WorkbenchView): void {
   if (view === 'settings') {
     openSettings.click();
     return;
   }
+  workbenchLayout.dataset.activeView = view;
   workbenchLayout.classList.toggle('hide-explorer', view !== 'explorer');
   workbenchLayout.classList.toggle('hide-inspector', view === 'explorer' || view === 'editor');
   for (const button of railButtons) {
@@ -274,7 +278,13 @@ function activateView(view: string): void {
   requestAnimationFrame(() => editor.layout());
 }
 
-railButtons.forEach((button) => button.addEventListener('click', () => activateView(button.dataset.view!)));
+railButtons.forEach((button) => button.addEventListener('click', () => {
+  const view = button.dataset.view;
+  if (view === 'explorer' || view === 'editor' || view === 'mission' ||
+      view === 'changes' || view === 'problems' || view === 'settings') {
+    activateView(view);
+  }
+}));
 element<HTMLButtonElement>('emptyOpenFolder').addEventListener('click', () => openFolderButton.click());
 
 const state: {
@@ -1994,6 +2004,7 @@ setLspState('offline');
 renderMissionOptions();
 mountGithubQueue(setStatus);
 mountConnectors(setStatus);
+mountMarketplaceBrowser(setStatus);
 mountSearchPanel({ openFile, setStatus });
 mountSettingsDialog({ setStatus });
 registerMonacoCapabilities(

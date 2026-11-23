@@ -14,12 +14,13 @@
       <div class="top-actions">
         <button id="openFolder" class="button primary" type="button">Open folder…</button>
         <button id="saveFile" class="button ghost" type="button" disabled>Save</button>
+        <button id="openMarketplace" class="button ghost" type="button">Marketplace</button>
         <button id="openSettings" class="button ghost" type="button">Settings</button>
         <span class="shortcut-hint">⌘S / Ctrl+S</span>
       </div>
     </header>
 
-    <div class="layout">
+    <div class="layout hide-inspector" data-active-view="explorer">
       <nav class="activity-rail" aria-label="Workbench views">
         <button class="rail-button active" type="button" data-view="explorer" aria-label="Show explorer" aria-pressed="true" title="Explorer">▤<span>Files</span></button>
         <button class="rail-button" type="button" data-view="editor" aria-label="Show editor" aria-pressed="false" title="Editor">⌘<span>Editor</span></button>
