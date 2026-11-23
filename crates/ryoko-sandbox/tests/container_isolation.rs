@@ -22,7 +22,11 @@ async fn container_blocks_host_escape_and_network_but_writes_worktree() {
     fs::write(&outside, "outside-worktree-secret").unwrap();
     std::os::unix::fs::symlink(&outside, worktree.join("escape")).unwrap();
 
-    let sandbox = BuildSandbox::new(BuildBackend::Docker, Some(image));
+    let pinned = BuildSandbox::new(BuildBackend::Docker, None)
+        .image_id(&image)
+        .await
+        .expect("CI image must resolve to a local digest");
+    let sandbox = BuildSandbox::new(BuildBackend::Docker, Some(pinned));
     // Any of these operations succeeding must fail the validation.
     let command = "test ! -e /workspace/escape \
         && ! cat /workspace/escape >/dev/null 2>&1 \
@@ -68,7 +72,11 @@ async fn browser_scratch_space_and_artifact_mount_are_available() {
     fs::create_dir(&worktree).unwrap();
     let artifacts = base.path().join(".ryoko/artifacts/task-1");
 
-    let sandbox = BuildSandbox::new(BuildBackend::Docker, Some(image)).with_artifacts(&artifacts);
+    let pinned = BuildSandbox::new(BuildBackend::Docker, None)
+        .image_id(&image)
+        .await
+        .expect("CI image must resolve to a local digest");
+    let sandbox = BuildSandbox::new(BuildBackend::Docker, Some(pinned)).with_artifacts(&artifacts);
     let command = "test -w /tmp \
         && test -w /ryoko-artifacts \
         && test \"$(df -k /dev/shm | tail -1 | awk '{print $2}')\" -gt 200000 \
