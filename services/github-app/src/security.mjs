@@ -5,6 +5,7 @@ export const READ_PERMISSIONS = Object.freeze({
 });
 export const WRITE_PERMISSIONS = Object.freeze({ contents: 'write' });
 export const PR_PERMISSIONS = Object.freeze({ pull_requests: 'write' });
+export const ISSUE_PERMISSIONS = Object.freeze({ issues: 'write' });
 export const CLONE_PERMISSIONS = Object.freeze({ contents: 'read' });
 
 const unsafe = (message) => Object.assign(new Error(message), { status: 400 });
