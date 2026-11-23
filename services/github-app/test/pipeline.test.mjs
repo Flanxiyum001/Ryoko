@@ -7,6 +7,7 @@ import { buildPullRequestBody, buildRunArgs, issueAgentRequest, runIssuePipeline
 
 const payload = {
   action: 'labeled',
+  label: { name: 'ryoko:agent' },
   installation: { id: 17 },
   repository: { id: 41, full_name: 'approved-owner/repo', default_branch: 'main' },
   issue: {
@@ -19,7 +20,7 @@ const payload = {
 
 test('either agent label starts an issue pipeline', () => {
   for (const name of ['ryoko-fix', 'ryoko:agent']) {
-    const labeled = { ...payload, issue: { ...payload.issue, labels: [{ name }] } };
+    const labeled = { ...payload, label: { name }, issue: { ...payload.issue, labels: [{ name }] } };
     assert.equal(issueAgentRequest('issues', labeled)?.number, 9, name);
   }
   assert.equal(issueAgentRequest('issues', {
@@ -32,6 +33,9 @@ test('only a human agent label starts an issue pipeline', () => {
   assert.equal(request.repoId, 41);
   assert.equal(request.number, 9);
   assert.equal(issueAgentRequest('pull_request', payload), null);
+  assert.equal(issueAgentRequest('issues', { ...payload, action: 'opened' }), null);
+  assert.equal(issueAgentRequest('issues', { ...payload, label: { name: 'bug' } }), null);
+  assert.equal(issueAgentRequest('issues', { ...payload, issue: { ...payload.issue, state: 'closed' } }), null);
   assert.equal(issueAgentRequest('issues', { ...payload, action: 'closed' }), null);
   assert.equal(issueAgentRequest('issues', {
     ...payload, issue: { ...payload.issue, labels: [{ name: 'bug' }] },
