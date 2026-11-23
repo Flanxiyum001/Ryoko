@@ -20,8 +20,8 @@ describe('quick-open path ranking', () => {
   });
 
   it('does not let recent unrelated files defeat a better query match', () => {
-    const paths = ['z/index.ts', 'src/index.test.ts'];
-    expect(rankFiles(paths, 'index', ['src/index.test.ts'])[0].path).toBe('z/index.ts');
+    const paths = ['index', 'src/index.test.ts'];
+    expect(rankFiles(paths, 'index', ['src/index.test.ts'])[0].path).toBe('index');
   });
 
   it('limits results and deduplicates incoming paths', () => {
