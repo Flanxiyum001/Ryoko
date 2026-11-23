@@ -142,7 +142,15 @@ pub fn terminal_start(
                 Ok(read) => {
                     let data = decoder.push(&buffer[..read]);
                     if !data.is_empty()
-                        && app.emit("ryoko-terminal-output", TerminalOutput { session_id: id, data }).is_err()
+                        && app
+                            .emit(
+                                "ryoko-terminal-output",
+                                TerminalOutput {
+                                    session_id: id,
+                                    data,
+                                },
+                            )
+                            .is_err()
                     {
                         return;
                     }
@@ -152,7 +160,13 @@ pub fn terminal_start(
         }
         let trailing = decoder.finish();
         if !trailing.is_empty() {
-            let _ = app.emit("ryoko-terminal-output", TerminalOutput { session_id: id, data: trailing });
+            let _ = app.emit(
+                "ryoko-terminal-output",
+                TerminalOutput {
+                    session_id: id,
+                    data: trailing,
+                },
+            );
         }
     });
 
