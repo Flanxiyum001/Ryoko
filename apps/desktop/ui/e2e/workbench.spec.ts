@@ -184,3 +184,30 @@ test('explorer shows file-type icons and breadcrumbs for the active file', async
   await expect(page.getByRole('tab', { name: 'main.ts', exact: true }).locator('.file-icon')).toHaveText('TS');
   await expect(page.getByRole('navigation', { name: 'Breadcrumbs' })).toContainText('main.ts');
 });
+
+test('an available update is announced and installs only when the user asks', async ({ page }) => {
+  await page.addInitScript(() => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const original = internals.invoke;
+    internals.invoke = async (command: string, args?: unknown) => {
+      if (command === 'update_status') return { configured: true, currentVersion: '0.1.0-alpha.8' };
+      if (command === 'update_check') {
+        return { version: '0.1.0-alpha.9', currentVersion: '0.1.0-alpha.8', notes: '<b>New</b> command palette', date: null };
+      }
+      if (command === 'update_install') { document.body.dataset.installed = 'yes'; return null; }
+      return original(command, args);
+    };
+  });
+  await page.goto('/');
+  await expect(page.locator('body')).not.toHaveAttribute('data-installed', 'yes');
+  await page.locator('#menu-help').click();
+  await page.getByRole('menuitem', { name: /Check for Updates/ }).click();
+  const notice = page.getByRole('dialog', { name: 'A new update is available' });
+  await expect(notice).toContainText('Ryoko 0.1.0-alpha.9 is ready to install. You have 0.1.0-alpha.8.');
+  await expect(page.locator('#updateStatus')).toHaveText('⬆ Update 0.1.0-alpha.9');
+  await notice.getByRole('button', { name: 'Release notes' }).click();
+  await expect(notice.locator('.update-notes')).toHaveText('<b>New</b> command palette');
+  await expect(page.locator('body')).not.toHaveAttribute('data-installed', 'yes');
+  await notice.getByRole('button', { name: 'Download and install' }).click();
+  await expect(page.locator('body')).toHaveAttribute('data-installed', 'yes');
+});

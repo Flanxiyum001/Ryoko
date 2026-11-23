@@ -138,6 +138,8 @@ pub const MENUS: &[(&str, &[Entry])] = &[
         &[
             Command("help.welcome", "Welcome", None),
             Command("help.keyboardShortcuts", "Keyboard Shortcuts", None),
+            Separator,
+            Command("help.checkForUpdates", "Check for Updates…", None),
         ],
     ),
 ];

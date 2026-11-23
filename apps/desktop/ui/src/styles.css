@@ -1089,3 +1089,27 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
 /* Brand: the dragon logo (ui/public/ryoko-logo.png). */
 img.brand-mark { width: 22px; height: 22px; padding: 0; border-radius: 5px; background: none; object-fit: cover; }
 img.empty-mark { width: 112px; height: 112px; border-radius: 22px; object-fit: cover; box-shadow: 0 8px 30px rgb(255 40 40 / 18%); }
+
+/* Update notice and status bar item. */
+.status-update { border: 0; padding: 0 8px; height: 100%; background: rgb(255 255 255 / 16%); color: inherit; font: inherit; cursor: pointer; }
+.status-update:hover { background: rgb(255 255 255 / 26%); }
+.status-update.hidden { display: none; }
+.update-notice {
+  position: fixed; right: 16px; bottom: 34px; z-index: 1300; width: min(420px, calc(100vw - 32px));
+  padding: 14px 16px 12px; color: var(--text); background: var(--menu-bg);
+  border: 1px solid var(--input-border); border-left: 3px solid var(--accent); border-radius: 6px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 35%);
+}
+.update-notice[hidden] { display: none; }
+.update-notice h2 { margin: 0 24px 6px 0; font-size: 14px; font-weight: 600; color: var(--text-strong); }
+.update-detail { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.update-notes {
+  max-height: 180px; overflow: auto; margin: 0 0 10px; padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--editor-bg); border: 1px solid var(--border); border-radius: 4px;
+}
+.update-progress { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.update-progress:empty { display: none; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.update-close { position: absolute; top: 8px; right: 8px; border: 0; background: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+.update-close:hover { color: var(--text-strong); }
+.settings-updates { font-size: 12px; margin-right: 10px; }

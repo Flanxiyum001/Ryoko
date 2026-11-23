@@ -12,6 +12,7 @@ import { LspClient, type LspState, type LspServerStatus } from './lsp';
 import { registerMonacoCapabilities } from './lsp_bridge';
 import { CommandRegistry, formatChord, type WorkbenchCommand } from './commands';
 import { mountCommandPalette } from './command_palette';
+import { mountUpdates } from './update_view';
 import { mountMenuBar } from './menu_bar';
 import { DEFAULT_LAYOUT, loadLayout, resizeBy, saveLayout } from './layout_state';
 import { fileIconElement } from './file_icons';
@@ -2614,6 +2615,13 @@ const definitions: WorkbenchCommand[] = [
     },
   },
 ];
+const updates = mountUpdates({
+  setStatus,
+  unsavedFiles: () => [...openFiles.values()].filter((file) => file.dirty).map((file) => file.path),
+  statusHost: document.querySelector<HTMLElement>('.statusbar')!,
+  settingsHost: document.getElementById('settingsUpdates'),
+});
+definitions.push({ id: 'help.checkForUpdates', category: 'Help', title: 'Check for Updates…', run: () => updates.checkNow() });
 for (const command of definitions) commands.register(command);
 
 const palette = mountCommandPalette({ registry: commands, shortcutFor, setStatus });
