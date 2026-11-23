@@ -29,8 +29,6 @@ Additional labels below are **proposed taxonomy, not automatically provisioned**
 
 Until those custom labels exist, the `**Triage:**` footer in each maintainer-authored issue records priority, area, approximate effort and dependencies. Do not silently treat a planned label as an existing GitHub label. Avoid multiple priority labels on one issue, and remove stale status labels during triage.
 
-> **Agent automation warning:** The `ryoko-fix` label is an explicit trigger for the experimental issue-to-draft-PR pipeline when the GitHub App broker is configured. **Never automatically apply it** via issue forms or bulk triage. Only the maintainer should opt a reviewed issue into this workflow after confirming sandbox, credential and cost controls. See [GitHub App documentation](GITHUB_APP.md).
-
 ## Priority and readiness
 
 - **P0:** Review first; security-sensitive details belong in private [security reports](../SECURITY.md), not public tickets.
