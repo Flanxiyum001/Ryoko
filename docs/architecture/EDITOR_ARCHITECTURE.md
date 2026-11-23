@@ -1,7 +1,9 @@
 # Editor architecture
 
-Status: the LSP server and virtual document store exist; the desktop editor does
-not.
+Status: Monaco desktop editing, multi-server LSP, integrated PTY, DAP bridge
+and opt-in native code task runner exist in pre-alpha. Durable editor recovery
+and full cross-platform parity remain incomplete. See
+[Polyglot workbench](POLYGLOT_WORKBENCH.md).
 
 ## Layering
 
