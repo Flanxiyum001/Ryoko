@@ -370,13 +370,13 @@ mod tests {
         router.register(mock);
 
         let first = router
-            .complete(ChatRequest::new("mock-1"))
+            .complete(ChatRequest::new("mock-1").with_max_tokens(1_000))
             .await
             .unwrap_err();
         assert!(matches!(first, ModelError::BudgetExceeded { .. }));
 
         let err = router
-            .complete(ChatRequest::new("mock-1"))
+            .complete(ChatRequest::new("mock-1").with_max_tokens(1_000))
             .await
             .unwrap_err();
         assert!(matches!(err, ModelError::BudgetExceeded { .. }));
