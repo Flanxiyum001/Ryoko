@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=24.15.0" },
   "scripts": {
     "start": "node src/index.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/security.mjs && node --check src/github.mjs && node --check src/clone.mjs && node --check src/server.mjs && node --check src/index.mjs && node --check src/agent-client.mjs && node --check src/pipeline.mjs && node --check src/bot.mjs && node --check src/ci-gates.mjs && node --check src/durable-queue.mjs && node --check src/approval-store.mjs && node --check src/agent-mcp.mjs && node --check src/agent-mcp-stdio.mjs"
+    "check": "node --check src/security.mjs && node --check src/github.mjs && node --check src/clone.mjs && node --check src/server.mjs && node --check src/index.mjs && node --check src/agent-client.mjs && node --check src/pipeline.mjs && node --check src/bot.mjs && node --check src/ci-gates.mjs && node --check src/durable-queue.mjs && node --check src/approval-store.mjs && node --check src/agent-mcp.mjs && node --check src/agent-mcp-stdio.mjs && node --check src/production-state.mjs && node --check src/worker-loop.mjs"
   }
 }
