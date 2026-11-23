@@ -499,6 +499,15 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     }
     // An IDE task need not originate from a GitHub issue. A human chooses
     // the repository and exact goal; agents still publish draft PRs only.
+    if (req.method === 'GET' && path === '/api/desktop/authorized-repository') {
+      const session = requireDesktop(req);
+      const installationId = positiveId(url.searchParams.get('installationId'), 'installation');
+      const repoId = positiveId(url.searchParams.get('repoId'), 'repository');
+      const repo = await client.authorizedRepo(session.token, installationId, repoId);
+      return json(res, 200, {
+        installationId, repoId, repository: String(repo.full_name || '').slice(0, 180),
+      });
+    }
     if (req.method === 'POST' && path === '/api/desktop/goals') {
       const session = requireDesktop(req);
       const input = await jsonBody(req);
