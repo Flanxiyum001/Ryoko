@@ -19,6 +19,7 @@ import {
 } from './changes_view';
 import { mountSettingsDialog } from './settings_view';
 import { InlineEditController } from './inline_edit_view';
+import { DebugViewController } from './debug_view';
 import {
   chordForEvent,
   loadOverrides,
@@ -90,9 +91,24 @@ interface GitHunk {
   new_lines: number;
 }
 
+interface ReviewFile {
+  path: string;
+  oldPath?: string;
+  state: string;
+  stateLabel: string;
+  editable: boolean;
+  hunkIds: number[];
+}
+
+interface ReviewActionReport {
+  action: string;
+  files: { path: string; hunkIds: number[] }[];
+}
+
 interface GitHunkSnapshot {
   patch: string;
   hunks: GitHunk[];
+  files: ReviewFile[];
 }
 
 interface ReviewFileContent {
@@ -147,21 +163,6 @@ interface CodeRunOutput {
   sessionId: number;
   stream: 'stdout' | 'stderr' | 'system';
   data: string;
-}
-
-interface DapMessage {
-  sessionId: number;
-  message: string;
-}
-
-interface DapLog {
-  sessionId: number;
-  message: string;
-}
-
-interface DapStatus {
-  running: boolean;
-  sessionId: number | null;
 }
 
 interface SandboxInitResult {
@@ -256,18 +257,6 @@ const terminalStop = element<HTMLButtonElement>('terminalStop');
 const toggleTerminal = element<HTMLButtonElement>('toggleTerminal');
 const toggleDebug = element<HTMLButtonElement>('toggleDebug');
 const debugPanel = element('debugPanel');
-const debugAdapter = element<HTMLInputElement>('debugAdapter');
-const debugArgs = element<HTMLInputElement>('debugArgs');
-const debugProgram = element<HTMLInputElement>('debugProgram');
-const debugStart = element<HTMLButtonElement>('debugStart');
-const debugStop = element<HTMLButtonElement>('debugStop');
-const debugContinue = element<HTMLButtonElement>('debugContinue');
-const debugNext = element<HTMLButtonElement>('debugNext');
-const debugStepIn = element<HTMLButtonElement>('debugStepIn');
-const debugStepOut = element<HTMLButtonElement>('debugStepOut');
-const debugBreakpoint = element<HTMLButtonElement>('debugBreakpoint');
-const debugStatus = element('debugStatus');
-const debugLog = element('debugLog');
 const inlineEditRun = element<HTMLButtonElement>('inlineEditRun');
 const inlineEditCancel = element<HTMLButtonElement>('inlineEditCancel');
 const inlineEditAccept = element<HTMLButtonElement>('inlineEditAccept');
@@ -347,12 +336,6 @@ let codeStarting = false;
 let codeStatusPolling = false;
 let pendingCodeOutput: CodeRunOutput[] = [];
 let codeOutputText = '';
-let dapStatusPolling = false;
-let dapSessionId: number | null = null;
-let dapSeq = 0;
-let dapThreadId = 1;
-let dapActive = false;
-const debugBreakpoints = new Map<string, Set<number>>();
 
 const openFiles = new Map<string, OpenFile>();
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
@@ -738,151 +721,31 @@ async function stopTerminal(): Promise<void> {
   }
 }
 
-function appendDebug(line: string): void {
-  const next = `${debugLog.textContent ?? ''}${line}\n`;
-  const lines = next.split('\n');
-  debugLog.textContent = lines.slice(Math.max(0, lines.length - 300)).join('\n');
-  debugLog.scrollTop = debugLog.scrollHeight;
-}
-
-function updateDapButtons(running: boolean): void {
-  dapActive = running;
-  debugStart.disabled = running;
-  debugStop.disabled = !running;
-  debugContinue.disabled = !running;
-  debugNext.disabled = !running;
-  debugStepIn.disabled = !running;
-  debugStepOut.disabled = !running;
-  debugBreakpoint.disabled = !running;
-}
-
-async function sendDap(command: string, args?: Record<string, unknown>): Promise<void> {
-  dapSeq += 1;
-  const message = JSON.stringify({
-    seq: dapSeq,
-    type: 'request',
-    command,
-    ...(args ? { arguments: args } : {}),
-  });
-  appendDebug(`→ ${message}`);
-  await invoke('dap_send', { message });
-}
-
-async function startDebug(): Promise<void> {
-  const adapter = debugAdapter.value.trim();
-  if (!adapter) {
-    debugStatus.textContent = 'Enter a DAP adapter executable first.';
-    return;
-  }
-  try {
-    showBottom('debug');
-    const args = debugArgs.value.trim().split(/\s+/).filter(Boolean);
-    const status = await invoke<DapStatus>('dap_start', { adapter, args });
-    dapSessionId = status.sessionId;
-    dapSeq = 0;
-    updateDapButtons(true);
-    debugStatus.textContent = 'Adapter started; initializing…';
-    await sendDap('initialize', {
-      adapterID: 'ryoko',
-      clientID: 'ryoko-desktop',
-      linesStartAt1: true,
-      columnsStartAt1: true,
-      pathFormat: 'path',
-      supportsRunInTerminalRequest: false,
+async function openFileAtLine(path: string, line: number, column?: number): Promise<void> {
+  const root = state.root.replace(/\\/g, '/').replace(/\/+$/, '');
+  const candidate = path.replace(/\\/g, '/');
+  const relative = candidate.startsWith(root + '/') ? candidate.slice(root.length + 1) : candidate;
+  await openFile(relative);
+  if (line > 0) {
+    editor.revealLineInCenter(line);
+    editor.setPosition({
+      lineNumber: line,
+      column: column && column > 0 ? column : 1,
     });
-  } catch (error) {
-    await invoke('dap_stop').catch(() => undefined);
-    dapSessionId = null;
-    updateDapButtons(false);
-    debugStatus.textContent = `Debug adapter unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    editor.focus();
   }
 }
 
-async function launchDap(): Promise<void> {
-  const program = debugProgram.value.trim();
-  if (!program) {
-    debugStatus.textContent = 'Adapter initialized. Set a program path and restart to launch it.';
-    return;
-  }
-  const absolute = program.startsWith('/') || /^[A-Za-z]:[\\/]/.test(program);
-  try {
-    await sendDap('launch', {
-      program: absolute ? program : joinWorkspacePath(state.root, program),
-      cwd: state.root,
-      args: [],
-      stopOnEntry: false,
-    });
-    await sendDap('configurationDone');
-    debugStatus.textContent = 'Launch requested';
-  } catch (error) {
-    debugStatus.textContent = `Launch failed: ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
-
-function handleDapMessage(payload: DapMessage): void {
-  if (dapSessionId === null || payload.sessionId !== dapSessionId) return;
-  appendDebug(`← ${payload.message}`);
-  let value: Record<string, unknown>;
-  try {
-    value = JSON.parse(payload.message) as Record<string, unknown>;
-  } catch {
-    return;
-  }
-  if (value.type === 'event') {
-    const event = String(value.event ?? '');
-    if (event === 'initialized') {
-      debugStatus.textContent = 'Adapter initialized';
-      void launchDap();
-    } else if (event === 'stopped') {
-      const body = value.body as Record<string, unknown> | undefined;
-      if (typeof body?.threadId === 'number') dapThreadId = body.threadId;
-      debugStatus.textContent = `Stopped: ${String(body?.reason ?? 'paused')}`;
-    } else if (event === 'continued') {
-      debugStatus.textContent = 'Running';
-    } else if (event === 'terminated' || event === 'exited') {
-      debugStatus.textContent = 'Session ended';
-      updateDapButtons(false);
-    }
-  } else if (value.type === 'response' && value.success === false) {
-    debugStatus.textContent = `DAP ${String(value.command)} failed: ${String(value.message ?? '')}`;
-  }
-}
-
-async function stopDebug(): Promise<void> {
-  await invoke('dap_stop').catch(() => undefined);
-  dapSessionId = null;
-  updateDapButtons(false);
-  debugStatus.textContent = 'Debug adapter stopped';
-}
-
-async function dapStep(command: string): Promise<void> {
-  if (!dapActive) return;
-  try {
-    await sendDap(command, { threadId: dapThreadId });
-  } catch (error) {
-    debugStatus.textContent = String(error);
-  }
-}
-
-async function toggleBreakpoint(): Promise<void> {
-  const file = state.current;
-  const position = editor.getPosition();
-  if (!file || !position || !dapActive) return;
-  const absolute = joinWorkspacePath(state.root, file.path);
-  const lines = debugBreakpoints.get(absolute) ?? new Set<number>();
-  if (lines.has(position.lineNumber)) lines.delete(position.lineNumber);
-  else lines.add(position.lineNumber);
-  debugBreakpoints.set(absolute, lines);
-  try {
-    await sendDap('setBreakpoints', {
-      source: { path: absolute, name: file.path },
-      breakpoints: [...lines].sort((a, b) => a - b).map((line) => ({ line })),
-    });
-    debugStatus.textContent = `Breakpoints in ${file.path}: ${lines.size}`;
-  } catch (error) {
-    debugStatus.textContent = String(error);
-  }
-}
+const debugController = new DebugViewController({
+  openFileAtLine,
+  getCurrentFile: () => (state.current ? { path: state.current.path } : null),
+  getEditorLine: () => editor.getPosition()?.lineNumber ?? null,
+  getWorkspaceRoot: () => state.root,
+  setStatus,
+  showBottom,
+  joinWorkspacePath,
+});
+debugController.mount();
 
 function setLspState(connection: LspState, detail?: string): void {
   lspStatus.className = 'status-pill ' + connection;
@@ -1017,7 +880,7 @@ async function openFolder(): Promise<void> {
     await lsp.stop();
     quickOpen.close();
     await stopTerminal();
-    await stopDebug();
+    await debugController.resetOnWorkspaceSwitch();
     await stopCodeTask();
     for (const timer of changeTimers.values()) window.clearTimeout(timer);
     changeTimers.clear();
@@ -1174,11 +1037,25 @@ async function refreshHunks(): Promise<void> {
     if (openedRoot !== state.root) return;
     gitHunks = snapshot;
     hunkList.replaceChildren();
-    hunkCount.textContent = String(snapshot.hunks.length);
+    hunkCount.textContent = String(
+      snapshot.hunks.length + snapshot.files.filter((file) => !file.editable).length,
+    );
+    for (const file of snapshot.files) {
+      if (file.editable) continue;
+      const item = document.createElement('div');
+      item.className = 'hunk-item hunk-file-lock';
+      const title = document.createElement('span');
+      title.className = 'hunk-title';
+      title.textContent = '[' + file.state + '] ' + file.path + ' — ' + file.stateLabel;
+      item.append(title);
+      hunkList.append(item);
+    }
     if (snapshot.hunks.length === 0) {
       const hint = document.createElement('p');
       hint.className = 'hint';
-      hint.textContent = 'No unstaged selectable text hunks. Binary, rename and mode changes are excluded.';
+      hint.textContent = snapshot.files.some((file) => !file.editable)
+        ? 'Only the non-editable changes above are present. Selectable text hunks appear here after refresh.'
+        : 'No unstaged selectable text hunks. Binary, rename and mode changes stay listed above.';
       hunkList.append(hint);
       return;
     }
@@ -1229,9 +1106,16 @@ async function stageSelectedHunks(): Promise<void> {
   hunkStage.disabled = true;
   const ids = chosenHunks();
   try {
-    await invoke('stage_review_hunks', { ids, expectedPatch: gitHunks.patch });
+    const report = await invoke<ReviewActionReport>('stage_review_hunks', {
+      ids,
+      expectedPatch: gitHunks.patch,
+    });
     void refreshWorkbenchChanges();
-    setStatus('Staged ' + ids.length + ' selected text hunk(s) in Git index. No commit or merge was made.');
+    const files = report.files.map((file) => file.path).join(', ');
+    setStatus(
+      'Staged ' + ids.length + ' selected text hunk(s) in Git index (files: ' + files
+      + '). No commit or merge was made.',
+    );
     await refreshHunks();
   } catch (error) {
     setStatus('Staging denied or failed: ' + (error instanceof Error ? error.message : String(error)));
@@ -1419,13 +1303,25 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
   }
   try {
     if (action === 'accept') {
-      await invoke('stage_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      const report = await invoke<ReviewActionReport>('stage_review_hunks', {
+        ids: [hunk.id],
+        expectedPatch: gitHunks.patch,
+      });
       void refreshWorkbenchChanges();
-      setStatus(`Accepted hunk #${hunk.id} into the Git index. No commit or merge was made.`);
+      setStatus(
+        `Accepted hunk #${hunk.id} in ${report.files.map((file) => file.path).join(', ') || hunk.path}`
+        + ' into the Git index. No commit or merge was made.',
+      );
     } else {
-      await invoke('reject_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      const report = await invoke<ReviewActionReport>('reject_review_hunks', {
+        ids: [hunk.id],
+        expectedPatch: gitHunks.patch,
+      });
       void refreshWorkbenchChanges();
-      setStatus(`Rejected hunk #${hunk.id}; only those working-file edits were reverted.`);
+      setStatus(
+        `Rejected hunk #${hunk.id} in ${report.files.map((file) => file.path).join(', ') || hunk.path}`
+        + '; only those working-file edits were reverted.',
+      );
     }
     await refreshHunks();
     const remaining = gitHunks?.hunks.find((item) => item.id === hunk.id);
@@ -2103,6 +1999,9 @@ function dispatchBinding(action: string): void {
     case 'workbench.changes':
       activateView('changes');
       break;
+    case 'workbench.debug':
+      showBottom('debug');
+      break;
     case 'workbench.settings':
       openSettings.click();
       break;
@@ -2116,6 +2015,35 @@ function dispatchBinding(action: string): void {
 
 window.addEventListener('keydown', (event) => {
   if (event.repeat) return;
+  if (event.key === 'F5' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('continue');
+      return;
+    }
+  } else if (event.key === 'F10' && !event.ctrlKey && !event.metaKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('next');
+      return;
+    }
+  } else if (event.key === 'F11' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('stepIn');
+      return;
+    }
+  } else if (event.key === 'F11' && event.shiftKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('stepOut');
+      return;
+    }
+  } else if (event.key === 'F9') {
+    event.preventDefault();
+    void debugController.toggleCurrentBreakpoint();
+    return;
+  }
   const action = keybindings.byChord.get(chordForEvent(event));
   if (!action || action === 'editor.save') return;
   event.preventDefault();
@@ -2152,27 +2080,6 @@ terminalStart.addEventListener('click', () => {
 terminalStop.addEventListener('click', () => {
   void stopTerminal();
 });
-debugStart.addEventListener('click', () => {
-  void startDebug();
-});
-debugStop.addEventListener('click', () => {
-  void stopDebug();
-});
-debugContinue.addEventListener('click', () => {
-  void dapStep('continue');
-});
-debugNext.addEventListener('click', () => {
-  void dapStep('next');
-});
-debugStepIn.addEventListener('click', () => {
-  void dapStep('stepIn');
-});
-debugStepOut.addEventListener('click', () => {
-  void dapStep('stepOut');
-});
-debugBreakpoint.addEventListener('click', () => {
-  void toggleBreakpoint();
-});
 
 void listen<CodeRunOutput>('ryoko-code-output', (event) => {
   if (event.payload.sessionId === codeSessionId) {
@@ -2199,12 +2106,6 @@ void listen<FimError>('ryoko-fim-error', (event) => {
   hideFim(false);
   setStatus(`Completion unavailable: ${event.payload.message}`);
 });
-void listen<DapMessage>('ryoko-dap-message', (event) => handleDapMessage(event.payload));
-void listen<DapLog>('ryoko-dap-log', (event) => {
-  if (dapSessionId !== null && event.payload.sessionId === dapSessionId && event.payload.message) {
-    appendDebug(`[adapter] ${event.payload.message}`);
-  }
-});
 
 async function pollTerminalStatus(): Promise<void> {
   if (terminalSessionId === null || terminalStarting || terminalStatusPolling) return;
@@ -2227,21 +2128,7 @@ async function pollTerminalStatus(): Promise<void> {
 }
 
 async function pollDebugStatus(): Promise<void> {
-  if (dapSessionId === null || dapStatusPolling) return;
-  dapStatusPolling = true;
-  const observedId = dapSessionId;
-  try {
-    const status = await invoke<DapStatus>('dap_status');
-    if (!status.running && dapSessionId === observedId) {
-      dapSessionId = null;
-      updateDapButtons(false);
-      debugStatus.textContent = 'Debug adapter exited';
-    }
-  } catch (error) {
-    debugStatus.textContent = 'Debug status unavailable: ' + String(error);
-  } finally {
-    dapStatusPolling = false;
-  }
+  debugController.pollStatus();
 }
 
 window.setInterval(() => {
@@ -2264,6 +2151,7 @@ refreshRunStatus();
 
 window.addEventListener('beforeunload', () => {
   void lsp.stop();
+  debugController.unmount();
   void invoke('terminal_stop').catch(() => undefined);
   void invoke('dap_stop').catch(() => undefined);
   void invoke('code_run_stop').catch(() => undefined);

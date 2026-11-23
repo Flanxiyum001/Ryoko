@@ -20,6 +20,7 @@ accepted. An ADR is superseded, not edited, when the decision changes.
 | 013 | Durable event journal | In-memory broadcast only | Recovery and replay; storage and retention work |
 | 014 | Versioned plugin API before a marketplace | Ship a marketplace early | Stability; slower ecosystem growth |
 | 015 | Desktop LSP multiplexer routes per method, not per process | One multiplexer server; Monaco native providers only | One provider per language and fan-out sync; small routing layer to keep in sync with LSP |
+| 016 | Main branch protection ruleset and maintainer review policy | Classic branch protection without rulesets; permissive admin bypass | Atomic ruleset with 7 required CI checks, zero admin bypass, and explicit sole-maintainer merge review |
 
 ## Format for new ADRs
 

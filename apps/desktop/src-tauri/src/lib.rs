@@ -92,6 +92,7 @@ pub fn run() {
             debug_adapter::dap_send,
             debug_adapter::dap_status,
             debug_adapter::dap_stop,
+            debug_adapter::dap_restart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Ryoko desktop shell");
