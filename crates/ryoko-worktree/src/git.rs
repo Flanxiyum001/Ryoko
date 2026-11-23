@@ -1463,10 +1463,16 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
         let normalized = relative.to_string_lossy().replace('\\', "/");
         let key = normalized.to_ascii_lowercase();
         if !seen.insert(key.clone()) {
-            return Err(invalid(format!("duplicate proposed file path: {}", change.path)));
+            return Err(invalid(format!(
+                "duplicate proposed file path: {}",
+                change.path
+            )));
         }
         if change.content.len() > MAX_FILE_BYTES {
-            return Err(invalid(format!("proposed file exceeds 2 MiB: {}", change.path)));
+            return Err(invalid(format!(
+                "proposed file exceeds 2 MiB: {}",
+                change.path
+            )));
         }
         total = total.saturating_add(change.content.len());
         if total > MAX_BATCH_BYTES {
@@ -1476,10 +1482,10 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     }
     for (i, (left, _, _)) in paths.iter().enumerate() {
         for (right, _, _) in paths.iter().skip(i + 1) {
-            if left.starts_with(&format!("{right}/"))
-                || right.starts_with(&format!("{left}/"))
-            {
-                return Err(invalid("proposed file conflicts with a proposed directory".into()));
+            if left.starts_with(&format!("{right}/")) || right.starts_with(&format!("{left}/")) {
+                return Err(invalid(
+                    "proposed file conflicts with a proposed directory".into(),
+                ));
             }
         }
     }
@@ -1497,8 +1503,7 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        std::fs::create_dir(&parent)
-                            .map_err(|error| invalid(error.to_string()))?;
+                        std::fs::create_dir(&parent).map_err(|error| invalid(error.to_string()))?;
                     }
                     Err(error) => return Err(invalid(error.to_string())),
                 }
@@ -1522,7 +1527,9 @@ fn apply_batch(root: &Path, changes: &[ProposedChange]) -> CoreResult<Vec<String
     let mut prepared = Vec::new();
     for (index, change) in changes.iter().enumerate() {
         let target = root.join(&paths[index].2);
-        let parent = target.parent().ok_or_else(|| invalid("missing parent".into()))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| invalid("missing parent".into()))?;
         let staged = parent.join(format!(".ryoko-stage-{batch_id}-{index}.tmp"));
         let backup = parent.join(format!(".ryoko-backup-{batch_id}-{index}.tmp"));
         let write = (|| -> std::io::Result<()> {
@@ -1614,7 +1621,9 @@ impl WorkspaceLease for GitWorktreeLease {
         let proposal = changes.to_vec();
         let applied = tokio::task::spawn_blocking(move || apply_batch(&root, &proposal))
             .await
-            .map_err(|error| CoreError::Workspace(format!("batch staging task failed: {error}")))??;
+            .map_err(|error| {
+                CoreError::Workspace(format!("batch staging task failed: {error}"))
+            })??;
         let mut paths = self
             .applied
             .lock()
@@ -1750,11 +1759,13 @@ mod tests {
             "fn main() {}\n"
         );
         for parent in [root.path().join("src"), root.path().join("tests")] {
-            assert!(
-                std::fs::read_dir(parent)
+            assert!(std::fs::read_dir(parent).unwrap().all(|entry| {
+                !entry
                     .unwrap()
-                    .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".ryoko-"))
-            );
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ryoko-")
+            }));
         }
     }
 
