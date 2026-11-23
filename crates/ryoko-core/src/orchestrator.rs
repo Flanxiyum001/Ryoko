@@ -31,7 +31,8 @@ use crate::memory::SharedMemory;
 use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
 use crate::review::{
     CODE_REVIEW_ROLE, INDEPENDENT_REVIEW_METADATA, REVIEW_TARGET_METADATA, ReviewRecord,
-    ReviewVerdict, SECURITY_REVIEW_ROLE, trusted_validation_evidence, validation_evidence_key,
+    ReviewVerdict, SECURITY_REVIEW_ROLE, review_record_key, trusted_validation_evidence,
+    validation_evidence_key,
 };
 use crate::team::{ARCHITECT_ROLE, BACKEND_ROLE, SECURITY_ROLE};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
@@ -124,6 +125,15 @@ pub struct RepairCycle {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ReviewOutcome {
+    pub task_id: Uuid,
+    /// False when a reviewer failed verification, proposed edits, or rejected
+    /// the implementation. The record remains a proposal, not trusted proof.
+    pub accepted: bool,
+    pub record: ReviewRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OrchestrationReport {
     pub run_id: Uuid,
     pub succeeded: Vec<TaskSuccess>,
@@ -136,6 +146,9 @@ pub struct OrchestrationReport {
     /// `failed`; this list explains what the loop already tried.
     #[serde(default)]
     pub needs_human_review: Vec<HumanReview>,
+    /// Structured records from both accepted and failed independent reviews.
+    #[serde(default)]
+    pub review_records: Vec<ReviewOutcome>,
     pub duration_ms: u64,
 }
 
@@ -412,6 +425,7 @@ impl Orchestrator {
             skipped: Vec::new(),
             repairs: Vec::new(),
             needs_human_review: Vec::new(),
+            review_records: Vec::new(),
             duration_ms: 0,
         };
 
@@ -468,6 +482,20 @@ impl Orchestrator {
         self.repair_review_failures(&mut report, &plan_tasks, &registry, &project, &memory)
             .await;
 
+        report.review_records = plan_tasks
+            .iter()
+            .filter(|task| task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA))
+            .filter_map(|task| {
+                let raw = memory.get(&review_record_key(task.id))?;
+                let record = ReviewRecord::parse(&raw).ok()?;
+                let accepted = report.succeeded.iter().any(|item| item.task_id == task.id);
+                Some(ReviewOutcome {
+                    task_id: task.id,
+                    accepted,
+                    record,
+                })
+            })
+            .collect();
         report.duration_ms = started_at.elapsed().as_millis() as u64;
         self.events.emit(OrchestratorEvent::RunFinished {
             run_id,
@@ -915,6 +943,18 @@ async fn execute_task(
             });
         }
         attempted_files = result.changes.iter().map(|c| c.path.clone()).collect();
+        if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+            let key = review_record_key(task.id);
+            if let Ok(record) = ReviewRecord::parse(&result.output) {
+                if let Ok(serialized) = serde_json::to_string(&record) {
+                    context.memory.insert(key, serialized);
+                } else {
+                    context.memory.remove(&key);
+                }
+            } else {
+                context.memory.remove(&key);
+            }
+        }
 
         if !result.success {
             let reason = result
@@ -1708,6 +1748,8 @@ mod tests {
         let proved = independent_review_run(Arc::new(ExecutedValidator), false).await;
         assert!(proved.all_succeeded(), "{:?}", proved.failed);
         assert_eq!(proved.successful_reviews().len(), 1);
+        assert_eq!(proved.review_records.len(), 1);
+        assert!(proved.review_records[0].accepted);
         assert_eq!(
             proved.successful_reviews()[0].1.verdict,
             ReviewVerdict::Pass
@@ -1724,6 +1766,8 @@ mod tests {
                 .contains("must not propose file changes")
         );
         assert!(report.successful_reviews().is_empty());
+        assert_eq!(report.review_records.len(), 1);
+        assert!(!report.review_records[0].accepted);
     }
 
     #[tokio::test]
