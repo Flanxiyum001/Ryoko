@@ -98,7 +98,37 @@ export function mountOnboarding(deps: OnboardingDeps): {
   }
 
   async function cloneRepository(): Promise<void> {
-    const value = window.prompt('HTTPS URL for the repository to clone:');
+    const value = await new Promise<string | null>((resolve) => {
+      const picker = document.createElement('dialog');
+      picker.className = 'setup-dialog clone-dialog';
+      picker.setAttribute('aria-label', 'Clone repository');
+      picker.innerHTML = `
+        <form method="dialog" class="clone-form">
+          <h2>Clone a repository</h2>
+          <p>Paste an HTTPS Git URL. Ryoko will ask where to place the clone.</p>
+          <label for="cloneUrl">Repository URL</label>
+          <input id="cloneUrl" type="url" required placeholder="https://github.com/owner/repository.git" spellcheck="false" autocomplete="url">
+          <div class="clone-actions">
+            <button type="button" class="button ghost" id="cloneCancel">Cancel</button>
+            <button type="submit" class="button primary">Choose destination…</button>
+          </div>
+        </form>`;
+      document.body.append(picker);
+      const input = picker.querySelector<HTMLInputElement>('#cloneUrl')!;
+      picker.querySelector<HTMLButtonElement>('#cloneCancel')!.addEventListener('click', () => picker.close());
+      picker.querySelector<HTMLFormElement>('.clone-form')!.addEventListener('submit', (event) => {
+        event.preventDefault();
+        if (input.checkValidity()) picker.close(input.value.trim());
+        else input.reportValidity();
+      });
+      picker.addEventListener('close', () => {
+        const choice = picker.returnValue || null;
+        picker.remove();
+        resolve(choice);
+      }, { once: true });
+      picker.showModal();
+      input.focus();
+    });
     if (!value) return;
     const parent = await open({ directory: true, multiple: false, title: 'Choose where to clone the repository' });
     if (typeof parent !== 'string') return;
