@@ -5,11 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Ryoko</title>
+  <link rel="icon" type="image/svg+xml" href="/ryoko-mark.svg">
 </head>
 <body>
+  <div id="startupSplash" class="startup-splash" aria-hidden="true"><img src="/ryoko-mark.svg" alt=""><span>RYOKO</span><small>PREPARING YOUR WORKSPACE</small></div>
   <div id="app">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/ryoko-mark.svg" alt=""></span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
       <button id="quickOpenButton" class="command-center" type="button" title="Quick open file (Ctrl+P / Cmd+P)"><span aria-hidden="true">⌕</span><span id="workspaceName">Search files in workspace</span><kbd>Ctrl / ⌘ P</kbd></button>
       <div class="top-actions">
         <button id="openFolder" class="button primary" type="button">Open folder…</button>
@@ -62,20 +64,30 @@
         </div>
         <div id="emptyEditor" class="empty-editor">
           <div class="welcome-content">
-            <div class="welcome-heading"><div class="empty-mark" aria-hidden="true">R</div><div><h1>Ryoko</h1><p>Your code. Your workspace.</p></div></div>
+            <div class="welcome-heading"><div class="empty-mark" aria-hidden="true"><img src="/ryoko-mark.svg" alt=""></div><div><h1>Ryoko</h1><p>Your code. Your workspace.</p></div></div>
             <div class="welcome-columns">
               <section class="welcome-start" aria-label="Get started">
                 <h2>Start</h2>
                 <button id="emptyOpenFolder" class="welcome-action" type="button"><span>Open folder…</span><span>Choose a local project</span></button>
+                <button id="welcomeClone" class="welcome-action" type="button"><span>Clone a repository…</span><span>Bring a Git repository onto your machine</span></button>
+                <button id="welcomeOnboarding" class="welcome-action" type="button"><span>Configure your AI provider</span><span>Secure keychain setup and a guided first task</span></button>
                 <button id="welcomeQuickOpen" class="welcome-action" type="button"><span>Go to file…</span><span>Find a file in your workspace</span></button>
                 <button id="welcomeMission" class="welcome-action" type="button"><span>Open Mission Control</span><span>Give your agents a task</span></button>
                 <button id="welcomeSettings" class="welcome-action" type="button"><span>Configure Ryoko</span><span>Providers, languages and shortcuts</span></button>
               </section>
               <section class="welcome-guide" aria-label="Workbench guide">
+                <h2>Recent folders</h2>
+                <div id="welcomeRecent" class="welcome-recent" aria-live="polite"><p class="welcome-recent-empty">No recent folders yet. Open a project to get started.</p></div>
+                <h2 class="welcome-tips-title">Keyboard shortcuts</h2>
+                <div class="welcome-tips">
+                  <span><kbd>Ctrl / ⌘ P</kbd> Quick open</span>
+                  <span><kbd>Ctrl / ⌘ K</kbd> Inline edit</span>
+                  <span><kbd>Ctrl / ⌘ S</kbd> Save file</span>
+                </div>
                 <h2>A familiar place to build</h2>
-                <p>Browse your project on the left. Open files in tabs, edit and save directly to disk.</p>
+                <p class="welcome-guide-copy">Browse files on the left, work in tabs, and approve agent changes from your review inbox.</p>
                 <p>Use Changes to review diffs, Search to find code, and Mission Control to follow your agents.</p>
-                <div class="welcome-note">Extensions catalog preview<br><span>Browse Ryoko extensions and skills. Third-party installation is not available yet.</span></div>
+                <div class="welcome-note">Make an idea real<br><span>Start in Mission Control and approve every change before it touches your project.</span></div>
               </section>
             </div>
           </div>
