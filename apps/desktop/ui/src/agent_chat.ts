@@ -19,13 +19,13 @@ export interface CodeSuggestion {
 
 interface ChatTurn { role: 'user' | 'assistant'; text: string }
 interface ChatPayload { requestId: string; text: string }
-interface ChatDone { requestId: string; cancelled: boolean; inputTokens: number; outputTokens: number }
+interface ChatDone { requestId: string; cancelled: boolean; inputTokens: number; outputTokens: number; estimatedCostUsd: number }
 
 export interface AgentChatDeps {
   files: () => string[];
   selection: () => EditorSelectionContext | null;
   review: (suggestion: CodeSuggestion) => void;
-  onTokens: (input: number, output: number) => void;
+  onTokens: (input: number, output: number, estimatedCostUsd: number) => void;
   setStatus: (message: string) => void;
 }
 
@@ -131,7 +131,7 @@ export function mountAgentChat(deps: AgentChatDeps): { focus: () => void; reset:
       if (outputNode) renderReviewAction(outputNode, output);
       if (output.trim()) turns.push({ role: 'assistant', text: output.slice(0, 8000) });
     }
-    if (usage) deps.onTokens(usage.inputTokens, usage.outputTokens);
+    if (usage) deps.onTokens(usage.inputTokens, usage.outputTokens, usage.estimatedCostUsd);
     activeRequest = null;
     submission = null;
     outputNode = null;
