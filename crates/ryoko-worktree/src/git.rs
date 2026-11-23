@@ -29,6 +29,10 @@ use uuid::Uuid;
 /// writing a worktree administration entry.
 const ADMIN_RACE_ATTEMPTS: usize = 3;
 
+/// How often a checkout sync is retried while another git process holds the
+/// index lock.
+const CHECKOUT_SYNC_ATTEMPTS: usize = 4;
+
 const STATE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS worktree_sessions (
     task_id TEXT PRIMARY KEY,
@@ -193,6 +197,10 @@ pub struct GitWorktreeManager {
     /// concurrent creations therefore let one read a half-written sibling and
     /// die with `fatal: failed to read .git/worktrees/<other>/commondir`.
     worktree_admin: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the target-ref update and the checkout sync. Interleaving
+    /// them leaves the index describing a tree the branch no longer has, and
+    /// every later merge then refuses the checkout as dirty.
+    merge_admin: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for GitWorktreeManager {
@@ -216,6 +224,7 @@ impl GitWorktreeManager {
             base_project_path: base,
             state: Arc::new(Mutex::new(None)),
             worktree_admin: Arc::new(tokio::sync::Mutex::new(())),
+            merge_admin: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -746,6 +755,26 @@ impl GitWorktreeManager {
         Ok(())
     }
 
+    /// Moves the main checkout to `commit`. The reset is idempotent, so it is
+    /// retried while `index.lock` is held by another git process (an editor
+    /// refresh or a concurrent command); anything else is reported as is.
+    async fn reset_checkout(&self, commit: &str) -> Result<(), WorktreeError> {
+        for attempt in 1..=CHECKOUT_SYNC_ATTEMPTS {
+            let output = self
+                .git(&self.base_project_path, &["reset", "--hard", commit])
+                .await?;
+            if output.status.success() {
+                return Ok(());
+            }
+            let transient = String::from_utf8_lossy(&output.stderr).contains("index.lock");
+            if attempt == CHECKOUT_SYNC_ATTEMPTS || !transient {
+                return Err(self.git_error("sync main checkout", output));
+            }
+            tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
+        }
+        unreachable!("the retry loop always returns")
+    }
+
     /// Reattaches a durable lease as a [`WorkspaceLease`]. Used by the review
     /// loop to apply feedback and republish without recreating the branch.
     pub async fn resume_lease(&self, id: Uuid) -> Result<Arc<dyn WorkspaceLease>, WorktreeError> {
@@ -779,6 +808,10 @@ impl GitWorktreeManager {
         }
         self.ensure_repository().await?;
         self.ensure_managed_branch(&session.branch_name)?;
+        // The dirty check, the ref update and the checkout sync are one critical
+        // section for this manager. Another git process can still hold the index
+        // lock, which the checkout sync retries.
+        let _merge = self.merge_admin.lock().await;
         let record = self.load_session(session.id)?;
         if let Some(record) = &record {
             if !matches!(
@@ -946,12 +979,7 @@ impl GitWorktreeManager {
         }
 
         if checkout.is_some() {
-            let reset = self
-                .git(&self.base_project_path, &["reset", "--hard", &merge_commit])
-                .await?;
-            if !reset.status.success() {
-                return Err(self.git_error("sync main checkout", reset));
-            }
+            self.reset_checkout(&merge_commit).await?;
         }
 
         self.mark_merged(session, &merge_commit)?;
