@@ -1,6 +1,10 @@
 //! Opinionated, extensible team profiles for an application-building IDE.
 //! These are role contracts, not grants of filesystem, shell or network access.
 use crate::model::{AgentRole, Task};
+use crate::review::{
+    CODE_REVIEW_ROLE, INDEPENDENT_REVIEW_METADATA, REVIEW_TARGET_METADATA, ReviewConfig,
+    SECURITY_REVIEW_ROLE,
+};
 use crate::vision::VISUAL_REVIEW_METADATA;
 
 /// Task metadata key naming the verification steps a task must run before it
@@ -61,6 +65,16 @@ pub fn standard_team() -> Vec<TeamMember> {
             role: AgentRole::Custom("devops-engineer".into()),
             title: "DevOps/SRE engineer",
             instructions: "Design reproducible builds, staged deployments, secrets handling, health checks, telemetry and rollback. Require explicit approval for live deployment.",
+        },
+        TeamMember {
+            role: AgentRole::Custom(CODE_REVIEW_ROLE.to_owned()),
+            title: "Independent code reviewer",
+            instructions: "Review the validated producer snapshot without modifying code. Report structured, actionable findings and cite real validation evidence. Never rubber-stamp missing evidence.",
+        },
+        TeamMember {
+            role: AgentRole::Custom(SECURITY_REVIEW_ROLE.to_owned()),
+            title: "Independent security reviewer",
+            instructions: "Independently inspect trust boundaries, secrets, validation and exploit paths. Return structured findings referencing only verified evidence. Never modify the reviewed branch.",
         },
         TeamMember {
             role: AgentRole::Integrator,
@@ -144,7 +158,22 @@ impl GoalSignals {
     /// design and operations stay off unless the goal names them.
     pub fn from_goal(goal: &str) -> Self {
         let lower = goal.to_ascii_lowercase();
-        let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+        let has = |needles: &[&str]| {
+            needles.iter().any(|needle| {
+                // Two-letter abbreviations must be standalone words. "ui"
+                // inside "build" previously activated the UI team for every
+                // ordinary "build a ..." backend request.
+                if needle.len() > 2 {
+                    return lower.contains(needle);
+                }
+                lower.match_indices(needle).any(|(index, _)| {
+                    let before = lower[..index].chars().next_back();
+                    let after = lower[index + needle.len()..].chars().next();
+                    before.is_none_or(|char| !char.is_ascii_alphanumeric())
+                        && after.is_none_or(|char| !char.is_ascii_alphanumeric())
+                })
+            })
+        };
         let needs_design = has(&[
             "ui",
             "ux",
@@ -251,6 +280,13 @@ impl DynamicPlan {
 /// - the integrator is appended only when QA and Security both published a
 ///   branch, which is the integrator's documented minimum.
 pub fn dynamic_plan(goal: &str) -> DynamicPlan {
+    dynamic_plan_with_reviews(goal, ReviewConfig::default())
+}
+
+/// Customize independent reviewers without weakening the QA/Security code and
+/// regression tasks. Reviewer nodes are always read-only and depend on a
+/// previously validated implementation snapshot.
+pub fn dynamic_plan_with_reviews(goal: &str, reviews: ReviewConfig) -> DynamicPlan {
     let signals = GoalSignals::from_goal(goal);
     let decomposition = Task::new(
         format!(
@@ -297,12 +333,31 @@ pub fn dynamic_plan(goal: &str) -> DynamicPlan {
         tasks.push(backend);
     }
 
+    // A normal worktree may inherit only one validated parent commit.
+    // A mixed UI + backend goal has two sibling producers, so combine those
+    // branches through the same audited Integrator before full-stack work.
+    let implementation_inputs = if producers.len() > 1 {
+        let mut boundary = Task::new(
+            format!(
+                "PREINTEGRATE: Combine the validated UI and Backend branches for: {goal}. Preserve both contracts and regression tests."
+            ),
+            AgentRole::Integrator,
+        );
+        for producer in &producers {
+            boundary = boundary.depends_on(producer);
+        }
+        tasks.push(boundary.clone());
+        vec![boundary]
+    } else {
+        producers
+    };
+
     let mut implementation = Task::new(
         format!("FULLSTACK: Implement the agreed contracts and regression tests for: {goal}."),
         AgentRole::SeniorDeveloper,
     )
     .with_metadata(VERIFICATION_METADATA, verification);
-    for producer in &producers {
+    for producer in &implementation_inputs {
         implementation = implementation.depends_on(producer);
     }
     tasks.push(implementation.clone());
@@ -349,14 +404,41 @@ pub fn dynamic_plan(goal: &str) -> DynamicPlan {
         );
     }
 
-    tasks.push(
-        Task::new(
-            format!("INTEGRATE: Merge the validated QA and Security branches for: {goal} in a fresh worktree and publish one unified reviewable diff."),
-            AgentRole::Integrator,
+    let mut integrator = Task::new(
+        format!("INTEGRATE: Merge the validated QA and Security branches for: {goal} in a fresh worktree and publish one unified reviewable diff."),
+        AgentRole::Integrator,
+    )
+    .depends_on(&qa)
+    .depends_on(&security);
+
+    for (enabled, role, discipline) in [
+        (
+            reviews.code,
+            CODE_REVIEW_ROLE,
+            "code quality and regression risks",
+        ),
+        (
+            reviews.security,
+            SECURITY_REVIEW_ROLE,
+            "security boundaries and adversarial risks",
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        let reviewer = Task::new(
+            format!(
+                "INDEPENDENT REVIEW: Inspect the validated implementation for {discipline}: {goal}. Return structured, evidence-backed findings. Do not edit any files."
+            ),
+            AgentRole::Custom(role.to_owned()),
         )
-        .depends_on(&qa)
-        .depends_on(&security),
-    );
+        .depends_on(&implementation)
+        .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
+        .with_metadata(REVIEW_TARGET_METADATA, implementation.id.to_string());
+        integrator = integrator.depends_on(&reviewer);
+        tasks.push(reviewer);
+    }
+    tasks.push(integrator);
 
     DynamicPlan {
         signals,
@@ -407,13 +489,82 @@ mod tests {
     #[test]
     fn standard_team_has_distinct_roles_and_valid_task_plan() {
         let team = standard_team();
-        assert_eq!(team.len(), 9);
+        assert_eq!(team.len(), 11);
         let roles: HashSet<_> = team.into_iter().map(|member| member.role).collect();
-        assert_eq!(roles.len(), 9);
+        assert_eq!(roles.len(), 11);
         let tasks = application_plan("create a ticketing app");
         assert_eq!(tasks.len(), 8);
         assert!(tasks.iter().all(|t| roles.contains(&t.assigned_to)));
         Orchestrator::validate_plan(&tasks).unwrap();
+    }
+
+    #[test]
+    fn goal_routing_does_not_confuse_build_with_ui() {
+        let plain = GoalSignals::from_goal("build a database service");
+        assert!(!plain.needs_design);
+        assert!(plain.needs_backend);
+        assert!(GoalSignals::from_goal("build a UI/dashboard").needs_design);
+        assert!(GoalSignals::from_goal("improve UX for onboarding").needs_design);
+    }
+
+    #[test]
+    fn independent_reviewers_are_configurable_and_gate_integration() {
+        let plan = dynamic_plan("build a database service");
+        Orchestrator::validate_plan(&plan.all_tasks()).unwrap();
+        let implementation = plan
+            .tasks
+            .iter()
+            .find(|task| task.assigned_to == AgentRole::SeniorDeveloper)
+            .unwrap();
+        let reviews = plan
+            .tasks
+            .iter()
+            .filter(|task| task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA))
+            .collect::<Vec<_>>();
+        assert_eq!(reviews.len(), 2);
+        let integrator = plan
+            .tasks
+            .iter()
+            .find(|task| task.assigned_to == AgentRole::Integrator)
+            .unwrap();
+        for reviewer in reviews {
+            assert_eq!(reviewer.dependencies, vec![implementation.id]);
+            assert!(integrator.dependencies.contains(&reviewer.id));
+        }
+
+        let without = dynamic_plan_with_reviews(
+            "build a database service",
+            ReviewConfig {
+                code: false,
+                security: false,
+            },
+        );
+        assert!(
+            !without
+                .tasks
+                .iter()
+                .any(|task| task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA))
+        );
+        Orchestrator::validate_plan(&without.all_tasks()).unwrap();
+    }
+
+    #[test]
+    fn mixed_ui_and_backend_routes_through_a_single_integration_parent() {
+        let plan = dynamic_plan("build a responsive UI dashboard with an API endpoint");
+        let implementation = plan
+            .tasks
+            .iter()
+            .find(|task| task.assigned_to == AgentRole::SeniorDeveloper)
+            .unwrap();
+        assert_eq!(implementation.dependencies.len(), 1);
+        let integration = plan
+            .tasks
+            .iter()
+            .find(|task| task.id == implementation.dependencies[0])
+            .unwrap();
+        assert_eq!(integration.assigned_to, AgentRole::Integrator);
+        assert_eq!(integration.dependencies.len(), 2);
+        Orchestrator::validate_plan(&plan.execution_tasks()).unwrap();
     }
 
     #[test]
@@ -540,7 +691,7 @@ mod tests {
             .iter()
             .find(|task| task.assigned_to == AgentRole::Integrator)
             .unwrap();
-        assert_eq!(integrator.dependencies.len(), 2);
+        assert_eq!(integrator.dependencies.len(), 4);
         Orchestrator::validate_plan(&plan.all_tasks()).unwrap();
     }
 

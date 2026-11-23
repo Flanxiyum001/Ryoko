@@ -20,10 +20,10 @@ use ryoko_core::{
     AgentIdentity, AgentRole, AgentRuntime, CONTEXT_METADATA, ChangeType, ChangeValidator,
     CodeReviewSummary, EventSink, FileSummary, Language, ModelAgent, Orchestrator,
     OrchestratorConfig, OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange,
-    RETRY_FEEDBACK_METADATA, SharedMemory, SourceFile, StagedChanges, Task, TaskContext,
-    WorkspaceIndex, extract_files, render_markdown_summary,
+    RETRY_FEEDBACK_METADATA, ReviewConfig, SharedMemory, SourceFile, StagedChanges, Task,
+    TaskContext, WorkspaceIndex, extract_files, render_markdown_summary,
     spec_link::SpecIndex,
-    team::{application_plan, dynamic_plan, standard_team},
+    team::{application_plan, dynamic_plan_with_reviews, standard_team},
     validation::ValidationReport,
 };
 use ryoko_marketplace::{
@@ -557,6 +557,12 @@ struct RunArgs {
     /// Number of concurrent agents in team mode, between 1 and 4.
     #[arg(long, default_value_t = 2)]
     max_concurrency: usize,
+    /// Omit the independent code reviewer (does not disable ordinary QA).
+    #[arg(long = "no-code-review", requires = "team")]
+    no_code_review: bool,
+    /// Omit the independent security reviewer (does not disable security tests).
+    #[arg(long = "no-security-review", requires = "team")]
+    no_security_review: bool,
     /// Times a failed QA or Security review may send its findings back to the
     /// producing agent before escalating to human review. 0 disables the loop.
     #[arg(long, default_value_t = 1)]
@@ -2285,7 +2291,15 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
     // Dynamic routing: the project-manager decomposition decides which
     // specialists this goal actually needs, so a UI/UX or DevOps agent is only
     // registered (and only allocated a worktree) when the plan activates it.
-    let dynamic = args.team.then(|| dynamic_plan(&goal));
+    let dynamic = args.team.then(|| {
+        dynamic_plan_with_reviews(
+            &goal,
+            ReviewConfig {
+                code: !args.no_code_review,
+                security: !args.no_security_review,
+            },
+        )
+    });
     let activated = dynamic
         .as_ref()
         .map(|plan| plan.activated_roles().into_iter().collect::<HashSet<_>>());
@@ -2502,6 +2516,7 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
             "run": &report,
             "ledger": router.ledger().snapshot(),
             "validation": values,
+            "independent_reviews": &report.review_records,
         });
         let path = if path.is_absolute() {
             path.clone()
