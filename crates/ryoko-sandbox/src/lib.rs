@@ -7,10 +7,19 @@
 //! `_start` return counts as a pass. [`SandboxSpecValidator`] additionally
 //! refuses proposals that do not carry tests, so source-only changes never
 //! reach review.
+//!
+//! Unix hosts evaluate in-process; Windows delegates every evaluation to the
+//! isolated `wasm-guardrail-worker` process because Wasmtime 26 guest traps
+//! there can abort the host. The worker receives one typed request and答复
+//! with one typed response and is spawned with a cleared environment; see
+//! the [`worker`] module.
 
+mod evaluate;
 mod init;
 mod process;
+mod protocol;
 mod spec;
+pub mod worker;
 
 pub use init::{
     Ecosystem, Freshness, FrontendProfile, ImageState, InitError, SandboxPlan,
@@ -20,17 +29,14 @@ pub use process::{ARTIFACT_MOUNT, BuildBackend, BuildSandbox, BuildSandboxError}
 
 pub use spec::{SandboxSpecValidator, SpecError, SpecEvidence, SpecPolicy};
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ryoko_core::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use ryoko_core::{CoreError, CoreResult};
-use wasmtime::{
-    Config, Engine, Linker, Module, ResourceLimiter, Store, StoreLimits, StoreLimitsBuilder,
-};
-use wasmtime_wasi::WasiCtxBuilder;
-use wasmtime_wasi::preview1::{self, WasiP1Ctx};
+use wasmtime::Engine;
 
 #[derive(Debug, Clone)]
 pub struct SandboxLimits {
@@ -69,6 +75,8 @@ pub enum SandboxError {
     Execution(String),
     #[error("sandbox task panicked: {0}")]
     Panic(String),
+    #[error("guardrail worker process failed: {0}")]
+    Worker(String),
 }
 
 impl From<SandboxError> for CoreError {
@@ -77,47 +85,19 @@ impl From<SandboxError> for CoreError {
     }
 }
 
-struct SandboxState {
-    wasi: WasiP1Ctx,
-    limits: StoreLimits,
+/// Where guardrail evaluation runs. Unix hosts default to in-process
+/// execution; Windows must delegate to the isolated worker binary and fails
+/// closed when it cannot be resolved.
+#[derive(Clone)]
+enum SandboxStrategy {
+    InProcess(Engine),
+    Worker(PathBuf),
 }
 
-impl ResourceLimiter for SandboxState {
-    fn memory_growing(
-        &mut self,
-        current: usize,
-        desired: usize,
-        maximum: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        self.limits.memory_growing(current, desired, maximum)
-    }
-
-    fn table_growing(
-        &mut self,
-        current: usize,
-        desired: usize,
-        maximum: Option<usize>,
-    ) -> wasmtime::Result<bool> {
-        self.limits.table_growing(current, desired, maximum)
-    }
-
-    fn instances(&self) -> usize {
-        self.limits.instances()
-    }
-
-    fn tables(&self) -> usize {
-        self.limits.tables()
-    }
-
-    fn memories(&self) -> usize {
-        self.limits.memories()
-    }
-}
-
-/// A reusable wasmtime engine with empty WASI state and no host preopens.
+/// A wasmtime execution boundary with empty WASI state and no host preopens.
 #[derive(Clone)]
 pub struct WasmSandbox {
-    engine: Engine,
+    strategy: SandboxStrategy,
     limits: SandboxLimits,
 }
 
@@ -130,102 +110,97 @@ impl std::fmt::Debug for WasmSandbox {
 }
 
 impl WasmSandbox {
-    /// Native Windows Wasmtime 26 guest traps can abort the entire host process
-    /// (0xc0000409), including when signals-based traps are disabled. Until
-    /// execution is moved behind an independently monitored process boundary,
-    /// refuse this WASI validation mode rather than risking editor data loss.
-    /// Docker/Podman project checks use a separate container-backed runner.
+    /// Native Windows Wasmtime 26 guest traps can abort the process that hosts
+    /// them (0xc0000409), including when signals-based traps are disabled, so
+    /// guardrail evaluation never runs in-process on Windows. It is delegated
+    /// to a dedicated `wasm-guardrail-worker` process spawned with a cleared
+    /// environment and no inherited host capabilities; a guest trap, deadline
+    /// overrun or worker crash becomes a bounded failed validation instead of
+    /// a host abort. When the worker binary cannot be resolved this path keeps
+    /// failing closed. Docker/Podman project checks use a separate
+    /// container-backed runner.
     #[cfg(windows)]
-    pub fn new(_limits: SandboxLimits) -> Result<Self, SandboxError> {
+    pub fn new(limits: SandboxLimits) -> Result<Self, SandboxError> {
+        if let Ok(override_path) = std::env::var("RYOKO_WASM_WORKER_BIN") {
+            let candidate = PathBuf::from(override_path);
+            if candidate.is_file() {
+                return Ok(Self {
+                    strategy: SandboxStrategy::Worker(candidate),
+                    limits,
+                });
+            }
+        }
+        if let Ok(current) = std::env::current_exe() {
+            if let Some(directory) = current.parent() {
+                let candidate = directory.join(format!(
+                    "{WORKER_BINARY_NAME}{}",
+                    std::env::consts::EXE_SUFFIX
+                ));
+                if candidate.is_file() {
+                    return Ok(Self {
+                        strategy: SandboxStrategy::Worker(candidate),
+                        limits,
+                    });
+                }
+            }
+        }
         Err(SandboxError::Engine(
-            "native WASM execution unavailable on Windows pending isolated worker; use container-backed project checks"
+            "no isolated WASM guardrail worker found (install wasm-guardrail-worker next to the application or set RYOKO_WASM_WORKER_BIN); refusing in-process WASM execution"
                 .into(),
         ))
     }
 
     #[cfg(not(windows))]
     pub fn new(limits: SandboxLimits) -> Result<Self, SandboxError> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        config.epoch_interruption(true);
-        config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Disable);
-        let engine = Engine::new(&config).map_err(|err| SandboxError::Engine(err.to_string()))?;
-        Ok(Self { engine, limits })
+        let engine = evaluate::build_engine()?;
+        Ok(Self {
+            strategy: SandboxStrategy::InProcess(engine),
+            limits,
+        })
+    }
+
+    /// Evaluates through the worker binary at `worker_path` on any platform.
+    /// Windows derives the path automatically in [`WasmSandbox::new`]; other
+    /// platforms default to in-process evaluation and can opt in explicitly.
+    pub fn new_with_worker(
+        limits: SandboxLimits,
+        worker_path: impl Into<PathBuf>,
+    ) -> Result<Self, SandboxError> {
+        Ok(Self {
+            strategy: SandboxStrategy::Worker(worker_path.into()),
+            limits,
+        })
     }
 
     pub fn limits(&self) -> &SandboxLimits {
         &self.limits
     }
 
-    /// Executes a core wasm module's `_start` export in an isolated store.
+    /// Executes a core wasm module's `_start` export under the configured
+    /// isolation boundary.
     pub async fn execute(&self, artifact: &[u8]) -> Result<SandboxOutcome, SandboxError> {
-        let started = Instant::now();
-        let engine = self.engine.clone();
-        let module =
-            Module::new(&engine, artifact).map_err(|err| SandboxError::Compile(err.to_string()))?;
-        let limits = self.limits.clone();
-        let initial_fuel = limits.fuel;
-
-        // The epoch ticker is the only way to interrupt wasm that ignores or
-        // outlives its fuel budget.
-        let ticker = {
-            let engine = engine.clone();
-            let timeout = limits.timeout.max(Duration::from_millis(1));
-            tokio::spawn(async move {
-                tokio::time::sleep(timeout).await;
-                engine.increment_epoch();
-            })
-        };
-
-        let execution = tokio::task::spawn_blocking(move || {
-            let store_limits = StoreLimitsBuilder::new()
-                .memory_size(limits.max_memory_bytes)
-                .instances(16)
-                .tables(16)
-                .build();
-            let mut store = Store::new(
-                &engine,
-                SandboxState {
-                    wasi: WasiCtxBuilder::new().build_p1(),
-                    limits: store_limits,
-                },
-            );
-            store.limiter(|state| state as &mut dyn ResourceLimiter);
-            store
-                .set_fuel(limits.fuel)
-                .map_err(|err| SandboxError::Engine(err.to_string()))?;
-            store.set_epoch_deadline(1);
-
-            let mut linker = Linker::new(&engine);
-            preview1::add_to_linker_sync(&mut linker, |state: &mut SandboxState| &mut state.wasi)
-                .map_err(|err| SandboxError::Instantiate(err.to_string()))?;
-            let instance = linker
-                .instantiate(&mut store, &module)
-                .map_err(|err| SandboxError::Instantiate(err.to_string()))?;
-            let start = instance
-                .get_typed_func::<(), ()>(&mut store, "_start")
-                .map_err(|err| SandboxError::Instantiate(format!("missing `_start`: {err}")))?;
-            let call = start.call(&mut store, ());
-            let fuel_left = store.get_fuel().unwrap_or(0);
-            call.map_err(|err| SandboxError::Execution(err.to_string()))?;
-            Ok::<u64, SandboxError>(initial_fuel.saturating_sub(fuel_left))
-        })
-        .await;
-
-        ticker.abort();
-        let fuel_consumed = match execution {
-            Ok(result) => result?,
-            Err(err) => return Err(SandboxError::Panic(err.to_string())),
-        };
-
-        Ok(SandboxOutcome {
-            passed: true,
-            fuel_consumed,
-            duration_ms: started.elapsed().as_millis() as u64,
-            message: format!("sandboxed test artifact exited cleanly ({fuel_consumed} fuel units)"),
-        })
+        match &self.strategy {
+            SandboxStrategy::Worker(worker_path) => {
+                worker::execute_in_worker(worker_path, &self.limits, artifact).await
+            }
+            SandboxStrategy::InProcess(engine) => {
+                let engine = engine.clone();
+                let limits = self.limits.clone();
+                let artifact = artifact.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    evaluate::evaluate_module(engine, &artifact, &limits)
+                })
+                .await
+                .map_err(|err| SandboxError::Panic(err.to_string()))?
+            }
+        }
     }
 }
+
+/// File name (without platform suffix) of the worker binary spawned next to
+/// the application executable on Windows.
+#[cfg(windows)]
+const WORKER_BINARY_NAME: &str = "wasm-guardrail-worker";
 
 /// Supplies the wasm artifact that exercises a task's staged changes.
 /// Production implementations compile the isolated worktree to a WASM test
@@ -324,9 +299,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn native_wasm_on_windows_fails_closed_instead_of_crashing_the_ide() {
+    fn windows_fails_closed_without_a_resolvable_guardrail_worker() {
         let error = WasmSandbox::new(SandboxLimits::default()).unwrap_err();
-        assert!(error.to_string().contains("unavailable on Windows"));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing in-process WASM execution")
+        );
         assert!(SandboxValidator::static_module(b"(module)").is_err());
     }
 
