@@ -113,6 +113,28 @@ export function buildPullRequestBody(issue, report) {
   return body.slice(0, MAX_PR_BODY);
 }
 
+/**
+ * Team jobs publish several role-specific branches. The first success is
+ * typically Architect, not the merged deliverable; only Integrator is safe
+ * to present as the single combined PR. Never publish a partial/failed DAG.
+ */
+export function selectIntegratedSuccess(report) {
+  const run = report?.run;
+  if (!run || !Array.isArray(run.succeeded)
+    || (Array.isArray(run.failed) && run.failed.length > 0)
+    || (Array.isArray(run.skipped) && run.skipped.length > 0)
+    || (Array.isArray(run.needs_human_review) && run.needs_human_review.length > 0)) {
+    throw bad('Ryoko team run is incomplete or needs human review', 502);
+  }
+  const integrators = run.succeeded.filter(
+    (item) => item?.role === 'integrator' && typeof item.branch === 'string' && item.branch,
+  );
+  if (integrators.length !== 1) {
+    throw bad('Ryoko produced no unique integrated branch', 502);
+  }
+  return integrators[0];
+}
+
 const MCP_FLAGS = [
   ['server', '--mcp-server'],
   ['serverArgs', '--mcp-server-arg'],
@@ -196,8 +218,7 @@ export async function runIssuePipeline({
     mcp: settings.mcp || null,
   });
   const report = JSON.parse(await readFile(reportPath, 'utf8'));
-  const success = Array.isArray(report?.run?.succeeded) ? report.run.succeeded[0] : null;
-  if (!success?.branch) throw bad('Ryoko produced no published branch', 502);
+  const success = selectIntegratedSuccess(report);
   const branch = safeBranch(success.branch);
 
   const pushToken = await broker.installationToken(request.installationId, request.repoId, 'contents');
