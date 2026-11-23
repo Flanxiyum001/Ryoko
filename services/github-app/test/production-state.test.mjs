@@ -37,6 +37,7 @@ test('encrypted sessions and one-time desktop codes persist across broker proces
     });
     assert.equal(statSync(file).mode & 0o077, 0);
     b = new ProductionState(file, secret);
+    assert.throws(() => new ProductionState(file, key()), /does not match/);
     assert.equal(b.sessions.get('cookie-id').token, rawToken);
     assert.equal(readFileSync(file).includes(Buffer.from(rawToken)), false);
     assert.equal(b.takePairing('single-use-code').sessionId, 'cookie-id');
