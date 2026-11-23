@@ -40,6 +40,12 @@ pub trait WorkspaceLease: Send + Sync {
         Ok(())
     }
 
+    /// Checkout holding the sealed source used by validators. Defaults to the
+    /// lease root for providers without a Git-backed snapshot.
+    fn validation_root(&self) -> PathBuf {
+        self.root().to_path_buf()
+    }
+
     /// Reject a validation pass if the source changed while checks ran.
     async fn verify_seal(&self) -> CoreResult<()> {
         Ok(())
