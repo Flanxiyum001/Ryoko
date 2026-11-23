@@ -9,6 +9,7 @@ import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
 import { LspClient, type LspState, type LspServerStatus } from './lsp';
 import { registerMonacoCapabilities } from './lsp_bridge';
+import { LANGUAGE_IDS, defaultRunProfile, parseTaskArgs } from './languages';
 import { buildTree, changeKind, filterTreePaths } from './tree';
 import { mountQuickOpen } from './quick_open_view';
 import { mountSearchPanel } from './search_view';
@@ -136,6 +137,18 @@ interface TerminalStatus {
   sessionId: number | null;
 }
 
+interface CodeRunStatus {
+  running: boolean;
+  sessionId: number | null;
+  exitCode: number | null;
+}
+
+interface CodeRunOutput {
+  sessionId: number;
+  stream: 'stdout' | 'stderr' | 'system';
+  data: string;
+}
+
 interface DapMessage {
   sessionId: number;
   message: string;
@@ -218,9 +231,18 @@ const changesSummary = element('changesSummary');
 const changesList = element('changesList');
 const editorStatus = element('editorStatus');
 const cursorPos = element('cursorPos');
-const languageMode = element('languageMode');
+const languageMode = element<HTMLSelectElement>('languageMode');
+const runActiveFile = element<HTMLButtonElement>('runActiveFile');
 const bottomPanel = element('bottomPanel');
 const terminalTab = element<HTMLButtonElement>('terminalTab');
+const taskTab = element<HTMLButtonElement>('taskTab');
+const taskPanel = element('taskPanel');
+const taskProgram = element<HTMLInputElement>('taskProgram');
+const taskArgs = element<HTMLInputElement>('taskArgs');
+const taskRun = element<HTMLButtonElement>('taskRun');
+const taskStop = element<HTMLButtonElement>('taskStop');
+const taskLabel = element('taskLabel');
+const taskOutput = element('taskOutput');
 const searchTab = element<HTMLButtonElement>('searchTab');
 const searchPanel = element('searchPanel');
 const searchInput = element<HTMLInputElement>('searchInput');
@@ -320,6 +342,11 @@ let terminalSessionId: number | null = null;
 let terminalStarting = false;
 let pendingTerminalOutput: TerminalOutput[] = [];
 let terminalStatusPolling = false;
+let codeSessionId: number | null = null;
+let codeStarting = false;
+let codeStatusPolling = false;
+let pendingCodeOutput: CodeRunOutput[] = [];
+let codeOutputText = '';
 let dapStatusPolling = false;
 let dapSessionId: number | null = null;
 let dapSeq = 0;
@@ -491,21 +518,145 @@ function setStatus(message: string): void {
   editorStatus.textContent = message;
 }
 
-function showBottom(panel: 'terminal' | 'debug' | 'search'): void {
+function showBottom(panel: 'terminal' | 'debug' | 'search' | 'task'): void {
   bottomPanel.classList.remove('hidden');
   const terminal = panel === 'terminal';
   const search = panel === 'search';
+  const task = panel === 'task';
   terminalTab.classList.toggle('active', terminal);
   searchTab.classList.toggle('active', search);
-  debugTab.classList.toggle('active', !terminal && !search);
+  taskTab.classList.toggle('active', task);
+  debugTab.classList.toggle('active', panel === 'debug');
   terminalPanel.classList.toggle('hidden', !terminal);
   searchPanel.classList.toggle('hidden', !search);
-  debugPanel.classList.toggle('hidden', terminal || search);
+  taskPanel.classList.toggle('hidden', !task);
+  debugPanel.classList.toggle('hidden', panel !== 'debug');
   if (terminal) {
     window.requestAnimationFrame(() => fitTerminal());
   }
   if (search) {
     searchInput.focus();
+  }
+}
+
+function appendTaskOutput(data: string): void {
+  codeOutputText = (codeOutputText + data).slice(-120_000);
+  taskOutput.textContent = codeOutputText;
+  taskOutput.scrollTop = taskOutput.scrollHeight;
+}
+
+function configureTaskForPath(path: string): void {
+  const profile = defaultRunProfile(path);
+  taskProgram.value = profile?.program ?? '';
+  taskArgs.value = profile?.args.join(' ') ?? '';
+  taskLabel.textContent = profile
+    ? profile.label + ' · Installed toolchain required. Approval is requested before each run.'
+    : 'No direct-file runner for this language. Enter a build or run executable and literal arguments. {file} and {workspace} are supported.';
+}
+
+async function startCodeTask(): Promise<void> {
+  const file = state.current;
+  const root = state.root;
+  if (!file || !root) {
+    setStatus('Open a source file before running a task.');
+    return;
+  }
+  if (codeStarting || codeSessionId !== null) {
+    setStatus('Stop the active task before starting another.');
+    return;
+  }
+  const program = taskProgram.value.trim();
+  if (!program) {
+    showBottom('task');
+    taskProgram.focus();
+    setStatus('Enter an executable, or choose a language with a Run file preset.');
+    return;
+  }
+  let args: string[];
+  try {
+    args = parseTaskArgs(taskArgs.value);
+  } catch (error) {
+    setStatus(String(error));
+    return;
+  }
+  if (file.dirty) {
+    await saveCurrent();
+    if (file.dirty) {
+      setStatus('Save this file successfully before running it.');
+      return;
+    }
+  }
+  codeStarting = true;
+  taskRun.disabled = true;
+  runActiveFile.disabled = true;
+  pendingCodeOutput = [];
+  codeOutputText = '';
+  showBottom('task');
+  appendTaskOutput('Awaiting native approval for ' + program + '...\n');
+  try {
+    const status = await invoke<CodeRunStatus>('code_run_start', {
+      path: file.path, program, args,
+    });
+    if (state.root !== root) {
+      await invoke('code_run_stop');
+      return;
+    }
+    codeSessionId = status.sessionId;
+    codeOutputText = '';
+    appendTaskOutput('> ' + program + ' ' + args.join(' ') + '\n');
+    for (const output of pendingCodeOutput) {
+      if (output.sessionId === codeSessionId) appendTaskOutput(output.data);
+    }
+    taskStop.disabled = false;
+    taskLabel.textContent = 'Running ' + program + ' · ' + file.path;
+    setStatus('Code task started: ' + program);
+  } catch (error) {
+    appendTaskOutput('\n[Not started] ' + String(error) + '\n');
+    setStatus('Code task unavailable: ' + String(error));
+  } finally {
+    codeStarting = false;
+    pendingCodeOutput = [];
+    if (codeSessionId === null) {
+      taskRun.disabled = false;
+      runActiveFile.disabled = !state.current;
+    }
+  }
+}
+
+async function stopCodeTask(): Promise<void> {
+  try {
+    await invoke('code_run_stop');
+    if (codeSessionId !== null) appendTaskOutput('\n[Task stopped]\n');
+  } catch (error) {
+    setStatus('Could not stop code task: ' + String(error));
+  } finally {
+    codeSessionId = null;
+    taskStop.disabled = true;
+    taskRun.disabled = false;
+    runActiveFile.disabled = !state.current;
+  }
+}
+
+async function pollCodeStatus(): Promise<void> {
+  if (codeSessionId === null || codeStarting || codeStatusPolling || !state.root) return;
+  codeStatusPolling = true;
+  const observed = codeSessionId;
+  try {
+    const result = await invoke<CodeRunStatus>('code_run_status');
+    if (!result.running && codeSessionId === observed) {
+      codeSessionId = null;
+      taskStop.disabled = true;
+      taskRun.disabled = false;
+      runActiveFile.disabled = !state.current;
+      const exit = result.exitCode === null ? 'terminated' : 'exit code ' + result.exitCode;
+      appendTaskOutput('\n[Task finished: ' + exit + ']\n');
+      taskLabel.textContent = 'Finished · ' + exit;
+      setStatus('Code task ' + exit);
+    }
+  } catch (error) {
+    setStatus('Code task status unavailable: ' + String(error));
+  } finally {
+    codeStatusPolling = false;
   }
 }
 
@@ -867,6 +1018,7 @@ async function openFolder(): Promise<void> {
     quickOpen.close();
     await stopTerminal();
     await stopDebug();
+    await stopCodeTask();
     for (const timer of changeTimers.values()) window.clearTimeout(timer);
     changeTimers.clear();
     for (const file of openFiles.values()) file.model.dispose();
@@ -912,7 +1064,9 @@ async function openFolder(): Promise<void> {
     workspaceName.textContent = info.name;
     workspaceName.title = info.root;
     saveButton.disabled = true;
+    runActiveFile.disabled = true;
     activePath.textContent = 'No file open';
+    languageMode.value = 'plaintext';
     dirtyFlag.classList.add('hidden');
     setStatus('Loading files…');
     await loadFiles();
@@ -1688,7 +1842,7 @@ async function openFile(path: string): Promise<void> {
     setStatus(`Opening ${path}…`);
     const content = await invoke<string>('read_file', { path });
     const uri = fileUri(joinWorkspacePath(state.root, path));
-    const languageId = languageForPath(path);
+    const languageId = languageForPath(path, content);
     let file = openFiles.get(uri);
     // Selection must move before `setValue` so the content-change handler
     // attributes the reload to this document rather than the previous one.
@@ -1709,7 +1863,9 @@ async function openFile(path: string): Promise<void> {
     hideFim();
     editor.setModel(file.model);
     revealEditor();
-    languageMode.textContent = languageId;
+    languageMode.value = file.languageId;
+    configureTaskForPath(path);
+    runActiveFile.disabled = codeSessionId !== null;
     activePath.textContent = (file.dirty ? '● ' : '') + path;
     dirtyFlag.classList.toggle('hidden', !file.dirty);
     saveButton.disabled = false;
@@ -1982,6 +2138,14 @@ inlineEditInput.addEventListener('keydown', (event) => {
 changesRefresh.addEventListener('click', () => {
   void refreshWorkbenchChanges();
 });
+taskTab.addEventListener('click', () => showBottom('task'));
+taskRun.addEventListener('click', () => void startCodeTask());
+taskStop.addEventListener('click', () => void stopCodeTask());
+runActiveFile.addEventListener('click', () => {
+  if (!state.current) return;
+  configureTaskForPath(state.current.path);
+  void startCodeTask();
+});
 terminalStart.addEventListener('click', () => {
   void startTerminal();
 });
@@ -2010,6 +2174,14 @@ debugBreakpoint.addEventListener('click', () => {
   void toggleBreakpoint();
 });
 
+void listen<CodeRunOutput>('ryoko-code-output', (event) => {
+  if (event.payload.sessionId === codeSessionId) {
+    appendTaskOutput(event.payload.data);
+  } else if (codeStarting && codeSessionId === null) {
+    const bytes = pendingCodeOutput.reduce((sum, item) => sum + item.data.length, 0);
+    if (bytes + event.payload.data.length <= 64 * 1024) pendingCodeOutput.push(event.payload);
+  }
+});
 void listen<TerminalOutput>('ryoko-terminal-output', (event) => {
   if (terminalSessionId !== null && event.payload.sessionId === terminalSessionId) {
     ensureTerminal().write(event.payload.data);
@@ -2083,6 +2255,7 @@ window.setInterval(() => {
   if (document.visibilityState === 'visible') {
     void pollTerminalStatus();
     void pollDebugStatus();
+    void pollCodeStatus();
   }
 }, 2500);
 
@@ -2093,6 +2266,7 @@ window.addEventListener('beforeunload', () => {
   void lsp.stop();
   void invoke('terminal_stop').catch(() => undefined);
   void invoke('dap_stop').catch(() => undefined);
+  void invoke('code_run_stop').catch(() => undefined);
 });
 
 setLspState('offline');
@@ -2102,8 +2276,29 @@ mountConnectors(setStatus);
 mountMarketplaceBrowser(setStatus);
 mountSearchPanel({ openFile, setStatus });
 mountSettingsDialog({ setStatus });
-registerMonacoCapabilities(
-  monaco,
-  lsp,
-  ['rust', 'typescript', 'javascript', 'python', 'go', 'c', 'cpp', 'java', 'css', 'shell'],
-);
+const registeredLanguages = new Set(monaco.languages.getLanguages().map((language) => language.id));
+for (const language of LANGUAGE_IDS) {
+  if (!registeredLanguages.has(language)) monaco.languages.register({ id: language });
+}
+const availableLanguages = [...new Set(monaco.languages.getLanguages().map((language) => language.id))]
+  .sort();
+for (const id of availableLanguages) {
+  const option = document.createElement('option');
+  option.value = id;
+  option.textContent = id;
+  languageMode.append(option);
+}
+languageMode.value = 'plaintext';
+languageMode.addEventListener('change', () => {
+  const file = state.current;
+  if (!file) { languageMode.value = 'plaintext'; return; }
+  const newLanguage = languageMode.value;
+  if (file.languageId === newLanguage) return;
+  lsp.close(file.uri);
+  monaco.editor.setModelLanguage(file.model, newLanguage);
+  file.languageId = newLanguage;
+  file.version += 1;
+  lsp.ensureOpen(file.uri, file.languageId, file.version, file.model.getValue());
+  setStatus('Language mode: ' + newLanguage + ' (syntax support depends on installed language tooling)');
+});
+registerMonacoCapabilities(monaco, lsp, availableLanguages);
