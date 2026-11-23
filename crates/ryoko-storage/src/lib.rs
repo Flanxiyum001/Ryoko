@@ -125,8 +125,21 @@ impl DurableStore {
                 "storage database must not be a symlink".into(),
             ));
         }
+        // Normalize ancestor symlinks (notably /var -> /private/var on
+        // macOS) before SQLite's NOFOLLOW open. The explicit parent check
+        // above still rejects a symlink at the storage directory itself,
+        // and NOFOLLOW still forbids a symlink at the database file.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let canonical_parent = std::fs::canonicalize(parent)?;
+        let filename = path
+            .file_name()
+            .ok_or_else(|| StorageError::InvalidData("storage filename is missing".into()))?;
+        let database_path = canonical_parent.join(filename);
         let connection = Connection::open_with_flags(
-            path,
+            &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
