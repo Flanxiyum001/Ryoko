@@ -276,6 +276,18 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
         configured: Boolean(client.configured), durable: Boolean(stateDb),
         workerMode: stateDb ? settings.workerMode : 'legacy' });
     }
+    if (req.method === 'GET' && path === '/ready') {
+      if (!stateDb || !client.configured) {
+        return json(res, 503, { ready: false, reason: 'GitHub App or database not configured' });
+      }
+      const workers = stateDb.activeWorkerCount();
+      const ready = workers > 0;
+      return json(res, ready ? 200 : 503, {
+        ready,
+        workersAvailable: ready,
+        queuedJobs: stateDb.pendingJobCount(),
+      });
+    }
     if (req.method === 'POST' && path === '/webhooks/github') {
       if (!settings.webhookSecret) throw bad('webhook secret not configured', 503);
       const body = await readBody(req, 1_000_000);
