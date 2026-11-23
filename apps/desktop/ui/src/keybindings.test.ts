@@ -19,6 +19,8 @@ describe('resolveKeybindings', () => {
   it('defaults every action and indexes by chord', () => {
     const resolved = resolveKeybindings();
     expect(resolved.byAction.get('editor.inlineEdit')).toBe('MOD+K');
+    expect(resolved.byAction.get('workbench.quickOpen')).toBe('MOD+P');
+    expect(resolved.byChord.get('MOD+P')).toBe('workbench.quickOpen');
     expect(resolved.byChord.get('MOD+K')).toBe('editor.inlineEdit');
   });
 

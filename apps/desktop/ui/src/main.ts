@@ -10,6 +10,7 @@ import './styles.css';
 import { LspClient, type LspState, type LspServerStatus } from './lsp';
 import { registerMonacoCapabilities } from './lsp_bridge';
 import { buildTree, changeKind, filterTreePaths } from './tree';
+import { mountQuickOpen } from './quick_open_view';
 import { mountSearchPanel } from './search_view';
 import {
   renderChanges,
@@ -136,6 +137,11 @@ interface TerminalStatus {
 }
 
 interface DapMessage {
+  sessionId: number;
+  message: string;
+}
+
+interface DapLog {
   sessionId: number;
   message: string;
 }
@@ -311,6 +317,10 @@ let diffModifiedModel: monaco.editor.ITextModel | null = null;
 let xterm: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let terminalSessionId: number | null = null;
+let terminalStarting = false;
+let pendingTerminalOutput: TerminalOutput[] = [];
+let terminalStatusPolling = false;
+let dapStatusPolling = false;
 let dapSessionId: number | null = null;
 let dapSeq = 0;
 let dapThreadId = 1;
@@ -323,6 +333,12 @@ const changeTimers = new Map<string, number>();
 const expandedDirectories = new Set<string>();
 const workbenchChanges = new Map<string, ReturnType<typeof changeKind>>();
 const keybindings = resolveKeybindings(loadOverrides(localStorage));
+const quickOpen = mountQuickOpen({
+  workspaceRoot: () => state.root,
+  files: () => state.files,
+  openFile,
+  setStatus,
+});
 
 const editor = monaco.editor.create(editorHost, {
   theme: 'vs-dark',
@@ -530,6 +546,10 @@ function fitTerminal(): void {
 }
 
 async function startTerminal(): Promise<void> {
+  if (terminalStarting) return;
+  terminalStarting = true;
+  terminalStart.disabled = true;
+  pendingTerminalOutput = [];
   try {
     showBottom('terminal');
     const terminal = ensureTerminal();
@@ -537,22 +557,34 @@ async function startTerminal(): Promise<void> {
     terminalSessionId = null;
     const status = await invoke<TerminalStatus>('terminal_start', { shell: null });
     terminalSessionId = status.sessionId;
-    terminalStart.disabled = true;
+    for (const output of pendingTerminalOutput) {
+      if (output.sessionId === terminalSessionId) terminal.write(output.data);
+    }
     terminalStop.disabled = false;
     bottomStatus.textContent = 'Local shell running';
     fitTerminal();
     terminal.focus();
   } catch (error) {
+    terminalSessionId = null;
+    terminalStart.disabled = false;
+    terminalStop.disabled = true;
     bottomStatus.textContent = `Terminal unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    terminalStarting = false;
+    pendingTerminalOutput = [];
   }
 }
 
 async function stopTerminal(): Promise<void> {
-  await invoke('terminal_stop').catch(() => undefined);
-  terminalSessionId = null;
-  terminalStart.disabled = false;
-  terminalStop.disabled = true;
-  bottomStatus.textContent = 'Terminal stopped';
+  try {
+    await invoke('terminal_stop');
+    terminalSessionId = null;
+    terminalStart.disabled = false;
+    terminalStop.disabled = true;
+    bottomStatus.textContent = 'Terminal stopped';
+  } catch (error) {
+    bottomStatus.textContent = 'Could not stop terminal: ' + String(error);
+  }
 }
 
 function appendDebug(line: string): void {
@@ -608,6 +640,8 @@ async function startDebug(): Promise<void> {
       supportsRunInTerminalRequest: false,
     });
   } catch (error) {
+    await invoke('dap_stop').catch(() => undefined);
+    dapSessionId = null;
     updateDapButtons(false);
     debugStatus.textContent = `Debug adapter unavailable: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -635,7 +669,7 @@ async function launchDap(): Promise<void> {
 }
 
 function handleDapMessage(payload: DapMessage): void {
-  if (dapSessionId !== null && payload.sessionId !== dapSessionId) return;
+  if (dapSessionId === null || payload.sessionId !== dapSessionId) return;
   appendDebug(`← ${payload.message}`);
   let value: Record<string, unknown>;
   try {
@@ -830,6 +864,9 @@ async function openFolder(): Promise<void> {
     // Open the new workspace successfully before discarding any old editor
     // buffers. Changing a folder must not erase unsaved content on failure.
     await lsp.stop();
+    quickOpen.close();
+    await stopTerminal();
+    await stopDebug();
     for (const timer of changeTimers.values()) window.clearTimeout(timer);
     changeTimers.clear();
     for (const file of openFiles.values()) file.model.dispose();
@@ -1679,6 +1716,7 @@ async function openFile(path: string): Promise<void> {
     renderFiles();
     updateCursor();
     setStatus(path);
+    quickOpen.remember(path);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   }
@@ -1896,6 +1934,9 @@ bottomClose.addEventListener('click', () => bottomPanel.classList.add('hidden'))
 
 function dispatchBinding(action: string): void {
   switch (action) {
+    case 'workbench.quickOpen':
+      quickOpen.open();
+      break;
     case 'workbench.search':
       showBottom('search');
       break;
@@ -1970,8 +2011,15 @@ debugBreakpoint.addEventListener('click', () => {
 });
 
 void listen<TerminalOutput>('ryoko-terminal-output', (event) => {
-  if (terminalSessionId !== null && event.payload.sessionId !== terminalSessionId) return;
-  ensureTerminal().write(event.payload.data);
+  if (terminalSessionId !== null && event.payload.sessionId === terminalSessionId) {
+    ensureTerminal().write(event.payload.data);
+  } else if (terminalStarting && terminalSessionId === null) {
+    // Buffer the first shell prompt until terminal_start returns its session ID.
+    const bytes = pendingTerminalOutput.reduce((sum, output) => sum + output.data.length, 0);
+    if (bytes + event.payload.data.length <= 64 * 1024) {
+      pendingTerminalOutput.push(event.payload);
+    }
+  }
 });
 void listen<FimChunk>('ryoko-fim-chunk', (event) => applyFimChunk(event.payload));
 void listen<FimError>('ryoko-fim-error', (event) => {
@@ -1980,9 +2028,49 @@ void listen<FimError>('ryoko-fim-error', (event) => {
   setStatus(`Completion unavailable: ${event.payload.message}`);
 });
 void listen<DapMessage>('ryoko-dap-message', (event) => handleDapMessage(event.payload));
-void listen<string>('ryoko-dap-log', (event) => {
-  if (event.payload) appendDebug(`[adapter] ${event.payload}`);
+void listen<DapLog>('ryoko-dap-log', (event) => {
+  if (dapSessionId !== null && event.payload.sessionId === dapSessionId && event.payload.message) {
+    appendDebug(`[adapter] ${event.payload.message}`);
+  }
 });
+
+async function pollTerminalStatus(): Promise<void> {
+  if (terminalSessionId === null || terminalStarting || terminalStatusPolling) return;
+  terminalStatusPolling = true;
+  const observedId = terminalSessionId;
+  try {
+    const status = await invoke<TerminalStatus>('terminal_status');
+    if (!status.running && terminalSessionId === observedId) {
+      terminalSessionId = null;
+      terminalStart.disabled = false;
+      terminalStop.disabled = true;
+      bottomStatus.textContent = 'Shell exited';
+      xterm?.write('\r\n[Shell exited]\r\n');
+    }
+  } catch (error) {
+    bottomStatus.textContent = 'Terminal status unavailable: ' + String(error);
+  } finally {
+    terminalStatusPolling = false;
+  }
+}
+
+async function pollDebugStatus(): Promise<void> {
+  if (dapSessionId === null || dapStatusPolling) return;
+  dapStatusPolling = true;
+  const observedId = dapSessionId;
+  try {
+    const status = await invoke<DapStatus>('dap_status');
+    if (!status.running && dapSessionId === observedId) {
+      dapSessionId = null;
+      updateDapButtons(false);
+      debugStatus.textContent = 'Debug adapter exited';
+    }
+  } catch (error) {
+    debugStatus.textContent = 'Debug status unavailable: ' + String(error);
+  } finally {
+    dapStatusPolling = false;
+  }
+}
 
 window.setInterval(() => {
   if (state.root && document.visibilityState === 'visible') {
@@ -1990,6 +2078,13 @@ window.setInterval(() => {
     void refreshRunStatus();
   }
 }, 1200);
+
+window.setInterval(() => {
+  if (document.visibilityState === 'visible') {
+    void pollTerminalStatus();
+    void pollDebugStatus();
+  }
+}, 2500);
 
 updateRunLabels();
 refreshRunStatus();

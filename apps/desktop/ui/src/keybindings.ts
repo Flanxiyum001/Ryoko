@@ -11,6 +11,7 @@ export interface Keybinding {
 }
 
 export const DEFAULT_KEYBINDINGS: readonly Keybinding[] = [
+  { action: 'workbench.quickOpen', chord: 'MOD+P', title: 'Quick open file' },
   { action: 'workbench.search', chord: 'MOD+SHIFT+F', title: 'Search workspace' },
   { action: 'workbench.replace', chord: 'MOD+SHIFT+R', title: 'Search and replace' },
   { action: 'workbench.changes', chord: 'MOD+SHIFT+G', title: 'Toggle change drawer' },
