@@ -147,6 +147,7 @@ impl ModelAgent {
             role.push_str("\nRead-only speculative task: return JSON with a meaningful summary and an empty files array. Do not propose edits.");
         }
         ChatRequest::new(model)
+            .with_max_tokens(8_000)
             .with_system(system)
             .with_cached_system_prefix()
             .with_message(Message::system(role))
