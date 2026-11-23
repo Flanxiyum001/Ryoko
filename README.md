@@ -338,6 +338,7 @@ Ryoko includes a browser-hosted, Tauri-ready code-inspection and Mission Control
 - Explicit human-approved clone, branch, commit-file, PR and PR-comment proposals
 - Issue-to-PR pipeline: applying the `ryoko-fix` label (or older `ryoko:agent`) to an issue starts a scoped engineering job; after a successful run it opens a draft PR with validation and security evidence
 - GitHub bot: allowlisted maintainers can comment `/ryoko run`, `/ryoko status`, or `/ryoko retry` on issues; the bot posts updates, never merges, and requires a trusted broker plus a disposable-repo staging test
+- First-party GitHub agent MCP (opt-in): an issue team run can queue repository-scoped branch, file, draft PR and comment proposals directly into the native approval inbox; **only the human authorizes execution**. Configure `RYOKO_GITHUB_AGENT_MCP=1` and a private `RYOKO_APPROVAL_STATE_FILE` to retain pending approvals over broker restarts.
 - Dark/light responsive UI, read-only code inspection and review queue
 
 Requirements: Node.js 22+, Git for server-side clones. After configuring environment variables in the [GitHub App guide](docs/GITHUB_APP.md):
