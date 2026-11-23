@@ -74,6 +74,7 @@ const server = createRyokoServer({
     ryokoBinary: process.env.RYOKO_CLI_BIN || '',
     projectRoot: process.env.RYOKO_PROJECT_ROOT || '',
     projectsRoot: process.env.RYOKO_PROJECTS_ROOT || '',
+    botStateFile: process.env.RYOKO_BOT_STATE_FILE || '',
     mcp,
   },
 });
