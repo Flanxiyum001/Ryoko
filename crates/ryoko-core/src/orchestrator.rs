@@ -1286,7 +1286,9 @@ fn cap_feedback(feedback: &str) -> String {
     if feedback.len() <= MAX_BYTES {
         return feedback.to_owned();
     }
-    let mut end = MAX_BYTES;
+    // Reserve space for the ellipsis; the final feedback must stay within
+    // the promised byte limit even after truncation.
+    let mut end = MAX_BYTES.saturating_sub(3);
     while end > 0 && !feedback.is_char_boundary(end) {
         end -= 1;
     }
