@@ -29,6 +29,10 @@ use crate::event::{AgentPhase, EventSink, OrchestratorEvent, TaskFailureStage};
 use crate::mcp::McpToolService;
 use crate::memory::SharedMemory;
 use crate::model::{AgentRole, ProjectContext, Task, TaskResult};
+use crate::review::{
+    CODE_REVIEW_ROLE, INDEPENDENT_REVIEW_METADATA, REVIEW_TARGET_METADATA, ReviewRecord,
+    ReviewVerdict, SECURITY_REVIEW_ROLE, trusted_validation_evidence, validation_evidence_key,
+};
 use crate::team::{ARCHITECT_ROLE, BACKEND_ROLE, SECURITY_ROLE};
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::WorkspaceProvider;
@@ -147,6 +151,19 @@ impl OrchestrationReport {
 
     pub fn pull_requests(&self) -> Vec<&TaskSuccess> {
         self.succeeded.iter().collect()
+    }
+
+    /// Read successful, evidence-verified independent review records without
+    /// requiring downstream integrations to parse arbitrary agent prose.
+    pub fn successful_reviews(&self) -> Vec<(Uuid, ReviewRecord)> {
+        self.succeeded
+            .iter()
+            .filter_map(|success| {
+                ReviewRecord::parse(&success.output)
+                    .ok()
+                    .map(|record| (success.task_id, record))
+            })
+            .collect()
     }
 }
 
@@ -474,6 +491,25 @@ impl Orchestrator {
         let mut indegree: HashMap<Uuid, usize> = tasks.iter().map(|t| (t.id, 0)).collect();
         let mut edges: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
         for task in tasks {
+            if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+                let valid = task
+                    .metadata
+                    .get(REVIEW_TARGET_METADATA)
+                    .and_then(|target| target.parse::<Uuid>().ok())
+                    .is_some_and(|target| {
+                        task.dependencies.len() == 1
+                            && task.dependencies[0] == target
+                            && tasks.iter().any(|candidate| {
+                                candidate.id == target && candidate.assigned_to != task.assigned_to
+                            })
+                    });
+                if !valid {
+                    return Err(CoreError::Internal(format!(
+                        "independent review {} must depend on exactly one distinct producer",
+                        task.id
+                    )));
+                }
+            }
             for dependency in &task.dependencies {
                 if *dependency == task.id {
                     return Err(CoreError::DependencyCycle {
@@ -743,7 +779,8 @@ fn is_actionable_review_failure(failure: &TaskFailure) -> bool {
 /// bug a producer can fix. QA and Security only.
 fn is_reviewer_role(role: &AgentRole) -> bool {
     matches!(role, AgentRole::QaEngineer)
-        || matches!(role, AgentRole::Custom(name) if name == SECURITY_ROLE)
+        || matches!(role, AgentRole::Custom(name) if
+            name == SECURITY_ROLE || name == CODE_REVIEW_ROLE || name == SECURITY_REVIEW_ROLE)
 }
 
 /// Producers that can act on a review failure.
@@ -924,6 +961,49 @@ async fn execute_task(
             continue;
         }
 
+        // Independent reviewers cannot publish edits. Their verdict must cite
+        // evidence minted from the reviewed task's real validation logs.
+        if task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA) {
+            let checked = (|| -> Result<(), String> {
+                if !result.changes.is_empty() {
+                    return Err("independent reviewers must not propose file changes".to_owned());
+                }
+                let target = task
+                    .metadata
+                    .get(REVIEW_TARGET_METADATA)
+                    .ok_or_else(|| "review target is missing".to_owned())?
+                    .parse::<Uuid>()
+                    .map_err(|_| "review target ID is invalid".to_owned())?;
+                let reference = context.memory.get(&validation_evidence_key(target));
+                let record = ReviewRecord::parse(&result.output)?;
+                record.verify(task, reference.as_deref())?;
+                if record.verdict != ReviewVerdict::Pass {
+                    return Err(record.failure_feedback());
+                }
+                Ok(())
+            })();
+            if let Err(reason) = checked {
+                let _ = agent.rollback(ctx.clone(), task, &reason).await;
+                let _ = lease.discard().await;
+                events.emit(OrchestratorEvent::TaskFailed {
+                    task_id: task.id,
+                    role: task.assigned_to.clone(),
+                    error: reason.clone(),
+                    attempts: attempt,
+                    retrying: false,
+                    stage: TaskFailureStage::Agent,
+                });
+                return (
+                    TaskOutcome::Failed {
+                        reason,
+                        attempts: attempt,
+                        visual_feedback: None,
+                    },
+                    None,
+                );
+            }
+        }
+
         if task.is_speculative() && !result.changes.is_empty() {
             // Speculative tasks run before the code they review exists; a
             // file change from one is a contract violation, not a retryable
@@ -955,6 +1035,7 @@ async fn execute_task(
         if result.success
             && result.changes.is_empty()
             && (task.is_speculative()
+                || task.metadata.contains_key(INDEPENDENT_REVIEW_METADATA)
                 || task
                     .metadata
                     .contains_key(crate::vision::VISUAL_REVIEW_METADATA))
@@ -1082,6 +1163,11 @@ async fn execute_task(
                 context
                     .memory
                     .insert(task_branch_key(task.id), pr.branch.clone());
+                if let Some(reference) = trusted_validation_evidence(task.id, &report) {
+                    context
+                        .memory
+                        .insert(validation_evidence_key(task.id), reference);
+                }
                 events.emit(OrchestratorEvent::PullRequestOpened {
                     task_id: task.id,
                     pr_id: pr.id.clone(),
@@ -1339,6 +1425,20 @@ mod tests {
         assert!(feedback.contains("payment_regression FAILED"));
         assert!(feedback.contains("src/payment.rs"));
         assert!(feedback.len() <= 16_000);
+    }
+
+    #[test]
+    fn independent_review_plan_rejects_forged_parent_links() {
+        let producer = Task::new("implement", AgentRole::SeniorDeveloper);
+        let review = Task::new(
+            "review",
+            AgentRole::Custom(CODE_REVIEW_ROLE.to_owned()),
+        )
+        .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
+        .with_metadata(REVIEW_TARGET_METADATA, producer.id.to_string());
+        assert!(Orchestrator::validate_plan(&[producer.clone(), review.clone()]).is_err());
+        let valid = review.depends_on(&producer);
+        assert!(Orchestrator::validate_plan(&[producer, valid]).is_ok());
     }
 
     fn router() -> Arc<ModelRouter> {
