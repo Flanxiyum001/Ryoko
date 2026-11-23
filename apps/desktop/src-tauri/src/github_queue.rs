@@ -232,6 +232,14 @@ pub struct GitHubChecks {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifiedRepository {
+    installation_id: u64,
+    repo_id: u64,
+    repository: String,
+}
+
+#[derive(Deserialize)]
 struct VerifiedIssue {
     repository: String,
     number: u64,
@@ -507,9 +515,24 @@ pub async fn start_github_goal(
     if goal.trim().is_empty() || goal.len() > 4000 || goal.contains('\0') {
         return Err("engineering goal must contain 1–4000 safe characters".into());
     }
+    let verified_response = client()?
+        .get(format!(
+            "{BROKER}/api/desktop/authorized-repository?installationId={installation_id}&repoId={repo_id}"
+        ))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot inspect GitHub repository before mission approval".to_owned())?;
+    let verified: VerifiedRepository = bounded_json(verified_response).await?;
+    if verified.installation_id != installation_id || verified.repo_id != repo_id
+        || verified.repository.trim().is_empty()
+    {
+        return Err("broker returned an unexpected repository".into());
+    }
     let preview = goal.chars().take(450).collect::<String>();
     let description = format!(
-        "Start an autonomous Ryoko engineering job for repository ID {repo_id} (installation {installation_id})?\n\nGoal:\n{preview}\n\nThis may incur model costs and publish a DRAFT PR. No merges or default-branch changes are allowed."
+        "Start Ryoko engineering agents in {}?\n\nGoal:\n{preview}\n\nThis may incur model costs and publish a DRAFT PR. No merges or default-branch changes are allowed.",
+        verified.repository
     );
     let confirmed = tauri::async_runtime::spawn_blocking(move || {
         app.dialog()
