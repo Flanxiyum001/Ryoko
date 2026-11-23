@@ -20,6 +20,8 @@ interface GitHubQueue {
 }
 interface GitHubJob {
   issue: number;
+  kind?: string;
+  title?: string;
   status: string;
   number?: number;
 }
@@ -97,6 +99,9 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
   const title = byId<HTMLInputElement>('githubTitle');
   const content = byId<HTMLTextAreaElement>('githubContent');
   const queueProposal = byId<HTMLButtonElement>('githubQueueProposal');
+  const goal = byId<HTMLTextAreaElement>('githubGoal');
+  const startGoal = byId<HTMLButtonElement>('githubStartGoal');
+  const jobHistory = byId<HTMLElement>('githubJobHistory');
 
   let repositories: GitHubRepository[] = [];
   let paired = false;
@@ -177,6 +182,30 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
       }
       details.append(summary, preview, actions);
       proposalsHost.append(details);
+    }
+  }
+
+  function renderJobs(items: GitHubJob[]) {
+    jobHistory.replaceChildren();
+    const title = document.createElement('h4');
+    title.textContent = 'Recent engineering jobs';
+    jobHistory.append(title);
+    if (!items.length) {
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = 'No jobs have been queued for this repository.';
+      jobHistory.append(hint);
+      return;
+    }
+    for (const job of items.slice(0, 12)) {
+      const entry = document.createElement('div');
+      entry.className = 'github-queue-item';
+      const message = document.createElement('span');
+      const name = job.kind === 'goal' ? (job.title || 'Independent goal') : 'Issue #' + job.issue;
+      message.textContent = name + ' — ' + job.status
+        + (job.number ? ' · draft PR #' + job.number : '');
+      entry.append(message);
+      jobHistory.append(entry);
     }
   }
 
@@ -291,6 +320,7 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
       if (serial !== refreshSerial || selected() !== current || !paired) return;
       jobs = currentJobs;
       renderQueue(queue, current);
+      renderJobs(currentJobs);
       renderProposals(pending);
     } catch (error) {
       if (serial !== refreshSerial) return;
@@ -315,6 +345,28 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
     }
     await refreshCurrent();
   }
+
+  startGoal.addEventListener('click', () => {
+    const current = selected();
+    const task = goal.value.trim();
+    if (!paired || !current) {
+      setStatus('Pair GitHub and choose a repository before starting a mission.');
+      return;
+    }
+    if (!task || task.length > 4000) {
+      setStatus('The mission needs a description of 1–4000 characters.');
+      return;
+    }
+    startGoal.disabled = true;
+    void invoke<GitHubJob>('start_github_goal', {
+      installationId: current.installationId, repoId: current.repoId, goal: task,
+    }).then((job) => {
+      setStatus('Ryoko engineering mission ' + job.status + '. Review its progress below.');
+      goal.value = '';
+      return refreshCurrent();
+    }).catch((error) => setStatus('Mission was not queued: ' + String(error)))
+      .finally(() => { startGoal.disabled = false; });
+  });
 
   queueProposal.addEventListener('click', () => {
     const current = selected();
@@ -387,4 +439,8 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
   document.addEventListener('visibilitychange', () => {
     if (paired && !document.hidden) void refreshCurrent();
   });
+  // Lightweight visible-only status polling; no mutation, token never enters JS.
+  window.setInterval(() => {
+    if (paired && !document.hidden) void refreshCurrent();
+  }, 15_000);
 }
