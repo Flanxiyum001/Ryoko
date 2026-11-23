@@ -10,11 +10,11 @@
   <div id="app">
     <header class="topbar">
       <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
-      <div class="workspace-name" id="workspaceName">No folder open</div>
+      <button id="quickOpenButton" class="command-center" type="button" title="Quick open file (Ctrl+P / Cmd+P)"><span aria-hidden="true">⌕</span><span id="workspaceName">Search files in workspace</span><kbd>Ctrl / ⌘ P</kbd></button>
       <div class="top-actions">
         <button id="openFolder" class="button primary" type="button">Open folder…</button>
         <button id="saveFile" class="button ghost" type="button" disabled>Save</button>
-        <button id="openMarketplace" class="button ghost" type="button">Marketplace</button>
+        <button id="openMarketplace" class="button ghost" type="button">Extensions</button>
         <button id="openSettings" class="button ghost" type="button">Settings</button>
         <span class="shortcut-hint">⌘S / Ctrl+S</span>
       </div>
@@ -23,14 +23,17 @@
     <div class="layout hide-inspector" data-active-view="explorer">
       <nav class="activity-rail" aria-label="Workbench views">
         <button class="rail-button active" type="button" data-view="explorer" aria-label="Show explorer" aria-pressed="true" title="Explorer">▤<span>Files</span></button>
+        <button id="railSearch" class="rail-button" type="button" aria-label="Search workspace" title="Search workspace">⌕<span>Search</span></button>
         <button class="rail-button" type="button" data-view="editor" aria-label="Show editor" aria-pressed="false" title="Editor">⌘<span>Editor</span></button>
         <button class="rail-button" type="button" data-view="mission" aria-label="Show Mission Control" aria-pressed="false" title="Mission Control">◇<span>Mission</span></button>
         <button class="rail-button" type="button" data-view="changes" aria-label="Show changes" aria-pressed="false" title="Changes">⑂<span>Changes</span></button>
         <button class="rail-button" type="button" data-view="problems" aria-label="Show problems" aria-pressed="false" title="Problems">◉<span>Issues</span></button>
+        <button id="railExtensions" class="rail-button" type="button" aria-label="Browse extensions" title="Extensions">⊞<span>Extensions</span></button>
         <button class="rail-button rail-bottom" type="button" data-view="settings" aria-label="Open settings" title="Settings">⚙<span>Setup</span></button>
       </nav>
       <aside class="explorer" id="explorerPane" aria-label="Workspace explorer">
-        <div class="panel-head"><span>EXPLORER</span><span id="fileCount" class="counter">0 files</span></div>
+        <div class="panel-head"><span>EXPLORER</span><button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files">↻</button></div>
+        <div class="explorer-summary"><span id="fileCount" class="counter">0 files</span><span>WORKSPACE</span></div>
         <label class="sr-only" for="fileFilter">Filter files</label>
         <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
         <div id="fileList" class="file-list">
@@ -39,6 +42,7 @@
       </aside>
 
       <main class="editor-column" aria-label="Code editor">
+        <div id="editorTabs" class="editor-tabs"></div>
         <div class="tabbar">
           <span id="activePath" class="active-path">No file open</span>
           <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
@@ -46,7 +50,7 @@
           <button id="toggleTerminal" class="button ghost compact" type="button">Terminal</button>
           <button id="toggleDebug" class="button ghost compact" type="button">Debug</button>
         </div>
-        <div id="editor" class="editor hidden"></div>
+        <div id="editor" class="editor hidden" role="tabpanel" aria-label="Active file editor"></div>
         <div class="diff-review hidden" id="diffReview">
           <div class="diff-review-bar">
             <span id="diffReviewPath">Review diff</span>
@@ -56,11 +60,24 @@
           <div id="diffEditor" class="diff-editor"></div>
         </div>
         <div id="emptyEditor" class="empty-editor">
-          <div class="empty-mark" aria-hidden="true">R</div>
-          <span class="empty-eyebrow">THE ENGINEERING WORKBENCH</span>
-          <h1>Build with clarity.</h1>
-          <p>Open a workspace to edit code, review changes and follow your agents from one place.</p>
-          <button id="emptyOpenFolder" class="button primary" type="button">Open a workspace</button>
+          <div class="welcome-content">
+            <div class="welcome-heading"><div class="empty-mark" aria-hidden="true">R</div><div><h1>Ryoko</h1><p>Your code. Your workspace.</p></div></div>
+            <div class="welcome-columns">
+              <section class="welcome-start" aria-label="Get started">
+                <h2>Start</h2>
+                <button id="emptyOpenFolder" class="welcome-action" type="button"><span>Open folder…</span><span>Choose a local project</span></button>
+                <button id="welcomeQuickOpen" class="welcome-action" type="button"><span>Go to file…</span><span>Find a file in your workspace</span></button>
+                <button id="welcomeMission" class="welcome-action" type="button"><span>Open Mission Control</span><span>Give your agents a task</span></button>
+                <button id="welcomeSettings" class="welcome-action" type="button"><span>Configure Ryoko</span><span>Providers, languages and shortcuts</span></button>
+              </section>
+              <section class="welcome-guide" aria-label="Workbench guide">
+                <h2>A familiar place to build</h2>
+                <p>Browse your project on the left. Open files in tabs, edit and save directly to disk.</p>
+                <p>Use Changes to review diffs, Search to find code, and Mission Control to follow your agents.</p>
+                <div class="welcome-note">Extensions catalog preview<br><span>Browse Ryoko extensions and skills. Third-party installation is not available yet.</span></div>
+              </section>
+            </div>
+          </div>
         </div>
         <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
           <div class="bottom-tabs">
@@ -157,7 +174,7 @@
             <button id="missionFocus" class="button ghost compact" type="button" disabled>Focus</button>
           </div>
           <div id="missionGraph" class="mission-graph">
-            <p class="hint">Run <code>ryoko run --event-log .ryoko/events/run.jsonl</code> to watch the task graph.</p>
+            <p class="hint">Enter a goal above and choose Run to follow the task graph.</p>
           </div>
           <div id="missionDetail" class="mission-detail">
             <p class="hint">Select a task to inspect its brief, validation and output.</p>
