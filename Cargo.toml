@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ryoko-core",
+    "crates/ryoko-models",
+    "crates/ryoko-native",
+    "crates/ryoko-orchestrator",
+    "crates/ryoko-sandbox",
+    "crates/ryoko-scripting",
+    "crates/ryoko-storage",
+    "crates/ryoko-tools",
+    "crates/ryoko-vfs",
+    "crates/ryoko-worktree",
+    "crates/ryoko-cli",
+    "crates/ryoko-marketplace",
+]
+exclude = ["apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/Flanxiyum001/Ryoko"
+authors = ["Project Ryoko contributors"]
+
+[workspace.dependencies]
+async-stream = "0.3"
+async-trait = "0.1"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+futures = "0.3"
+ignore = "0.4"
+mlua = { version = "0.10", features = ["luau", "vendored", "serialize", "send"] }
+notify = "6.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tower-lsp = "0.20"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tree-sitter = "0.25"
+tree-sitter-c = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-sequel = "0.3"
+tree-sitter-swift = "0.7"
+tree-sitter-typescript = "0.23"
+uuid = { version = "1", features = ["serde", "v4"] }
+wasmtime = { version = "26.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
+wasmtime-wasi = { version = "26.0", features = ["preview1"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

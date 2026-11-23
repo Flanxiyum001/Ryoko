@@ -1,0 +1,16 @@
+[package]
+name = "ryoko-tools"
+description = "Bounded read-only workspace inspection tools for Ryoko agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+ignore.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

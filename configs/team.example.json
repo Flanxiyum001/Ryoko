@@ -1,0 +1,17 @@
+{
+  "default_model": "tier:fast",
+  "tiers": {
+    "fast": "ollama/qwen2.5-coder",
+    "frontier": "ollama/qwen2.5-coder"
+  },
+  "role_models": {
+    "project-manager": "tier:fast",
+    "software-architect": "tier:frontier",
+    "ui-ux-designer": "ollama/llama3.2",
+    "backend-engineer": "tier:frontier",
+    "senior-developer": "tier:fast",
+    "security-engineer": "tier:frontier",
+    "qa-engineer": "tier:fast",
+    "devops-engineer": "tier:fast"
+  }
+}

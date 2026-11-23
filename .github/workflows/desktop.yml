@@ -1,0 +1,199 @@
+name: Desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'desktop-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux (AppImage, deb)
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - label: macOS (dmg)
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - label: Windows (msi, nsis)
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Linux WebKit dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf rpm libssl-dev build-essential curl wget file
+
+      - name: Require release signing secrets
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            for key in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD; do
+              if [ -z "${!key}" ]; then echo "::error::Missing required macOS signing material: $key"; exit 1; fi
+            done
+          else
+            if [ -z "$WINDOWS_CERTIFICATE" ] || [ -z "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
+              echo "::error::Missing Windows certificate or password"; exit 1
+            fi
+          fi
+
+      - name: Import macOS Developer ID certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT="$RUNNER_TEMP/ryoko-build.p12"
+          KEYCHAIN="$RUNNER_TEMP/ryoko-signing.keychain-db"
+          trap 'rm -f "$CERT"' EXIT
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -F "$APPLE_SIGNING_IDENTITY"
+
+      - name: Import Windows code-signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'ryoko-signing.pfx'
+          [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          try {
+            $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificates = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation 'Cert:\CurrentUser\My' -Password $password)
+            $cert = $certificates | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+            if (-not $cert) { throw 'No code-signing private key in Windows certificate' }
+            $config = @{ bundle = @{ windows = @{
+              certificateThumbprint = $cert.Thumbprint
+              digestAlgorithm = 'sha256'
+              timestampUrl = 'http://timestamp.digicert.com'
+            } } }
+            $dest = 'apps/desktop/src-tauri/windows-signing.json'
+            $json = $config | ConvertTo-Json -Depth 6
+            [System.IO.File]::WriteAllText($dest, $json, [System.Text.UTF8Encoding]::new($false))
+          } finally {
+            Remove-Item -LiteralPath $pfx -ErrorAction SilentlyContinue
+          }
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: apps/desktop
+        run: npm test
+
+      - name: Build ryoko-lsp sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p ryoko-native --bin ryoko-lsp --target "${{ matrix.target }}"
+          mkdir -p apps/desktop/src-tauri/binaries
+          BIN="target/${{ matrix.target }}/release/ryoko-lsp"
+          if [ ! -f "$BIN" ]; then BIN="$BIN.exe"; fi
+          DEST="apps/desktop/src-tauri/binaries/ryoko-lsp-${{ matrix.target }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then DEST="$DEST.exe"; fi
+          cp "$BIN" "$DEST"
+
+      - name: Build native installers
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            npm run tauri build -- --target "${{ matrix.target }}" --config src-tauri/windows-signing.json
+          else
+            npm run tauri build -- --target "${{ matrix.target }}"
+          fi
+
+      - name: Verify macOS code signature and Gatekeeper assessment
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/Ryoko.app"
+          test -d "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+
+      - name: Verify Windows installer Authenticode signatures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle'
+          $files = @(Get-ChildItem $dir -Recurse -File | Where-Object { $_.Extension -in @('.msi', '.exe') })
+          if ($files.Count -eq 0) { throw 'No Windows installer outputs found' }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Unsigned or untrusted installer: $($file.Name) ($($signature.Status))"
+            }
+          }
+
+
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ryoko-desktop-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
