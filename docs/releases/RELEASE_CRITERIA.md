@@ -29,7 +29,7 @@ cumulative: a later release must still satisfy earlier gates.
 | Human control | Every integration requires an inspectable diff and an explicit approval |
 | Security | Scoped permissions and restricted execution enforced by the host |
 | Reliability | Cancellation, recovery and structured error reporting |
-| AI evaluation | Reproducible benchmark suite with recorded results |
+| AI evaluation | Reproducible benchmark suite with recorded results ([`docs/evaluation/BASELINE_REPORT.md`](../evaluation/BASELINE_REPORT.md)) |
 | Distribution | Signed, tested, versioned installers and a rollback path |
 
 ## Performance targets
@@ -54,7 +54,8 @@ project used for each measurement.
 Task success rate, acceptance-test pass rate, regression rate, security finding
 precision and recall, human correction rate, cost per successful task, retries,
 retrieval precision and the share of results carrying reproducible evidence. Line
-count is not a quality metric.
+count is not a quality metric. Baseline results and reproducible evaluation fixtures
+are published in [`docs/evaluation/BASELINE_REPORT.md`](../evaluation/BASELINE_REPORT.md).
 
 ## Security release blocker
 

@@ -15,6 +15,7 @@ export const DEFAULT_KEYBINDINGS: readonly Keybinding[] = [
   { action: 'workbench.search', chord: 'MOD+SHIFT+F', title: 'Search workspace' },
   { action: 'workbench.replace', chord: 'MOD+SHIFT+R', title: 'Search and replace' },
   { action: 'workbench.changes', chord: 'MOD+SHIFT+G', title: 'Toggle change drawer' },
+  { action: 'workbench.debug', chord: 'MOD+SHIFT+D', title: 'Toggle debug panel' },
   { action: 'workbench.settings', chord: 'MOD+,', title: 'Open settings' },
   { action: 'editor.inlineEdit', chord: 'MOD+K', title: 'Inline edit with the agent' },
   { action: 'editor.close', chord: 'MOD+W', title: 'Close active file' },

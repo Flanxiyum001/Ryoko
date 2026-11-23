@@ -10,6 +10,7 @@ import './styles.css';
 import { mountEditorTabs, selectionAfterClose } from './editor_tabs';
 import { LspClient, type LspState, type LspServerStatus } from './lsp';
 import { registerMonacoCapabilities } from './lsp_bridge';
+import { LANGUAGE_IDS, defaultRunProfile, parseTaskArgs } from './languages';
 import { buildTree, changeKind, filterTreePaths } from './tree';
 import { mountQuickOpen } from './quick_open_view';
 import { mountSearchPanel } from './search_view';
@@ -19,6 +20,7 @@ import {
 } from './changes_view';
 import { mountSettingsDialog } from './settings_view';
 import { InlineEditController } from './inline_edit_view';
+import { DebugViewController } from './debug_view';
 import {
   chordForEvent,
   loadOverrides,
@@ -91,9 +93,24 @@ interface GitHunk {
   new_lines: number;
 }
 
+interface ReviewFile {
+  path: string;
+  oldPath?: string;
+  state: string;
+  stateLabel: string;
+  editable: boolean;
+  hunkIds: number[];
+}
+
+interface ReviewActionReport {
+  action: string;
+  files: { path: string; hunkIds: number[] }[];
+}
+
 interface GitHunkSnapshot {
   patch: string;
   hunks: GitHunk[];
+  files: ReviewFile[];
 }
 
 interface ReviewFileContent {
@@ -138,19 +155,16 @@ interface TerminalStatus {
   sessionId: number | null;
 }
 
-interface DapMessage {
-  sessionId: number;
-  message: string;
-}
-
-interface DapLog {
-  sessionId: number;
-  message: string;
-}
-
-interface DapStatus {
+interface CodeRunStatus {
   running: boolean;
   sessionId: number | null;
+  exitCode: number | null;
+}
+
+interface CodeRunOutput {
+  sessionId: number;
+  stream: 'stdout' | 'stderr' | 'system';
+  data: string;
 }
 
 interface SandboxInitResult {
@@ -220,9 +234,18 @@ const changesSummary = element('changesSummary');
 const changesList = element('changesList');
 const editorStatus = element('editorStatus');
 const cursorPos = element('cursorPos');
-const languageMode = element('languageMode');
+const languageMode = element<HTMLSelectElement>('languageMode');
+const runActiveFile = element<HTMLButtonElement>('runActiveFile');
 const bottomPanel = element('bottomPanel');
 const terminalTab = element<HTMLButtonElement>('terminalTab');
+const taskTab = element<HTMLButtonElement>('taskTab');
+const taskPanel = element('taskPanel');
+const taskProgram = element<HTMLInputElement>('taskProgram');
+const taskArgs = element<HTMLInputElement>('taskArgs');
+const taskRun = element<HTMLButtonElement>('taskRun');
+const taskStop = element<HTMLButtonElement>('taskStop');
+const taskLabel = element('taskLabel');
+const taskOutput = element('taskOutput');
 const searchTab = element<HTMLButtonElement>('searchTab');
 const searchPanel = element('searchPanel');
 const searchInput = element<HTMLInputElement>('searchInput');
@@ -236,18 +259,6 @@ const terminalStop = element<HTMLButtonElement>('terminalStop');
 const toggleTerminal = element<HTMLButtonElement>('toggleTerminal');
 const toggleDebug = element<HTMLButtonElement>('toggleDebug');
 const debugPanel = element('debugPanel');
-const debugAdapter = element<HTMLInputElement>('debugAdapter');
-const debugArgs = element<HTMLInputElement>('debugArgs');
-const debugProgram = element<HTMLInputElement>('debugProgram');
-const debugStart = element<HTMLButtonElement>('debugStart');
-const debugStop = element<HTMLButtonElement>('debugStop');
-const debugContinue = element<HTMLButtonElement>('debugContinue');
-const debugNext = element<HTMLButtonElement>('debugNext');
-const debugStepIn = element<HTMLButtonElement>('debugStepIn');
-const debugStepOut = element<HTMLButtonElement>('debugStepOut');
-const debugBreakpoint = element<HTMLButtonElement>('debugBreakpoint');
-const debugStatus = element('debugStatus');
-const debugLog = element('debugLog');
 const inlineEditRun = element<HTMLButtonElement>('inlineEditRun');
 const inlineEditCancel = element<HTMLButtonElement>('inlineEditCancel');
 const inlineEditAccept = element<HTMLButtonElement>('inlineEditAccept');
@@ -322,12 +333,11 @@ let terminalSessionId: number | null = null;
 let terminalStarting = false;
 let pendingTerminalOutput: TerminalOutput[] = [];
 let terminalStatusPolling = false;
-let dapStatusPolling = false;
-let dapSessionId: number | null = null;
-let dapSeq = 0;
-let dapThreadId = 1;
-let dapActive = false;
-const debugBreakpoints = new Map<string, Set<number>>();
+let codeSessionId: number | null = null;
+let codeStarting = false;
+let codeStatusPolling = false;
+let pendingCodeOutput: CodeRunOutput[] = [];
+let codeOutputText = '';
 
 const openFiles = new Map<string, OpenFile>();
 let fileOpenGeneration = 0;
@@ -500,21 +510,145 @@ function setStatus(message: string): void {
   editorStatus.textContent = message;
 }
 
-function showBottom(panel: 'terminal' | 'debug' | 'search'): void {
+function showBottom(panel: 'terminal' | 'debug' | 'search' | 'task'): void {
   bottomPanel.classList.remove('hidden');
   const terminal = panel === 'terminal';
   const search = panel === 'search';
+  const task = panel === 'task';
   terminalTab.classList.toggle('active', terminal);
   searchTab.classList.toggle('active', search);
-  debugTab.classList.toggle('active', !terminal && !search);
+  taskTab.classList.toggle('active', task);
+  debugTab.classList.toggle('active', panel === 'debug');
   terminalPanel.classList.toggle('hidden', !terminal);
   searchPanel.classList.toggle('hidden', !search);
-  debugPanel.classList.toggle('hidden', terminal || search);
+  taskPanel.classList.toggle('hidden', !task);
+  debugPanel.classList.toggle('hidden', panel !== 'debug');
   if (terminal) {
     window.requestAnimationFrame(() => fitTerminal());
   }
   if (search) {
     searchInput.focus();
+  }
+}
+
+function appendTaskOutput(data: string): void {
+  codeOutputText = (codeOutputText + data).slice(-120_000);
+  taskOutput.textContent = codeOutputText;
+  taskOutput.scrollTop = taskOutput.scrollHeight;
+}
+
+function configureTaskForPath(path: string): void {
+  const profile = defaultRunProfile(path);
+  taskProgram.value = profile?.program ?? '';
+  taskArgs.value = profile?.args.join(' ') ?? '';
+  taskLabel.textContent = profile
+    ? profile.label + ' · Installed toolchain required. Approval is requested before each run.'
+    : 'No direct-file runner for this language. Enter a build or run executable and literal arguments. {file} and {workspace} are supported.';
+}
+
+async function startCodeTask(): Promise<void> {
+  const file = state.current;
+  const root = state.root;
+  if (!file || !root) {
+    setStatus('Open a source file before running a task.');
+    return;
+  }
+  if (codeStarting || codeSessionId !== null) {
+    setStatus('Stop the active task before starting another.');
+    return;
+  }
+  const program = taskProgram.value.trim();
+  if (!program) {
+    showBottom('task');
+    taskProgram.focus();
+    setStatus('Enter an executable, or choose a language with a Run file preset.');
+    return;
+  }
+  let args: string[];
+  try {
+    args = parseTaskArgs(taskArgs.value);
+  } catch (error) {
+    setStatus(String(error));
+    return;
+  }
+  if (file.dirty) {
+    await saveCurrent();
+    if (file.dirty) {
+      setStatus('Save this file successfully before running it.');
+      return;
+    }
+  }
+  codeStarting = true;
+  taskRun.disabled = true;
+  runActiveFile.disabled = true;
+  pendingCodeOutput = [];
+  codeOutputText = '';
+  showBottom('task');
+  appendTaskOutput('Awaiting native approval for ' + program + '...\n');
+  try {
+    const status = await invoke<CodeRunStatus>('code_run_start', {
+      path: file.path, program, args,
+    });
+    if (state.root !== root) {
+      await invoke('code_run_stop');
+      return;
+    }
+    codeSessionId = status.sessionId;
+    codeOutputText = '';
+    appendTaskOutput('> ' + program + ' ' + args.join(' ') + '\n');
+    for (const output of pendingCodeOutput) {
+      if (output.sessionId === codeSessionId) appendTaskOutput(output.data);
+    }
+    taskStop.disabled = false;
+    taskLabel.textContent = 'Running ' + program + ' · ' + file.path;
+    setStatus('Code task started: ' + program);
+  } catch (error) {
+    appendTaskOutput('\n[Not started] ' + String(error) + '\n');
+    setStatus('Code task unavailable: ' + String(error));
+  } finally {
+    codeStarting = false;
+    pendingCodeOutput = [];
+    if (codeSessionId === null) {
+      taskRun.disabled = false;
+      runActiveFile.disabled = !state.current;
+    }
+  }
+}
+
+async function stopCodeTask(): Promise<void> {
+  try {
+    await invoke('code_run_stop');
+    if (codeSessionId !== null) appendTaskOutput('\n[Task stopped]\n');
+  } catch (error) {
+    setStatus('Could not stop code task: ' + String(error));
+  } finally {
+    codeSessionId = null;
+    taskStop.disabled = true;
+    taskRun.disabled = false;
+    runActiveFile.disabled = !state.current;
+  }
+}
+
+async function pollCodeStatus(): Promise<void> {
+  if (codeSessionId === null || codeStarting || codeStatusPolling || !state.root) return;
+  codeStatusPolling = true;
+  const observed = codeSessionId;
+  try {
+    const result = await invoke<CodeRunStatus>('code_run_status');
+    if (!result.running && codeSessionId === observed) {
+      codeSessionId = null;
+      taskStop.disabled = true;
+      taskRun.disabled = false;
+      runActiveFile.disabled = !state.current;
+      const exit = result.exitCode === null ? 'terminated' : 'exit code ' + result.exitCode;
+      appendTaskOutput('\n[Task finished: ' + exit + ']\n');
+      taskLabel.textContent = 'Finished · ' + exit;
+      setStatus('Code task ' + exit);
+    }
+  } catch (error) {
+    setStatus('Code task status unavailable: ' + String(error));
+  } finally {
+    codeStatusPolling = false;
   }
 }
 
@@ -596,151 +730,31 @@ async function stopTerminal(): Promise<void> {
   }
 }
 
-function appendDebug(line: string): void {
-  const next = `${debugLog.textContent ?? ''}${line}\n`;
-  const lines = next.split('\n');
-  debugLog.textContent = lines.slice(Math.max(0, lines.length - 300)).join('\n');
-  debugLog.scrollTop = debugLog.scrollHeight;
-}
-
-function updateDapButtons(running: boolean): void {
-  dapActive = running;
-  debugStart.disabled = running;
-  debugStop.disabled = !running;
-  debugContinue.disabled = !running;
-  debugNext.disabled = !running;
-  debugStepIn.disabled = !running;
-  debugStepOut.disabled = !running;
-  debugBreakpoint.disabled = !running;
-}
-
-async function sendDap(command: string, args?: Record<string, unknown>): Promise<void> {
-  dapSeq += 1;
-  const message = JSON.stringify({
-    seq: dapSeq,
-    type: 'request',
-    command,
-    ...(args ? { arguments: args } : {}),
-  });
-  appendDebug(`→ ${message}`);
-  await invoke('dap_send', { message });
-}
-
-async function startDebug(): Promise<void> {
-  const adapter = debugAdapter.value.trim();
-  if (!adapter) {
-    debugStatus.textContent = 'Enter a DAP adapter executable first.';
-    return;
-  }
-  try {
-    showBottom('debug');
-    const args = debugArgs.value.trim().split(/\s+/).filter(Boolean);
-    const status = await invoke<DapStatus>('dap_start', { adapter, args });
-    dapSessionId = status.sessionId;
-    dapSeq = 0;
-    updateDapButtons(true);
-    debugStatus.textContent = 'Adapter started; initializing…';
-    await sendDap('initialize', {
-      adapterID: 'ryoko',
-      clientID: 'ryoko-desktop',
-      linesStartAt1: true,
-      columnsStartAt1: true,
-      pathFormat: 'path',
-      supportsRunInTerminalRequest: false,
+async function openFileAtLine(path: string, line: number, column?: number): Promise<void> {
+  const root = state.root.replace(/\\/g, '/').replace(/\/+$/, '');
+  const candidate = path.replace(/\\/g, '/');
+  const relative = candidate.startsWith(root + '/') ? candidate.slice(root.length + 1) : candidate;
+  await openFile(relative);
+  if (line > 0) {
+    editor.revealLineInCenter(line);
+    editor.setPosition({
+      lineNumber: line,
+      column: column && column > 0 ? column : 1,
     });
-  } catch (error) {
-    await invoke('dap_stop').catch(() => undefined);
-    dapSessionId = null;
-    updateDapButtons(false);
-    debugStatus.textContent = `Debug adapter unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    editor.focus();
   }
 }
 
-async function launchDap(): Promise<void> {
-  const program = debugProgram.value.trim();
-  if (!program) {
-    debugStatus.textContent = 'Adapter initialized. Set a program path and restart to launch it.';
-    return;
-  }
-  const absolute = program.startsWith('/') || /^[A-Za-z]:[\\/]/.test(program);
-  try {
-    await sendDap('launch', {
-      program: absolute ? program : joinWorkspacePath(state.root, program),
-      cwd: state.root,
-      args: [],
-      stopOnEntry: false,
-    });
-    await sendDap('configurationDone');
-    debugStatus.textContent = 'Launch requested';
-  } catch (error) {
-    debugStatus.textContent = `Launch failed: ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
-
-function handleDapMessage(payload: DapMessage): void {
-  if (dapSessionId === null || payload.sessionId !== dapSessionId) return;
-  appendDebug(`← ${payload.message}`);
-  let value: Record<string, unknown>;
-  try {
-    value = JSON.parse(payload.message) as Record<string, unknown>;
-  } catch {
-    return;
-  }
-  if (value.type === 'event') {
-    const event = String(value.event ?? '');
-    if (event === 'initialized') {
-      debugStatus.textContent = 'Adapter initialized';
-      void launchDap();
-    } else if (event === 'stopped') {
-      const body = value.body as Record<string, unknown> | undefined;
-      if (typeof body?.threadId === 'number') dapThreadId = body.threadId;
-      debugStatus.textContent = `Stopped: ${String(body?.reason ?? 'paused')}`;
-    } else if (event === 'continued') {
-      debugStatus.textContent = 'Running';
-    } else if (event === 'terminated' || event === 'exited') {
-      debugStatus.textContent = 'Session ended';
-      updateDapButtons(false);
-    }
-  } else if (value.type === 'response' && value.success === false) {
-    debugStatus.textContent = `DAP ${String(value.command)} failed: ${String(value.message ?? '')}`;
-  }
-}
-
-async function stopDebug(): Promise<void> {
-  await invoke('dap_stop').catch(() => undefined);
-  dapSessionId = null;
-  updateDapButtons(false);
-  debugStatus.textContent = 'Debug adapter stopped';
-}
-
-async function dapStep(command: string): Promise<void> {
-  if (!dapActive) return;
-  try {
-    await sendDap(command, { threadId: dapThreadId });
-  } catch (error) {
-    debugStatus.textContent = String(error);
-  }
-}
-
-async function toggleBreakpoint(): Promise<void> {
-  const file = state.current;
-  const position = editor.getPosition();
-  if (!file || !position || !dapActive) return;
-  const absolute = joinWorkspacePath(state.root, file.path);
-  const lines = debugBreakpoints.get(absolute) ?? new Set<number>();
-  if (lines.has(position.lineNumber)) lines.delete(position.lineNumber);
-  else lines.add(position.lineNumber);
-  debugBreakpoints.set(absolute, lines);
-  try {
-    await sendDap('setBreakpoints', {
-      source: { path: absolute, name: file.path },
-      breakpoints: [...lines].sort((a, b) => a - b).map((line) => ({ line })),
-    });
-    debugStatus.textContent = `Breakpoints in ${file.path}: ${lines.size}`;
-  } catch (error) {
-    debugStatus.textContent = String(error);
-  }
-}
+const debugController = new DebugViewController({
+  openFileAtLine,
+  getCurrentFile: () => (state.current ? { path: state.current.path } : null),
+  getEditorLine: () => editor.getPosition()?.lineNumber ?? null,
+  getWorkspaceRoot: () => state.root,
+  setStatus,
+  showBottom,
+  joinWorkspacePath,
+});
+debugController.mount();
 
 function setLspState(connection: LspState, detail?: string): void {
   lspStatus.className = 'status-pill ' + connection;
@@ -883,7 +897,8 @@ async function openFolder(): Promise<void> {
     await lsp.stop();
     quickOpen.close();
     await stopTerminal();
-    await stopDebug();
+    await debugController.resetOnWorkspaceSwitch();
+    await stopCodeTask();
     for (const timer of changeTimers.values()) window.clearTimeout(timer);
     changeTimers.clear();
     for (const file of openFiles.values()) file.model.dispose();
@@ -932,7 +947,9 @@ async function openFolder(): Promise<void> {
     workspaceName.textContent = info.name;
     workspaceName.title = info.root;
     saveButton.disabled = true;
+    runActiveFile.disabled = true;
     activePath.textContent = 'No file open';
+    languageMode.value = 'plaintext';
     dirtyFlag.classList.add('hidden');
     setStatus('Loading files…');
     await loadFiles();
@@ -1042,11 +1059,25 @@ async function refreshHunks(): Promise<void> {
     if (openedRoot !== state.root) return;
     gitHunks = snapshot;
     hunkList.replaceChildren();
-    hunkCount.textContent = String(snapshot.hunks.length);
+    hunkCount.textContent = String(
+      snapshot.hunks.length + snapshot.files.filter((file) => !file.editable).length,
+    );
+    for (const file of snapshot.files) {
+      if (file.editable) continue;
+      const item = document.createElement('div');
+      item.className = 'hunk-item hunk-file-lock';
+      const title = document.createElement('span');
+      title.className = 'hunk-title';
+      title.textContent = '[' + file.state + '] ' + file.path + ' — ' + file.stateLabel;
+      item.append(title);
+      hunkList.append(item);
+    }
     if (snapshot.hunks.length === 0) {
       const hint = document.createElement('p');
       hint.className = 'hint';
-      hint.textContent = 'No unstaged selectable text hunks. Binary, rename and mode changes are excluded.';
+      hint.textContent = snapshot.files.some((file) => !file.editable)
+        ? 'Only the non-editable changes above are present. Selectable text hunks appear here after refresh.'
+        : 'No unstaged selectable text hunks. Binary, rename and mode changes stay listed above.';
       hunkList.append(hint);
       return;
     }
@@ -1097,9 +1128,16 @@ async function stageSelectedHunks(): Promise<void> {
   hunkStage.disabled = true;
   const ids = chosenHunks();
   try {
-    await invoke('stage_review_hunks', { ids, expectedPatch: gitHunks.patch });
+    const report = await invoke<ReviewActionReport>('stage_review_hunks', {
+      ids,
+      expectedPatch: gitHunks.patch,
+    });
     void refreshWorkbenchChanges();
-    setStatus('Staged ' + ids.length + ' selected text hunk(s) in Git index. No commit or merge was made.');
+    const files = report.files.map((file) => file.path).join(', ');
+    setStatus(
+      'Staged ' + ids.length + ' selected text hunk(s) in Git index (files: ' + files
+      + '). No commit or merge was made.',
+    );
     await refreshHunks();
   } catch (error) {
     setStatus('Staging denied or failed: ' + (error instanceof Error ? error.message : String(error)));
@@ -1287,13 +1325,25 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
   }
   try {
     if (action === 'accept') {
-      await invoke('stage_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      const report = await invoke<ReviewActionReport>('stage_review_hunks', {
+        ids: [hunk.id],
+        expectedPatch: gitHunks.patch,
+      });
       void refreshWorkbenchChanges();
-      setStatus(`Accepted hunk #${hunk.id} into the Git index. No commit or merge was made.`);
+      setStatus(
+        `Accepted hunk #${hunk.id} in ${report.files.map((file) => file.path).join(', ') || hunk.path}`
+        + ' into the Git index. No commit or merge was made.',
+      );
     } else {
-      await invoke('reject_review_hunks', { ids: [hunk.id], expectedPatch: gitHunks.patch });
+      const report = await invoke<ReviewActionReport>('reject_review_hunks', {
+        ids: [hunk.id],
+        expectedPatch: gitHunks.patch,
+      });
       void refreshWorkbenchChanges();
-      setStatus(`Rejected hunk #${hunk.id}; only those working-file edits were reverted.`);
+      setStatus(
+        `Rejected hunk #${hunk.id} in ${report.files.map((file) => file.path).join(', ') || hunk.path}`
+        + '; only those working-file edits were reverted.',
+      );
     }
     await refreshHunks();
     const remaining = gitHunks?.hunks.find((item) => item.id === hunk.id);
@@ -1716,7 +1766,9 @@ function selectOpenFile(path: string): void {
   if (file.viewState) editor.restoreViewState(file.viewState);
   revealEditor();
   if (window.matchMedia('(max-width: 720px)').matches) activateView('editor');
-  languageMode.textContent = file.languageId;
+  languageMode.value = file.languageId;
+  configureTaskForPath(path);
+  runActiveFile.disabled = codeSessionId !== null;
   activePath.textContent = file.path;
   dirtyFlag.classList.toggle('hidden', !file.dirty);
   saveButton.disabled = false;
@@ -1755,7 +1807,9 @@ function closeOpenFile(path: string): void {
     activePath.textContent = 'No file open';
     dirtyFlag.classList.add('hidden');
     saveButton.disabled = true;
-    languageMode.textContent = 'plaintext';
+    languageMode.value = 'plaintext';
+    configureTaskForPath('');
+    runActiveFile.disabled = true;
     cursorPos.textContent = '';
     setStatus('Ready');
   }
@@ -1775,7 +1829,7 @@ async function openFile(path: string): Promise<void> {
     setStatus(`Opening ${path}…`);
     const content = await invoke<string>('read_file', { path });
     if (ticket !== fileOpenGeneration || state.root !== root || workspaceSwitching) return;
-    const languageId = languageForPath(path);
+    const languageId = languageForPath(path, content);
     const model = monaco.editor.createModel(content, languageId, monaco.Uri.parse(uri));
     const file: OpenFile = { path, uri, languageId, model, version: 1, savedText: content, dirty: false };
     openFiles.set(uri, file);
@@ -2024,6 +2078,9 @@ function dispatchBinding(action: string): void {
     case 'workbench.changes':
       activateView('changes');
       break;
+    case 'workbench.debug':
+      showBottom('debug');
+      break;
     case 'workbench.settings':
       openSettings.click();
       break;
@@ -2040,6 +2097,35 @@ function dispatchBinding(action: string): void {
 
 window.addEventListener('keydown', (event) => {
   if (event.repeat) return;
+  if (event.key === 'F5' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('continue');
+      return;
+    }
+  } else if (event.key === 'F10' && !event.ctrlKey && !event.metaKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('next');
+      return;
+    }
+  } else if (event.key === 'F11' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('stepIn');
+      return;
+    }
+  } else if (event.key === 'F11' && event.shiftKey) {
+    if (debugController.getState().running) {
+      event.preventDefault();
+      void debugController.dapStep('stepOut');
+      return;
+    }
+  } else if (event.key === 'F9') {
+    event.preventDefault();
+    void debugController.toggleCurrentBreakpoint();
+    return;
+  }
   const action = keybindings.byChord.get(chordForEvent(event));
   if (!action || action === 'editor.save') return;
   event.preventDefault();
@@ -2062,34 +2148,29 @@ inlineEditInput.addEventListener('keydown', (event) => {
 changesRefresh.addEventListener('click', () => {
   void refreshWorkbenchChanges();
 });
+taskTab.addEventListener('click', () => showBottom('task'));
+taskRun.addEventListener('click', () => void startCodeTask());
+taskStop.addEventListener('click', () => void stopCodeTask());
+runActiveFile.addEventListener('click', () => {
+  if (!state.current) return;
+  configureTaskForPath(state.current.path);
+  void startCodeTask();
+});
 terminalStart.addEventListener('click', () => {
   void startTerminal();
 });
 terminalStop.addEventListener('click', () => {
   void stopTerminal();
 });
-debugStart.addEventListener('click', () => {
-  void startDebug();
-});
-debugStop.addEventListener('click', () => {
-  void stopDebug();
-});
-debugContinue.addEventListener('click', () => {
-  void dapStep('continue');
-});
-debugNext.addEventListener('click', () => {
-  void dapStep('next');
-});
-debugStepIn.addEventListener('click', () => {
-  void dapStep('stepIn');
-});
-debugStepOut.addEventListener('click', () => {
-  void dapStep('stepOut');
-});
-debugBreakpoint.addEventListener('click', () => {
-  void toggleBreakpoint();
-});
 
+void listen<CodeRunOutput>('ryoko-code-output', (event) => {
+  if (event.payload.sessionId === codeSessionId) {
+    appendTaskOutput(event.payload.data);
+  } else if (codeStarting && codeSessionId === null) {
+    const bytes = pendingCodeOutput.reduce((sum, item) => sum + item.data.length, 0);
+    if (bytes + event.payload.data.length <= 64 * 1024) pendingCodeOutput.push(event.payload);
+  }
+});
 void listen<TerminalOutput>('ryoko-terminal-output', (event) => {
   if (terminalSessionId !== null && event.payload.sessionId === terminalSessionId) {
     ensureTerminal().write(event.payload.data);
@@ -2106,12 +2187,6 @@ void listen<FimError>('ryoko-fim-error', (event) => {
   if (event.payload.requestId !== String(fimGeneration)) return;
   hideFim(false);
   setStatus(`Completion unavailable: ${event.payload.message}`);
-});
-void listen<DapMessage>('ryoko-dap-message', (event) => handleDapMessage(event.payload));
-void listen<DapLog>('ryoko-dap-log', (event) => {
-  if (dapSessionId !== null && event.payload.sessionId === dapSessionId && event.payload.message) {
-    appendDebug(`[adapter] ${event.payload.message}`);
-  }
 });
 
 async function pollTerminalStatus(): Promise<void> {
@@ -2135,21 +2210,7 @@ async function pollTerminalStatus(): Promise<void> {
 }
 
 async function pollDebugStatus(): Promise<void> {
-  if (dapSessionId === null || dapStatusPolling) return;
-  dapStatusPolling = true;
-  const observedId = dapSessionId;
-  try {
-    const status = await invoke<DapStatus>('dap_status');
-    if (!status.running && dapSessionId === observedId) {
-      dapSessionId = null;
-      updateDapButtons(false);
-      debugStatus.textContent = 'Debug adapter exited';
-    }
-  } catch (error) {
-    debugStatus.textContent = 'Debug status unavailable: ' + String(error);
-  } finally {
-    dapStatusPolling = false;
-  }
+  debugController.pollStatus();
 }
 
 window.setInterval(() => {
@@ -2163,6 +2224,7 @@ window.setInterval(() => {
   if (document.visibilityState === 'visible') {
     void pollTerminalStatus();
     void pollDebugStatus();
+    void pollCodeStatus();
   }
 }, 2500);
 
@@ -2171,8 +2233,10 @@ refreshRunStatus();
 
 window.addEventListener('beforeunload', () => {
   void lsp.stop();
+  debugController.unmount();
   void invoke('terminal_stop').catch(() => undefined);
   void invoke('dap_stop').catch(() => undefined);
+  void invoke('code_run_stop').catch(() => undefined);
 });
 
 setLspState('offline');
@@ -2182,8 +2246,58 @@ mountConnectors(setStatus);
 mountMarketplaceBrowser(setStatus);
 mountSearchPanel({ openFile, setStatus });
 mountSettingsDialog({ setStatus });
-registerMonacoCapabilities(
-  monaco,
-  lsp,
-  ['rust', 'typescript', 'javascript', 'python', 'go', 'c', 'cpp', 'java', 'css', 'shell'],
-);
+const registeredLanguages = new Set(monaco.languages.getLanguages().map((language) => language.id));
+for (const language of LANGUAGE_IDS) {
+  if (!registeredLanguages.has(language)) monaco.languages.register({ id: language });
+}
+const availableLanguages = [...new Set(monaco.languages.getLanguages().map((language) => language.id))]
+  .sort();
+for (const id of availableLanguages) {
+  const option = document.createElement('option');
+  option.value = id;
+  option.textContent = id;
+  languageMode.append(option);
+}
+const customLanguageOption = document.createElement('option');
+customLanguageOption.value = '__custom__';
+customLanguageOption.textContent = 'Custom language…';
+languageMode.append(customLanguageOption);
+languageMode.value = 'plaintext';
+languageMode.addEventListener('change', () => {
+  const file = state.current;
+  if (!file) { languageMode.value = 'plaintext'; return; }
+  let newLanguage = languageMode.value;
+  if (newLanguage === '__custom__') {
+    const entered = window.prompt(
+      'Custom LSP language ID (lowercase letters, digits, - or +):',
+      file.languageId,
+    );
+    if (entered === null) { languageMode.value = file.languageId; return; }
+    const requested = entered.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9+-]{0,31}$/.test(requested)) {
+      languageMode.value = file.languageId;
+      setStatus('Language IDs must be 1–32 lowercase letters, digits, - or +.');
+      return;
+    }
+    if (!monaco.languages.getLanguages().some((mode) => mode.id === requested)) {
+      monaco.languages.register({ id: requested });
+      registerMonacoCapabilities(monaco, lsp, [requested]);
+    }
+    if (!Array.from(languageMode.options).some((option) => option.value === requested)) {
+      const option = document.createElement('option');
+      option.value = requested;
+      option.textContent = requested;
+      languageMode.insertBefore(option, customLanguageOption);
+    }
+    newLanguage = requested;
+    languageMode.value = requested;
+  }
+  if (file.languageId === newLanguage) return;
+  lsp.close(file.uri);
+  monaco.editor.setModelLanguage(file.model, newLanguage);
+  file.languageId = newLanguage;
+  file.version += 1;
+  lsp.ensureOpen(file.uri, file.languageId, file.version, file.model.getValue());
+  setStatus('Language mode: ' + newLanguage + ' (syntax support depends on installed language tooling)');
+});
+registerMonacoCapabilities(monaco, lsp, availableLanguages);
