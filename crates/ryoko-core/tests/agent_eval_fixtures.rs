@@ -194,14 +194,24 @@ async fn modified_or_untrusted_offline_fixture_cannot_receive_a_validation_recei
         .into_iter()
         .find(|f| f.id == "eval-bugfix-pagination")
         .expect("built-in pagination fixture");
-    let mock = fixture.mock_proposal.as_mut().expect("trusted mock proposal");
-    let source = mock.files.iter_mut().find(|f| f.path == "src/pagination.rs").unwrap();
+    let mock = fixture
+        .mock_proposal
+        .as_mut()
+        .expect("trusted mock proposal");
+    let source = mock
+        .files
+        .iter_mut()
+        .find(|f| f.path == "src/pagination.rs")
+        .unwrap();
     source.content = source.content.replace(
         "let start = (page - 1) * page_size;",
         "let start = (page - 1) * page_size + 1;",
     );
     let result = run_evaluation_fixture(&fixture, &EvaluationConfig::default()).await;
-    assert!(!result.passed, "modified source must not be labelled validated");
+    assert!(
+        !result.passed,
+        "modified source must not be labelled validated"
+    );
     assert!(!result.validation_passed);
     assert!(result.validation_evidence.is_none());
 }
