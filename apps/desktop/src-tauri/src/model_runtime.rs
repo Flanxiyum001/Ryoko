@@ -12,9 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ryoko_models::{
-    AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, ModelProvider,
-    ModelRouter, OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog, ProviderProfile,
-    UsageLedger,
+    AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, ModelProvider, ModelRouter,
+    OpenAiCompatConfig, OpenAiCompatProvider, ProviderCatalog, ProviderProfile, UsageLedger,
 };
 
 fn env(name: &str) -> Option<String> {
@@ -29,7 +28,12 @@ pub fn load_router(root: &Path, model: Option<&str>) -> Result<(String, Arc<Mode
         .filter(|model| !model.is_empty())
         .map(str::to_owned)
         .or_else(|| env("RYOKO_MODEL"))
-        .or_else(|| crate::onboarding::load().ok().filter(|setup| setup.configured).map(|setup| setup.model))
+        .or_else(|| {
+            crate::onboarding::load()
+                .ok()
+                .filter(|setup| setup.configured)
+                .map(|setup| setup.model)
+        })
         .ok_or_else(|| {
             "no model selected: pick one in the settings panel or set RYOKO_MODEL".to_owned()
         })?;
@@ -63,27 +67,40 @@ pub fn load_router(root: &Path, model: Option<&str>) -> Result<(String, Arc<Mode
         let key = if setup.provider == "ollama" {
             None
         } else {
-            Some(crate::credential_store::retrieve(&setup.provider)?
-                .ok_or("API key is missing from the OS keychain. Configure the provider again on Welcome.")?)
+            Some(crate::credential_store::retrieve(&setup.provider)?.ok_or(
+                "API key is missing from the OS keychain. Configure the provider again on Welcome.",
+            )?)
         };
         let provider: Arc<dyn ModelProvider> = match wire {
             "anthropic" => {
                 let mut config = AnthropicConfig::new(&setup.provider, base_url);
-                if let Some(key) = key { config = config.with_api_key(key); }
-                Arc::new(AnthropicProvider::new(config)
-                    .map_err(|error| format!("invalid Anthropic setup: {error}"))?)
+                if let Some(key) = key {
+                    config = config.with_api_key(key);
+                }
+                Arc::new(
+                    AnthropicProvider::new(config)
+                        .map_err(|error| format!("invalid Anthropic setup: {error}"))?,
+                )
             }
             "gemini" => {
                 let mut config = GeminiConfig::new(&setup.provider, base_url);
-                if let Some(key) = key { config = config.with_api_key(key); }
-                Arc::new(GeminiProvider::new(config)
-                    .map_err(|error| format!("invalid Gemini setup: {error}"))?)
+                if let Some(key) = key {
+                    config = config.with_api_key(key);
+                }
+                Arc::new(
+                    GeminiProvider::new(config)
+                        .map_err(|error| format!("invalid Gemini setup: {error}"))?,
+                )
             }
             _ => {
                 let mut config = OpenAiCompatConfig::new(&setup.provider, base_url);
-                if let Some(key) = key { config = config.with_api_key(key); }
-                Arc::new(OpenAiCompatProvider::new(config)
-                    .map_err(|error| format!("invalid model setup: {error}"))?)
+                if let Some(key) = key {
+                    config = config.with_api_key(key);
+                }
+                Arc::new(
+                    OpenAiCompatProvider::new(config)
+                        .map_err(|error| format!("invalid model setup: {error}"))?,
+                )
             }
         };
         let mut router = ModelRouter::new(&setup.provider).with_ledger(ledger);
