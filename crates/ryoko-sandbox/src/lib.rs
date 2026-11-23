@@ -134,6 +134,12 @@ impl WasmSandbox {
         let mut config = Config::new();
         config.consume_fuel(true);
         config.epoch_interruption(true);
+        // Windows can enforce CET shadow stacks. Avoid Wasmtime's native
+        // exception-handler trap recovery here: a guest fuel trap must be
+        // returned as a validation error, never abort the entire IDE.
+        // Explicit checks are slower but retain deterministic fuel limits.
+        #[cfg(windows)]
+        config.signals_based_traps(false);
         config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Disable);
         let engine = Engine::new(&config).map_err(|err| SandboxError::Engine(err.to_string()))?;
         Ok(Self { engine, limits })
