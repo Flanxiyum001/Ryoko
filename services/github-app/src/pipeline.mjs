@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
@@ -203,8 +204,11 @@ export async function runIssuePipeline({
   if (!Array.isArray(settings.agentRepoIds) || !settings.agentRepoIds.includes(request.repoId)) {
     throw bad('repository is not allowlisted for agent runs', 403);
   }
+  // A failed run may have left a local checkout. Never reuse that directory
+  // on an explicit retry: each run needs a clean independent clone.
   const projectName = safeProjectName(
-    `${request.name.slice(0, 20)}-${request.number}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 40),
+    `${request.name.slice(0, 12)}-${request.number}-${randomUUID().slice(0, 8)}`
+      .replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 40),
   );
   const cloneToken = await broker.installationToken(request.installationId, request.repoId, 'clone');
   const cloned = await clone({
@@ -227,12 +231,21 @@ export async function runIssuePipeline({
   const report = JSON.parse(await readFile(reportPath, 'utf8'));
   const success = selectIntegratedSuccess(report);
   const branch = safeBranch(success.branch);
+  const root = `/repos/${encodeURIComponent(request.owner)}/${encodeURIComponent(request.name)}`;
+  // A previous failed attempt might already have pushed a branch. Do not
+  // reuse or silently advance it, because it may have a PR under human review.
+  const readToken = await broker.installationToken(request.installationId, request.repoId, 'read');
+  try {
+    await broker.request(root + '/git/ref/heads/' + encodeURIComponent(branch), readToken);
+    throw bad('GitHub branch already exists; reconcile the previous attempt manually', 409);
+  } catch (error) {
+    if (error?.status !== 404) throw error; // only explicit "not found" permits a push
+  }
 
   const pushToken = await broker.installationToken(request.installationId, request.repoId, 'contents');
   await pushBranch({ path: cloned.path, branch, token: pushToken });
 
   const prToken = await broker.installationToken(request.installationId, request.repoId, 'pull_requests');
-  const root = `/repos/${encodeURIComponent(request.owner)}/${encodeURIComponent(request.name)}`;
   const created = await broker.request(root + '/pulls', prToken, {
     method: 'POST',
     body: {
