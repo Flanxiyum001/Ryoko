@@ -2288,11 +2288,40 @@ for (const id of availableLanguages) {
   option.textContent = id;
   languageMode.append(option);
 }
+const customLanguageOption = document.createElement('option');
+customLanguageOption.value = '__custom__';
+customLanguageOption.textContent = 'Custom language…';
+languageMode.append(customLanguageOption);
 languageMode.value = 'plaintext';
 languageMode.addEventListener('change', () => {
   const file = state.current;
   if (!file) { languageMode.value = 'plaintext'; return; }
-  const newLanguage = languageMode.value;
+  let newLanguage = languageMode.value;
+  if (newLanguage === '__custom__') {
+    const entered = window.prompt(
+      'Custom LSP language ID (lowercase letters, digits, - or +):',
+      file.languageId,
+    );
+    if (entered === null) { languageMode.value = file.languageId; return; }
+    const requested = entered.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9+-]{0,31}$/.test(requested)) {
+      languageMode.value = file.languageId;
+      setStatus('Language IDs must be 1–32 lowercase letters, digits, - or +.');
+      return;
+    }
+    if (!monaco.languages.getLanguages().some((mode) => mode.id === requested)) {
+      monaco.languages.register({ id: requested });
+      registerMonacoCapabilities(monaco, lsp, [requested]);
+    }
+    if (!Array.from(languageMode.options).some((option) => option.value === requested)) {
+      const option = document.createElement('option');
+      option.value = requested;
+      option.textContent = requested;
+      languageMode.insertBefore(option, customLanguageOption);
+    }
+    newLanguage = requested;
+    languageMode.value = requested;
+  }
   if (file.languageId === newLanguage) return;
   lsp.close(file.uri);
   monaco.editor.setModelLanguage(file.model, newLanguage);
