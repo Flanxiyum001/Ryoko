@@ -40,7 +40,7 @@ export async function postBotComment(broker, request, message) {
 export function botStatus(request, job) {
   const issue = '#' + request.number;
   if (!job) {
-    return `Ryoko has no recorded job for issue ${issue} in this broker session. To request work, an authorized maintainer can add the \`ryoko-fix\` label or comment \`/ryoko run\`.`;
+    return `Ryoko has no recorded job for issue ${issue} in the broker ledger. To request work, an authorized maintainer can add the \`ryoko-fix\` label or comment \`/ryoko run\`.`;
   }
   if (job.status === 'running') {
     return `Ryoko is working on issue ${issue}. A draft pull request will be created only if the engineering run succeeds. No changes are merged automatically.`;
@@ -48,6 +48,9 @@ export function botStatus(request, job) {
   if (job.status === 'completed' && Number.isSafeInteger(job.number) && job.number > 0) {
     const link = `https://github.com/${request.fullName}/pull/${job.number}`;
     return `Ryoko completed issue ${issue} and opened [draft PR #${job.number}](${link}). Review the code, validation and CI checks before manually merging.`;
+  }
+  if (job.status === 'interrupted') {
+    return `Ryoko's previous run for issue ${issue} was interrupted by a broker restart. No run was resumed automatically. Inspect remote branches and PRs before explicitly sending \`/ryoko retry\`.`;
   }
   if (job.status === 'failed') {
     return `Ryoko could not finish issue ${issue}. No merge was performed. Check the broker logs and any partially pushed branch before an authorized maintainer sends \`/ryoko retry\`.`;
