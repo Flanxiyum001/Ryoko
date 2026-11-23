@@ -476,6 +476,23 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       const item = addProposal(session.user, proposal, 'desktop');
       return json(res, 201, { id: item.id, status: item.status });
     }
+    const desktopProposal = path.match(/^\/api\/desktop\/proposals\/([a-f0-9-]{36})$/);
+    if (req.method === 'GET' && desktopProposal) {
+      const session = requireDesktop(req);
+      const item = proposals.get(desktopProposal[1]);
+      if (!item || item.owner !== session.user.login
+        || item.status !== 'pending' || Date.now() > item.expires) {
+        throw bad('proposal not found or no longer pending', 404);
+      }
+      const repo = await client.authorizedRepo(session.token,
+        item.proposal.installationId, item.proposal.repoId);
+      return json(res, 200, {
+        id: item.id, operation: item.proposal.operation,
+        params: item.proposal.params, repository: repo.full_name,
+        installationId: item.proposal.installationId,
+        repoId: item.proposal.repoId,
+      });
+    }
     const desktopDecision = path.match(/^\/api\/desktop\/proposals\/([a-f0-9-]{36})\/(approve|reject)$/);
     if (req.method === 'POST' && desktopDecision) {
       const session = requireDesktop(req);
