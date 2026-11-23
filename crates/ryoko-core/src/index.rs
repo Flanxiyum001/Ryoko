@@ -273,6 +273,136 @@ impl WorkspaceIndex {
         Ok(hits)
     }
 
+    /// Rank references across the indexed repository for a natural-language
+    /// task. Name matches win over file-path and signature matches; call sites
+    /// are included so the model can assess the blast radius before editing.
+    /// This is deterministic lexical retrieval, not an embedding search.
+    pub fn context_for_goal(&self, goal: &str, max_chars: usize) -> Result<String, IndexError> {
+        if max_chars == 0 {
+            return Ok(String::new());
+        }
+        let terms = goal_terms(goal)
+            .into_iter()
+            .map(|term| term.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            return Ok(String::new());
+        }
+
+        // Keep the scan bounded even for unusually large generated projects.
+        let mut statement = self.connection.prepare(
+            "SELECT path, name, kind, signature, start_line
+             FROM symbols ORDER BY path, start_line LIMIT 20000",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SymbolHit {
+                path: row.get(0)?,
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                signature: row.get(3)?,
+                start_line: row.get::<_, i64>(4)? as usize,
+                callers: Vec::new(),
+            })
+        })?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let hit = row?;
+            let name = hit.name.to_ascii_lowercase();
+            let path = hit.path.to_ascii_lowercase();
+            let signature = hit.signature.to_ascii_lowercase();
+            let score = terms.iter().fold(0_u32, |total, term| {
+                total
+                    + if name == *term {
+                        100
+                    } else if name.contains(term) {
+                        45
+                    } else {
+                        0
+                    }
+                    + if path.contains(term) { 25 } else { 0 }
+                    + if signature.contains(term) { 8 } else { 0 }
+            });
+            if score > 0 {
+                scored.push((score, hit));
+            }
+        }
+        scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.start_line.cmp(&right.start_line))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        let mut output = String::from(
+            "Repository-wide related definitions and call sites (untrusted reference data):\n",
+        );
+        let mut seen = BTreeSet::new();
+        let mut callers = self.connection.prepare(
+            "SELECT caller_path, caller, line FROM calls
+             WHERE callee = ?1 ORDER BY caller_path, line LIMIT 5",
+        )?;
+        for (_, hit) in scored.into_iter().take(16) {
+            let key = (hit.path.clone(), hit.name.clone(), hit.start_line);
+            if !seen.insert(key) {
+                continue;
+            }
+            output.push_str(&format!(
+                "- {} {} at {}:{}\n",
+                hit.kind,
+                bound(&hit.signature, 180),
+                hit.path,
+                hit.start_line
+            ));
+            let rows = callers.query_map(params![hit.name], |row| {
+                Ok(CallerHit {
+                    path: row.get(0)?,
+                    caller: row.get(1)?,
+                    line: row.get::<_, i64>(2)? as usize,
+                })
+            })?;
+            for caller in rows {
+                let caller = caller?;
+                output.push_str(&format!(
+                    "  references: {} at {}:{}\n",
+                    caller.caller, caller.path, caller.line
+                ));
+            }
+            if output.chars().count() >= max_chars {
+                break;
+            }
+        }
+
+        // Paths can matter even when a file has no named declarations (e.g.
+        // test fixtures, scripts and migration files).
+        let mut paths = self
+            .connection
+            .prepare("SELECT path FROM files ORDER BY path LIMIT 3000")?;
+        let candidates = paths.query_map([], |row| row.get::<_, String>(0))?;
+        let mut matched_paths = Vec::new();
+        for candidate in candidates {
+            let path = candidate?;
+            let lower = path.to_ascii_lowercase();
+            let score = terms
+                .iter()
+                .filter(|term| lower.contains(term.as_str()))
+                .count();
+            if score > 0 {
+                matched_paths.push((score, path));
+            }
+        }
+        matched_paths.sort_by(|(score_a, path_a), (score_b, path_b)| {
+            score_b.cmp(score_a).then_with(|| path_a.cmp(path_b))
+        });
+        for (_, path) in matched_paths.into_iter().take(12) {
+            output.push_str(&format!("- related path: {path}\n"));
+        }
+        if output.ends_with("reference data):\n") {
+            return Ok(String::new());
+        }
+        Ok(bound(&output, max_chars))
+    }
+
     /// Compact prompt-ready context for symbol-like goal terms. Duplicate
     /// definitions and callers are removed, and the result is character-bounded.
     pub fn context_for_terms(
@@ -464,6 +594,45 @@ mod tests {
         assert!(context.contains("`run`"));
         assert!(context.contains("caller: main"));
         assert!(context.chars().count() <= 160);
+    }
+
+    #[test]
+    fn ranked_repository_context_recovers_partial_symbols_paths_and_callers() {
+        let mut index = WorkspaceIndex::in_memory().unwrap();
+        let files = [
+            context("src/payments.rs", &["verifyPayment"], &[]),
+            context(
+                "src/checkout.rs",
+                &["startCheckout"],
+                &[("startCheckout", "verifyPayment")],
+            ),
+            context("tests/payment_flow.rs", &["regression"], &[]),
+            context("src/unrelated.rs", &["renderChart"], &[]),
+        ];
+        index.rebuild(&files).unwrap();
+        let found = index
+            .context_for_goal("fix payment verification", 2000)
+            .unwrap();
+        assert!(found.contains("verifyPayment"));
+        assert!(found.contains("src/payments.rs"));
+        assert!(found.contains("startCheckout at src/checkout.rs"));
+        assert!(found.contains("tests/payment_flow.rs"));
+        assert!(!found.contains("renderChart"));
+        assert_eq!(
+            found,
+            index
+                .context_for_goal("fix payment verification", 2000)
+                .unwrap()
+        );
+        assert_eq!(
+            index
+                .context_for_goal("fix payment", 120)
+                .unwrap()
+                .chars()
+                .count(),
+            120
+        );
+        assert!(index.context_for_goal("fix payment", 0).unwrap().is_empty());
     }
 
     #[test]
