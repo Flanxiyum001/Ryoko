@@ -8,6 +8,7 @@ import { GitHubBroker } from './github.mjs';
 import { issueAgentRequest, runIssuePipeline } from './pipeline.mjs';
 import { issueBotCommand, postBotComment, botStatus } from './bot.mjs';
 import { BotJobStore } from './durable-queue.mjs';
+import { ApprovalStore } from './approval-store.mjs';
 import { isAllowedOrigin, positiveId, validateProposal, verifyWebhookSignature } from './security.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -77,6 +78,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     projectRoot: config?.projectRoot || '',
     projectsRoot: config?.projectsRoot || '',
     botStateFile: config?.botStateFile || '',
+    approvalStateFile: config?.approvalStateFile || '',
     pipelineTimeoutMs: config?.pipelineTimeoutMs || 15 * 60_000,
     // Operator-owned MCP settings for pipeline runs. Absent means no MCP tools.
     mcp: config?.mcp && typeof config.mcp === 'object' ? config.mcp : null,
@@ -84,7 +86,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
   const client = broker || new GitHubBroker(config || {});
   const pagesRoot = frontendPath || resolve('apps/desktop');
   const sessions = new Map();
-  const proposals = new Map();
+  const approvalStore = new ApprovalStore(settings.approvalStateFile);
+  const proposals = approvalStore.proposals;
   const events = [];
   const botState = new BotJobStore(settings.botStateFile);
   const deliveries = botState.deliveries;
@@ -117,20 +120,14 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
     }
   }
   function addProposal(user, proposal, source = 'user') {
-    if (proposals.size > 300) {
-      for (const [id, item] of proposals) {
-        if (item.status !== 'pending' || Date.now() > item.expires) proposals.delete(id);
-        if (proposals.size <= 250) break;
-      }
-    }
+    approvalStore.prune();
     if (proposals.size >= 300) throw bad('proposal queue full', 429);
     const id = randomUUID();
     const item = {
       id, source, owner: user.login, proposal, status: 'pending',
       createdAt: new Date().toISOString(), expires: Date.now() + PROPOSAL_TTL,
     };
-    proposals.set(id, item);
-    return item;
+    return approvalStore.save(item);
   }
   function emit(event) {
     events.push(event);
@@ -515,20 +512,18 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       await client.authorizedRepo(session.token,
         item.proposal.installationId, item.proposal.repoId);
       if (desktopDecision[2] === 'reject') {
-        item.status = 'rejected';
-        return json(res, 200, { id: item.id, status: item.status });
+        const rejected = approvalStore.save({ ...item, status: 'rejected' });
+        return json(res, 200, { id: rejected.id, status: rejected.status });
       }
-      item.status = 'executing'; // one-shot, before any network await
+      approvalStore.save({ ...item, status: 'executing' }); // persist before any remote mutation
       try {
         const result = item.proposal.operation === 'clone_repository'
           ? await client.clone(session.token, item.proposal, settings.projectsRoot)
           : await client.execute(session.token, item.proposal);
-        item.status = 'completed';
-        item.result = result;
-        return json(res, 200, { id: item.id, status: item.status, result });
+        approvalStore.save({ ...item, status: 'completed', result });
+        return json(res, 200, { id: item.id, status: 'completed', result });
       } catch (error) {
-        item.status = 'failed'; // uncertain GitHub writes must not be replayed
-        item.error = safeError(error).message;
+        approvalStore.save({ ...item, status: 'failed', error: safeError(error).message });
         throw error;
       }
     }
@@ -591,20 +586,18 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl, run
       if (!item || item.owner !== session.user.login) throw bad('proposal not found', 404);
       if (Date.now() > item.expires || item.status !== 'pending') throw bad('proposal expired or already resolved', 409);
       if (proposalMatch[2] === 'reject') {
-        item.status = 'rejected';
-        return json(res, 200, { id: item.id, status: item.status });
+        const rejected = approvalStore.save({ ...item, status: 'rejected' });
+        return json(res, 200, { id: rejected.id, status: rejected.status });
       }
-      item.status = 'executing';
+      approvalStore.save({ ...item, status: 'executing' });
       try {
         const result = item.proposal.operation === 'clone_repository'
           ? await client.clone(session.token, item.proposal, settings.projectsRoot)
           : await client.execute(session.token, item.proposal);
-        item.status = 'completed';
-        item.result = result;
-        return json(res, 200, { id: item.id, status: item.status, result });
+        approvalStore.save({ ...item, status: 'completed', result });
+        return json(res, 200, { id: item.id, status: 'completed', result });
       } catch (error) {
-        item.status = 'failed'; // never automatically re-execute an ambiguous write
-        item.error = safeError(error).message;
+        approvalStore.save({ ...item, status: 'failed', error: safeError(error).message });
         throw error;
       }
     }
