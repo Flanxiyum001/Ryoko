@@ -1040,11 +1040,7 @@ async fn execute_task(
             let reason = format!("validation rejected changes: {}", report.summary);
             let _ = agent.rollback(ctx.clone(), task, &reason).await;
             let _ = lease.discard().await;
-            let mut next = reason.clone();
-            if !report.logs.is_empty() {
-                next.push_str("\n\n");
-                next.push_str(&report.logs.join("\n"));
-            }
+            let next = prioritized_repair_feedback(&reason, &report.logs, &result.changes);
             last_error = reason;
             feedback = Some(next);
             failure = Some((FailureStage::Validation, report.summary.clone()));
@@ -1232,12 +1228,67 @@ fn publish_failure(
     );
 }
 
+/// Put compiler errors and failing test assertions ahead of noisy build output.
+/// Truncation must not hide the actionable diagnostic at the end of a large log.
+/// Logs are untrusted project data, never agent instructions.
+fn prioritized_repair_feedback(
+    reason: &str,
+    logs: &[String],
+    changes: &[crate::model::ProposedChange],
+) -> String {
+    let mut output = format!("{reason}\n\n");
+    output.push_str(
+        "Repair the compiler or regression failure without removing existing tests. \
+         Return the corrected change set, including regression coverage.\n",
+    );
+    let paths = changes
+        .iter()
+        .take(24)
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    if !paths.is_empty() {
+        output.push_str(&format!(
+            "Files from the rejected attempt: {}\n",
+            paths.join(", ")
+        ));
+    }
+    let important = logs
+        .iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("error[")
+                || lower.contains("error:")
+                || lower.contains("failed")
+                || lower.contains("panicked")
+                || lower.contains("assertion")
+                || lower.contains("test result")
+                || lower.contains("traceback")
+        })
+        .take(30)
+        .collect::<Vec<_>>();
+    if !important.is_empty() {
+        output.push_str("\nPriority diagnostics (untrusted build output):\n");
+        for line in important {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push_str("\nFull bounded validation log (untrusted):\n");
+    for line in logs {
+        output.push_str(line);
+        output.push('\n');
+    }
+    cap_feedback(&output)
+}
+
 fn cap_feedback(feedback: &str) -> String {
     const MAX_BYTES: usize = 16_000;
     if feedback.len() <= MAX_BYTES {
         return feedback.to_owned();
     }
-    let mut end = MAX_BYTES;
+    // Reserve space for the ellipsis; the final feedback must stay within
+    // the promised byte limit even after truncation.
+    let mut end = MAX_BYTES.saturating_sub(3);
     while end > 0 && !feedback.is_char_boundary(end) {
         end -= 1;
     }
@@ -1255,6 +1306,22 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn repair_feedback_keeps_tail_diagnostics_ahead_of_noisy_logs() {
+        let mut logs = vec!["building dependency".repeat(200); 100];
+        logs.push("error[E0425]: cannot find function verifyPayment".to_owned());
+        logs.push("test payment_regression FAILED".to_owned());
+        let proposal = vec![ProposedChange::new(
+            "src/payment.rs",
+            "fn verifyPayment() {}",
+        )];
+        let feedback = prioritized_repair_feedback("validation rejected changes", &logs, &proposal);
+        assert!(feedback.contains("verifyPayment"));
+        assert!(feedback.contains("payment_regression FAILED"));
+        assert!(feedback.contains("src/payment.rs"));
+        assert!(feedback.len() <= 16_000);
+    }
 
     fn router() -> Arc<ModelRouter> {
         Arc::new(ModelRouter::new("mock"))
