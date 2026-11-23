@@ -157,11 +157,12 @@ test('pipeline clones, runs the team, pushes the branch and opens a draft PR', a
   let runArgs;
   const broker = {
     async installationToken(_installationId, _repoId, mode) {
-      assert.ok(['clone', 'contents', 'pull_requests'].includes(mode));
+      assert.ok(['clone', 'read', 'contents', 'pull_requests'].includes(mode));
       return 'token-' + mode;
     },
     async request(path, token, options) {
       requests.push({ path, token, options });
+      if (path.includes('/git/ref/heads/')) throw Object.assign(new Error('not found'), { status: 404 });
       return { number: 55, html_url: 'https://github.com/approved-owner/repo/pull/55' };
     },
   };
@@ -189,10 +190,11 @@ test('pipeline clones, runs the team, pushes the branch and opens a draft PR', a
     assert.match(runArgs.goal, /Add a health endpoint/);
     assert.equal(pushes.length, 1);
     assert.equal(pushes[0].branch, 'ryoko/issue-9');
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].options.body.draft, true);
-    assert.equal(requests[0].options.body.head, 'ryoko/issue-9');
-    assert.match(requests[0].options.body.body, /Token ledger/);
+    assert.equal(requests.length, 2);
+    assert.match(requests[0].path, /git\/ref\/heads\/ryoko%2Fissue-9/);
+    assert.equal(requests[1].options.body.draft, true);
+    assert.equal(requests[1].options.body.head, 'ryoko/issue-9');
+    assert.match(requests[1].options.body.body, /Token ledger/);
     assert.equal(JSON.parse(await readFile(runArgs.reportPath, 'utf8')).ledger.total.requests, 3);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -206,4 +208,32 @@ test('pipeline refuses repositories outside the agent allowlist', async () => {
     settings: { projectsRoot: '/tmp', ryokoBinary: '/trusted/ryoko', agentRepoIds: [] },
     clone: async () => { throw Error('must not clone'); },
   }), /allowlisted/);
+});
+
+test('pipeline refuses to push a branch already present on GitHub', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ryoko-existing-branch-'));
+  let pushes = 0;
+  try {
+    await assert.rejects(() => runIssuePipeline({
+      broker: {
+        async installationToken() { return 'scoped-token'; },
+        async request(path) {
+          if (path.includes('/git/ref/heads/')) return { ref: 'refs/heads/ryoko/issue-9' };
+          throw Error('no PR may be opened');
+        },
+      },
+      request: issueAgentRequest('issues', payload),
+      settings: { projectsRoot: root, ryokoBinary: '/trusted/ryoko', agentRepoIds: [41] },
+      clone: async () => ({ path: await mkdtemp(join(root, 'try-')) }),
+      runCli: async ({ reportPath }) => {
+        await writeFile(reportPath, JSON.stringify({
+          run: { succeeded: [{ role: 'integrator', branch: 'ryoko/issue-9' }] },
+        }));
+      },
+      pushBranch: async () => { pushes++; },
+    }), /already exists/);
+    assert.equal(pushes, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
