@@ -360,10 +360,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "ryoko-run-target-{}-{suffix}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ryoko-run-target-{}-{suffix}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let outside = root.with_extension("outside");
         std::fs::write(&outside, "print('hello')").unwrap();
