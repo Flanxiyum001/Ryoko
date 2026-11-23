@@ -377,11 +377,8 @@ impl SpecIndex {
         let mut drift = Vec::new();
         for link in discover(root)? {
             let key = portable_path(&link.spec);
-            let current: BTreeSet<String> = link
-                .files
-                .iter()
-                .map(|file| portable_path(file))
-                .collect();
+            let current: BTreeSet<String> =
+                link.files.iter().map(|file| portable_path(file)).collect();
             let Some(record) = self.specs.get(&key) else {
                 drift.push(SpecDrift {
                     spec: link.spec,
