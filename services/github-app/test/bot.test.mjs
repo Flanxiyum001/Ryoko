@@ -170,3 +170,84 @@ test('signed webhook starts one review-only bot run and posts result', async () 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('native desktop starts an authorized issue job once and exposes its result', async () => {
+  let runs = 0;
+  const broker = {
+    configured: true, clientId: 'Iv1.mock',
+    async exchangeCode() { return 'owner-oauth-token'; },
+    async user() { return { id: 3, login: 'approved-owner' }; },
+    async installations() { return [{ id: 17 }]; },
+    async repositories() { return [{ id: 41, full_name: 'approved-owner/repo', default_branch: 'main' }]; },
+    async authorizedRepo(_token, installationId, repoId) {
+      if (Number(installationId) !== 17 || Number(repoId) !== 41) {
+        throw Object.assign(new Error('forbidden'), { status: 403 });
+      }
+      return { id: 41, full_name: 'approved-owner/repo', default_branch: 'main' };
+    },
+    async issue(_token, installationId, repoId, number) {
+      await this.authorizedRepo(_token, installationId, repoId);
+      return { installationId: 17, repoId: 41, owner: 'approved-owner', name: 'repo',
+        fullName: 'approved-owner/repo', number, title: 'Improve search', body: 'Fix it',
+        defaultBranch: 'main' };
+    },
+    async installationToken() { return 'issues-only'; },
+    async request() { return { id: 10 }; },
+  };
+  const server = createRyokoServer({
+    broker,
+    config: {
+      origin: 'http://127.0.0.1:4173',
+      allowedUsers: ['approved-owner'], webhookSecret: 'secret',
+      agentRepoIds: [41], ryokoBinary: '/trusted/ryoko', projectsRoot: '/tmp',
+    },
+    runPipeline: async () => {
+      runs++;
+      return { number: 55, branch: 'ryoko/integrated' };
+    },
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = 'http://127.0.0.1:' + server.address().port;
+  const request = (path, options = {}) => fetch(address + path, { redirect: 'manual', ...options });
+  try {
+    const auth = await request('/auth/github/start');
+    const cookie = auth.headers.get('set-cookie').split(';')[0];
+    const state = new URL(auth.headers.get('location')).searchParams.get('state');
+    const callback = await request('/auth/github/callback?code=valid&state=' + state, {
+      headers: { Cookie: cookie },
+    });
+    assert.equal(callback.status, 302);
+    const session = await (await request('/api/session', { headers: { Cookie: cookie } })).json();
+    const paired = await request('/api/desktop/pair', {
+      method: 'POST',
+      headers: { Cookie: cookie, Origin: 'http://127.0.0.1:4173', 'X-Ryoko-CSRF': session.csrf },
+    });
+    const { code } = await paired.json();
+    const desktop = await request('/api/desktop/exchange', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const { token } = await desktop.json();
+    const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const body = JSON.stringify({ installationId: 17, repoId: 41, number: 9 });
+    assert.equal((await request('/api/desktop/jobs', { method: 'POST', headers, body })).status, 202);
+    assert.equal((await request('/api/desktop/jobs', { method: 'POST', headers, body })).status, 409);
+    for (let attempt = 0; attempt < 50 && runs !== 1; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(runs, 1);
+    const list = await request('/api/desktop/jobs?installationId=17&repoId=41', { headers });
+    const jobs = (await list.json()).jobs;
+    assert.equal(jobs[0].issue, 9);
+    assert.equal(jobs[0].status, 'completed');
+    assert.equal(jobs[0].number, 55);
+    assert.equal((await request('/api/desktop/jobs', {
+      method: 'POST', headers, body: JSON.stringify({ installationId: 17, repoId: 99, number: 9 }),
+    })).status, 403);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
