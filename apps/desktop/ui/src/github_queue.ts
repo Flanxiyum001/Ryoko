@@ -61,11 +61,12 @@ function byId<T extends HTMLElement>(id: string): T {
 
 export function proposalParams(
   operation: string,
-  input: { branch: string; path: string; message: string; number: string; title: string; content: string },
+  input: { projectName: string; branch: string; path: string; message: string; number: string; title: string; content: string },
 ): Record<string, unknown> {
   const branch = input.branch.trim();
   const number = Number(input.number.trim());
   switch (operation) {
+    case 'clone_repository': return { projectName: input.projectName.trim() };
     case 'create_branch': return { branch };
     case 'commit_file':
       return { branch, path: input.path.trim(), content: input.content, message: input.message.trim() };
@@ -89,6 +90,7 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
   const proposalCount = byId<HTMLElement>('githubProposalCount');
   const operation = byId<HTMLSelectElement>('githubOperation');
   const branch = byId<HTMLInputElement>('githubBranch');
+  const projectName = byId<HTMLInputElement>('githubProjectName');
   const path = byId<HTMLInputElement>('githubPath');
   const message = byId<HTMLInputElement>('githubMessage');
   const number = byId<HTMLInputElement>('githubNumber');
@@ -115,6 +117,7 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
   function showFields() {
     const op = operation.value;
     const visible = {
+      githubProjectName: op === 'clone_repository',
       githubBranch: ['create_branch', 'commit_file', 'open_pull_request'].includes(op),
       githubPath: op === 'commit_file',
       githubMessage: op === 'commit_file',
@@ -159,7 +162,10 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
           button.disabled = true;
           void invoke<{ status: string }>('decide_github_proposal', { id: item.id, decision })
             .then((result) => {
-              setStatus('GitHub proposal ' + result.status + '.');
+              const output = result as { status: string; result?: { path?: string } };
+              setStatus(output.result?.path
+                ? 'Repository cloned at ' + output.result.path + '. Open it using Open folder…'
+                : 'GitHub proposal ' + result.status + '.');
               return refreshCurrent();
             })
             .catch((error) => {
@@ -319,7 +325,7 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
     let params: Record<string, unknown>;
     try {
       params = proposalParams(operation.value, {
-        branch: branch.value, path: path.value, message: message.value,
+        projectName: projectName.value, branch: branch.value, path: path.value, message: message.value,
         number: number.value, title: title.value, content: content.value,
       });
     } catch (error) {
