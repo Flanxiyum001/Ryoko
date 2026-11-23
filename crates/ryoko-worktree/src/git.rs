@@ -741,6 +741,7 @@ impl GitWorktreeManager {
             root,
             applied: Mutex::new(BTreeSet::new()),
             sealed_tree: Mutex::new(None),
+            validation_checkout: Mutex::new(None),
         }))
     }
 
@@ -1471,6 +1472,7 @@ impl WorkspaceProvider for GitWorktreeManager {
             root,
             applied: Mutex::new(BTreeSet::new()),
             sealed_tree: Mutex::new(None),
+            validation_checkout: Mutex::new(None),
         }))
     }
 }
@@ -1481,12 +1483,19 @@ struct GitWorktreeLease {
     root: PathBuf,
     applied: Mutex<BTreeSet<String>>,
     sealed_tree: Mutex<Option<String>>,
+    validation_checkout: Mutex<Option<(PathBuf, String)>>,
 }
 
 #[async_trait]
 impl WorkspaceLease for GitWorktreeLease {
     fn root(&self) -> &Path {
         &self.root
+    }
+
+    fn validation_root(&self) -> PathBuf {
+        self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner())
+            .as_ref().map(|(path, _): &(PathBuf, String)| path.clone())
+            .unwrap_or_else(|| self.root.clone())
     }
 
     fn branch(&self) -> &str {
@@ -1547,11 +1556,27 @@ impl WorkspaceLease for GitWorktreeLease {
             .manager
             .checked("seal source tree", &["write-tree"], &self.session.path)
             .await?;
+        let commit = self.manager.checked("commit source snapshot", &[
+            "-c", "commit.gpgsign=false", "commit-tree", &tree,
+            "-p", &self.session.base_commit, "-m", "Ryoko validation snapshot",
+        ], &self.session.path).await?;
+        let checkout = self.manager.base_project_path().join(".ryoko/validation").join(self.session.id.to_string());
+        tokio::fs::create_dir_all(checkout.parent().expect("validation path has parent"))
+            .await.map_err(|error| CoreError::Workspace(error.to_string()))?;
+        let checkout_arg = checkout.to_string_lossy().to_string();
+        self.manager.checked("materialize validation snapshot", &[
+            "worktree", "add", "--detach", &checkout_arg, &commit,
+        ], self.manager.base_project_path()).await?;
         *self.sealed_tree.lock().unwrap_or_else(|e| e.into_inner()) = Some(tree);
+        *self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner()) = Some((checkout, commit));
         Ok(())
     }
 
     async fn verify_seal(&self) -> CoreResult<()> {
+        let root = self.validation_root();
+        if root == self.root {
+            return Err(CoreError::Workspace("validation snapshot is missing".to_owned()));
+        }
         let paths: Vec<String> = self
             .applied
             .lock()
@@ -1562,14 +1587,14 @@ impl WorkspaceLease for GitWorktreeLease {
         let mut args = vec!["add", "--"];
         args.extend(paths.iter().map(String::as_str));
         self.manager
-            .checked("inspect validated source", &args, &self.session.path)
+            .checked("inspect validated source", &args, &root)
             .await?;
         self.manager
-            .checked("inspect tracked source", &["add", "-u"], &self.session.path)
+            .checked("inspect tracked source", &["add", "-u"], &root)
             .await?;
         let current = self
             .manager
-            .checked("inspect source tree", &["write-tree"], &self.session.path)
+            .checked("inspect source tree", &["write-tree"], &root)
             .await?;
         let expected = self
             .sealed_tree
@@ -1586,29 +1611,9 @@ impl WorkspaceLease for GitWorktreeLease {
 
     async fn publish(&self, task: &Task, summary: &str) -> CoreResult<PullRequest> {
         self.verify_seal().await?;
-        let tree = self
-            .sealed_tree
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .ok_or_else(|| CoreError::Workspace("source was not sealed".to_owned()))?;
-        let commit = self
-            .manager
-            .checked(
-                "commit validated tree",
-                &[
-                    "-c",
-                    "commit.gpgsign=false",
-                    "commit-tree",
-                    &tree,
-                    "-p",
-                    &self.session.base_commit,
-                    "-m",
-                    summary,
-                ],
-                &self.session.path,
-            )
-            .await?;
+        let commit = self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner())
+            .as_ref().map(|(_, commit)| commit.clone())
+            .ok_or_else(|| CoreError::Workspace("validation snapshot is missing".to_owned()))?;
         // The branch now points to the immutable tree used by the validation
         // gate. A later worktree mutation cannot change this commit object.
         self.manager
@@ -1639,6 +1644,13 @@ impl WorkspaceLease for GitWorktreeLease {
     }
 
     async fn discard(&self) -> CoreResult<()> {
+        let checkout = self.validation_checkout.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some((checkout, _)) = checkout {
+            let path = checkout.to_string_lossy().to_string();
+            self.manager.checked("remove validation snapshot", &[
+                "worktree", "remove", "--force", &path,
+            ], self.manager.base_project_path()).await?;
+        }
         self.manager
             .clean_worktree(&self.session)
             .await
@@ -1925,9 +1937,13 @@ mod tests {
         tokio::fs::write(lease.root().join("source.rs"), "tampered")
             .await
             .unwrap();
+        assert_eq!(tokio::fs::read_to_string(lease.validation_root().join("source.rs")).await.unwrap(), "validated");
+        lease.verify_seal().await.unwrap();
+        tokio::fs::write(lease.validation_root().join("source.rs"), "tampered")
+            .await.unwrap();
         assert!(lease.verify_seal().await.is_err());
         assert!(lease.publish(&task, "source").await.is_err());
-        tokio::fs::write(lease.root().join("source.rs"), "validated")
+        tokio::fs::write(lease.validation_root().join("source.rs"), "validated")
             .await
             .unwrap();
         lease.verify_seal().await.unwrap();
