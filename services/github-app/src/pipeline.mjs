@@ -24,19 +24,17 @@ function text(value, limit) {
  * Returns a normalized pipeline request only for a human-applied agent label.
  * The caller must still verify webhook signatures and repository allowlists.
  */
-export function issueAgentRequest(event, payload) {
-  if (event !== 'issues' || !payload || typeof payload !== 'object') return null;
-  if (!['labeled', 'opened'].includes(payload.action)) return null;
-  const labels = Array.isArray(payload.issue?.labels) ? payload.issue.labels : [];
-  if (!labels.some((label) => AGENT_LABELS.includes(label?.name))) return null;
+export function normalizeIssueRequest(payload) {
+  if (!payload || typeof payload !== 'object' || payload.issue?.pull_request) return null;
   const installationId = Number(payload.installation?.id);
   const repoId = Number(payload.repository?.id);
   const number = Number(payload.issue?.number);
   const fullName = String(payload.repository?.full_name || '');
-  const [owner, name] = fullName.split('/');
+  const [owner, name, extra] = fullName.split('/');
   if (!Number.isSafeInteger(installationId) || installationId <= 0
     || !Number.isSafeInteger(repoId) || repoId <= 0
     || !Number.isSafeInteger(number) || number <= 0
+    || extra !== undefined
     || !/^[A-Za-z0-9_.-]+$/.test(owner || '') || !/^[A-Za-z0-9_.-]+$/.test(name || '')
     || ['.', '..'].includes(owner) || ['.', '..'].includes(name)) {
     return null;
@@ -54,6 +52,16 @@ export function issueAgentRequest(event, payload) {
     body: text(payload.issue?.body, MAX_GOAL),
     defaultBranch: text(payload.repository?.default_branch, 120) || 'main',
   };
+}
+
+/** Only the exact newly applied agent label authorizes a label-triggered run. */
+export function issueAgentRequest(event, payload) {
+  if (event !== 'issues' || payload?.action !== 'labeled') return null;
+  if (!AGENT_LABELS.includes(payload.label?.name)) return null;
+  if (!Array.isArray(payload.issue?.labels)
+    || !payload.issue.labels.some((label) => label?.name === payload.label.name)
+    || payload.issue?.state === 'closed') return null;
+  return normalizeIssueRequest(payload);
 }
 
 /**
