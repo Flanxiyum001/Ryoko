@@ -176,6 +176,9 @@ export class ProductionState {
         delivery_id TEXT PRIMARY KEY, received_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS deliveries_time ON deliveries(received_at);
+      CREATE TABLE IF NOT EXISTS workers(
+        id TEXT PRIMARY KEY, heartbeat_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS jobs(
         id TEXT PRIMARY KEY, job_key TEXT NOT NULL UNIQUE, installation_id INTEGER NOT NULL,
         repo_id INTEGER NOT NULL, kind TEXT NOT NULL,
@@ -239,7 +242,24 @@ export class ProductionState {
         AND status!='executing' AND expires+86400000<=?`).run(now);
       this.db.prepare(`DELETE FROM approvals WHERE status='pending' AND expires<=?`).run(now);
       this.db.prepare('DELETE FROM deliveries WHERE received_at<?').run(now - 7 * 86400000);
+      this.db.prepare('DELETE FROM workers WHERE heartbeat_at<?').run(now - 60000);
     });
+  }
+  touchWorker(workerId) {
+    this.db.prepare(`INSERT INTO workers(id,heartbeat_at) VALUES(?,?)
+      ON CONFLICT(id) DO UPDATE SET heartbeat_at=excluded.heartbeat_at`)
+      .run(workerId, nowMs());
+  }
+  releaseWorker(workerId) {
+    this.db.prepare('DELETE FROM workers WHERE id=?').run(workerId);
+  }
+  activeWorkerCount() {
+    return Number(this.db.prepare('SELECT count(*) AS n FROM workers WHERE heartbeat_at>?')
+      .get(nowMs() - 45_000).n);
+  }
+  pendingJobCount() {
+    return Number(this.db.prepare("SELECT count(*) AS n FROM jobs WHERE status='queued'")
+      .get().n);
   }
   pruneJobs() {
     this.db.prepare(`DELETE FROM jobs WHERE status IN ('completed','failed','interrupted')
