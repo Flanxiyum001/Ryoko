@@ -1002,3 +1002,14 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--accent); ou
   .toast-item, .settings-dialog:not(.hidden) { animation: none !important; }
   .startup-splash { animation-duration: .15s; }
 }
+
+.clone-dialog { width: min(510px, calc(100vw - 24px)); }
+.clone-form { display: grid; gap: 12px; padding: 26px; }
+.clone-form h2 { margin: 0; font-size: 22px; }
+.clone-form p { color: #abb8c9; font-size: 12px; margin: 0 0 7px; line-height: 1.6; }
+.clone-form label { font-size: 12px; }
+.clone-form input {
+  width: 100%; padding: 11px 13px; border: 1px solid #52637c; border-radius: 8px;
+  color: #f3f6ff; background: #111a27; font-size: 13px;
+}
+.clone-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 9px; }
