@@ -85,7 +85,13 @@ export class ApprovalStore {
   prune() {
     const now = Date.now();
     for (const [id, item] of this.proposals) {
-      if (item.expires <= now && item.status !== 'executing') this.proposals.delete(id);
+      const terminal = !['pending', 'executing'].includes(item.status);
+      // Pending requests expire at the approval TTL; decided/interrupted
+      // requests stay visible for one day as an audit trail.
+      const retention = terminal ? 24 * 60 * 60_000 : 0;
+      if (item.status !== 'executing' && item.expires + retention <= now) {
+        this.proposals.delete(id);
+      }
     }
     if (this.proposals.size > MAX_RECORDS) {
       for (const [id, item] of this.proposals) {
