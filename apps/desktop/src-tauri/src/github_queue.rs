@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 const BROKER: &str = "http://127.0.0.1:4173";
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
@@ -227,6 +228,14 @@ pub struct GitHubChecks {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TrustedProposalPreview {
+    repository: String,
+    operation: String,
+    params: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitHubDecision {
     id: String,
     status: String,
@@ -308,12 +317,48 @@ pub async fn decide_github_proposal(
     id: String,
     decision: String,
     state: State<'_, GitHubQueueState>,
+    app: AppHandle,
 ) -> Result<serde_json::Value, String> {
     if id.len() != 36
         || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
         || !["approve", "reject"].contains(&decision.as_str())
     {
         return Err("invalid GitHub proposal decision".into());
+    }
+    if decision == "approve" {
+        // Fetch immutable proposal details from the trusted broker, not the
+        // JavaScript renderer. The model/webview cannot manufacture consent.
+        let preview_response = client()?
+            .get(format!("{BROKER}/api/desktop/proposals/{id}"))
+            .bearer_auth(token(&state)?)
+            .send()
+            .await
+            .map_err(|_| "cannot fetch trusted GitHub approval details".to_owned())?;
+        let preview: TrustedProposalPreview = bounded_json(preview_response).await?;
+        let summary = serde_json::to_string_pretty(&preview.params)
+            .map_err(|_| "cannot display proposal parameters".to_owned())?
+            .chars()
+            .take(1200)
+            .collect::<String>();
+        let description = format!(
+            "Approve a real GitHub write to {}?\n\nOperation: {}\nParameters (preview):\n{}\n\nReview all fields in the Ryoko inbox. No default branch pushes or automatic merges are allowed.",
+            preview.repository, preview.operation, summary
+        );
+        let confirmed = tauri::async_runtime::spawn_blocking(move || {
+            app.dialog()
+                .message(description)
+                .title("Ryoko — authorize GitHub write")
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Approve once".to_owned(),
+                    "Deny".to_owned(),
+                ))
+                .blocking_show()
+        })
+        .await
+        .map_err(|_| "could not display OS GitHub approval dialog".to_owned())?;
+        if !confirmed {
+            return Err("GitHub write denied in the OS approval dialog".to_owned());
+        }
     }
     let response = client()?
         .post(format!("{BROKER}/api/desktop/proposals/{id}/{decision}"))
