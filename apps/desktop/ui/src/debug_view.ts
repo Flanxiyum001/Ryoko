@@ -21,6 +21,7 @@ import {
   toggleBreakpointInState,
   toggleVariableExpanded,
   updateBreakpointsFromResponse,
+  visibleVariablesForScope,
   type DapBreakpoint,
   type DapStackFrame,
   type DapVariable,
@@ -56,6 +57,7 @@ export class DebugViewController {
   private state: DebugState = createInitialDebugState();
   private deps: DebugViewDeps;
   private dapSeq = 0;
+  private pendingRequests = new Map<number, { command: string; args?: Record<string, unknown> }>();
   private dapStatusPolling = false;
   private unlistenMessage: UnlistenFn | null = null;
   private unlistenLog: UnlistenFn | null = null;
@@ -217,6 +219,7 @@ export class DebugViewController {
       const sessionId = status.sessionId ?? 1;
       this.state = handleSessionStarted(this.state, sessionId);
       this.dapSeq = 0;
+      this.pendingRequests.clear();
       this.render();
 
       await this.sendDap('initialize', {
@@ -239,6 +242,7 @@ export class DebugViewController {
 
   public async stopDebug(): Promise<void> {
     await invoke('dap_stop').catch(() => undefined);
+    this.pendingRequests.clear();
     this.state = handleSessionStopped(this.state, 'Debug adapter stopped');
     this.render();
   }
@@ -253,6 +257,7 @@ export class DebugViewController {
     await invoke('dap_stop').catch(() => undefined);
     this.state = handleWorkspaceReset();
     this.dapSeq = 0;
+    this.pendingRequests.clear();
     this.render();
   }
 
@@ -335,15 +340,21 @@ export class DebugViewController {
   }
 
   private async sendDap(command: string, args?: Record<string, unknown>): Promise<void> {
-    this.dapSeq += 1;
+    const seq = ++this.dapSeq;
     const message = JSON.stringify({
-      seq: this.dapSeq,
+      seq,
       type: 'request',
       command,
       ...(args ? { arguments: args } : {}),
     });
+    this.pendingRequests.set(seq, { command, args });
     this.log(`→ ${message}`);
-    await invoke('dap_send', { message });
+    try {
+      await invoke('dap_send', { message });
+    } catch (error) {
+      this.pendingRequests.delete(seq);
+      throw error;
+    }
   }
 
   private handleWireMessage(payload: DapWireEvent): void {
@@ -385,6 +396,7 @@ export class DebugViewController {
       this.state.expandedVarRefs.clear();
       this.render();
     } else if (event === 'terminated' || event === 'exited') {
+      this.pendingRequests.clear();
       this.state = handleSessionStopped(this.state, 'Session ended');
       this.render();
     } else if (event === 'breakpoint') {
@@ -403,50 +415,53 @@ export class DebugViewController {
   }
 
   private handleDapResponse(msg: Record<string, unknown>): void {
+    // DAP responses normally contain request_seq, not echoed request arguments.
+    // Correlate requests by sequence to avoid cross-scope or cross-file updates.
+    const requestSeq = msg.request_seq;
+    if (typeof requestSeq !== 'number' || !Number.isSafeInteger(requestSeq)) return;
+    const pending = this.pendingRequests.get(requestSeq);
     const command = String(msg.command ?? '');
-    const success = Boolean(msg.success);
+    if (!pending || pending.command !== command) return;
+    this.pendingRequests.delete(requestSeq);
 
-    if (!success) {
-      const errorMsg = String(msg.message ?? 'failed');
-      this.state.statusText = `DAP ${command} failed: ${errorMsg}`;
+    if (!Boolean(msg.success)) {
+      this.state.statusText = `DAP ${command} failed: ${String(msg.message ?? 'failed')}`;
       this.render();
       return;
     }
 
     if (command === 'stackTrace') {
+      if (!this.state.isPaused) return;
       const res = handleStackTraceResponse(this.state, msg.body);
       this.state = res.nextState;
       this.renderStack();
       if (res.topFrame) {
-        // Navigate editor to the top paused frame
         this.navigateToFrame(res.topFrame);
-        // Request scopes for the top frame
         void this.sendDap('scopes', { frameId: res.topFrame.id });
       }
     } else if (command === 'scopes') {
+      if (pending.args?.frameId !== this.state.selectedFrameId) return;
       const res = handleScopesResponse(this.state, msg.body);
       this.state = res.nextState;
-      if (res.primaryScopeRef !== null) {
-        void this.sendDap('variables', { variablesReference: res.primaryScopeRef });
+      this.renderVariables();
+      // Request bounded non-expensive scopes; never mistake later nested
+      // variable responses for the first scope.
+      for (const scope of res.nextState.scopes.filter((s) => !s.expensive && s.variablesReference > 0).slice(0, 5)) {
+        void this.sendDap('variables', { variablesReference: scope.variablesReference });
       }
     } else if (command === 'variables') {
-      // In DAP, request_seq matches the request seq
-      // For variables, we can store in state and re-render
-      const rawArgs = msg.arguments as { variablesReference?: unknown } | undefined;
-      // Some adapters echo arguments in response or we read variables from body
-      // We also track pending request or fetch for known references
-      const scopes = this.state.scopes;
-      const ref = typeof rawArgs?.variablesReference === 'number'
-        ? rawArgs.variablesReference
-        : (scopes[0]?.variablesReference ?? 0);
-
+      const ref = pending.args?.variablesReference;
+      if (typeof ref !== 'number' || !Number.isSafeInteger(ref) || ref <= 0) return;
+      const isScope = this.state.scopes.some((scope) => scope.variablesReference === ref);
+      if (!isScope && !this.state.expandedVarRefs.has(ref)) return;
       this.state = handleVariablesResponse(this.state, ref, msg.body);
       this.renderVariables();
     } else if (command === 'setBreakpoints') {
-      // Find matching path from state
-      for (const path of this.state.breakpoints.keys()) {
-        this.state = updateBreakpointsFromResponse(this.state, path, msg.body);
-      }
+      const source = pending.args?.source;
+      if (!source || typeof source !== 'object') return;
+      const path = (source as { path?: unknown }).path;
+      if (typeof path !== 'string' || !this.state.breakpoints.has(path)) return;
+      this.state = updateBreakpointsFromResponse(this.state, path, msg.body);
       this.renderBreakpoints();
     }
   }
@@ -460,6 +475,11 @@ export class DebugViewController {
   private async selectFrame(frameId: number): Promise<void> {
     const res = selectStackFrame(this.state, frameId);
     this.state = res.nextState;
+    for (const [seq, request] of this.pendingRequests) {
+      if (request.command === 'scopes' || request.command === 'variables') {
+        this.pendingRequests.delete(seq);
+      }
+    }
     this.renderStack();
     this.renderVariables();
     if (res.selectedFrame) {
@@ -571,85 +591,63 @@ export class DebugViewController {
     this.variablesList.replaceChildren();
     let totalVars = 0;
 
-    for (const vars of this.state.variables.values()) {
-      totalVars += vars.length;
-    }
-    this.variablesCount.textContent = `${totalVars} var${totalVars === 1 ? '' : 's'}`;
+    for (const scope of this.state.scopes) {
+      if (scope.expensive || scope.variablesReference <= 0) continue;
+      const heading = document.createElement('p');
+      heading.className = 'hint';
+      heading.textContent = scope.name;
+      this.variablesList.append(heading);
 
-    if (this.state.variables.size === 0) {
-      const hint = document.createElement('p');
-      hint.className = 'hint';
-      hint.textContent = this.state.isPaused ? 'No variables in scope.' : 'No variables.';
-      this.variablesList.append(hint);
-      return;
-    }
-
-    for (const vars of this.state.variables.values()) {
-      for (const variable of vars) {
+      for (const { variable, depth } of visibleVariablesForScope(this.state, scope.variablesReference)) {
+        totalVars += 1;
         const row = document.createElement('div');
         row.className = 'debug-item debug-var-item';
+        if (depth > 0) row.classList.add('debug-var-child');
+        row.style.paddingLeft = `${Math.min(depth, 8) * 12}px`;
         row.tabIndex = 0;
         row.setAttribute('role', 'treeitem');
+        row.setAttribute('aria-level', String(depth + 1));
 
         const isExpandable = variable.variablesReference > 0;
         const isExpanded = isExpandable && this.state.expandedVarRefs.has(variable.variablesReference);
-
         if (isExpandable) {
           row.classList.add('expandable');
+          row.setAttribute('aria-expanded', String(isExpanded));
           if (isExpanded) row.classList.add('expanded');
         }
 
-        const prefixSpan = document.createElement('span');
-        prefixSpan.className = 'debug-var-toggle';
-        prefixSpan.textContent = isExpandable ? (isExpanded ? '▼ ' : '▶ ') : '  ';
-
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'debug-var-name';
-        nameSpan.textContent = variable.name;
-
-        const valSpan = document.createElement('span');
-        valSpan.className = 'debug-var-value';
-        valSpan.textContent = `: ${variable.value}`;
-
-        row.append(prefixSpan, nameSpan, valSpan);
+        const toggle = document.createElement('span');
+        toggle.className = 'debug-var-toggle';
+        toggle.textContent = isExpandable ? (isExpanded ? '▼ ' : '▶ ') : '  ';
+        const name = document.createElement('span');
+        name.className = 'debug-var-name';
+        name.textContent = variable.name;
+        const value = document.createElement('span');
+        value.className = 'debug-var-value';
+        value.textContent = `: ${variable.value}`;
+        row.append(toggle, name, value);
 
         if (variable.type) {
-          const typeSpan = document.createElement('span');
-          typeSpan.className = 'debug-var-type';
-          typeSpan.textContent = ` (${variable.type})`;
-          row.append(typeSpan);
+          const type = document.createElement('span');
+          type.className = 'debug-var-type';
+          type.textContent = ` (${variable.type})`;
+          row.append(type);
         }
-
         if (isExpandable) {
           row.addEventListener('click', () => {
             void this.toggleVariable(variable);
           });
         }
-
         this.variablesList.append(row);
-
-        // If expanded, render children underneath
-        if (isExpanded) {
-          const children = this.state.variables.get(variable.variablesReference) ?? [];
-          for (const child of children) {
-            const childRow = document.createElement('div');
-            childRow.className = 'debug-item debug-var-item debug-var-child';
-            childRow.tabIndex = 0;
-            childRow.setAttribute('role', 'treeitem');
-
-            const childName = document.createElement('span');
-            childName.className = 'debug-var-name';
-            childName.textContent = child.name;
-
-            const childVal = document.createElement('span');
-            childVal.className = 'debug-var-value';
-            childVal.textContent = `: ${child.value}`;
-
-            childRow.append(childName, childVal);
-            this.variablesList.append(childRow);
-          }
-        }
       }
+    }
+
+    this.variablesCount.textContent = `${totalVars} var${totalVars === 1 ? '' : 's'}`;
+    if (this.variablesList.children.length === 0) {
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = this.state.isPaused ? 'No variables in scope.' : 'No variables.';
+      this.variablesList.append(hint);
     }
   }
 
