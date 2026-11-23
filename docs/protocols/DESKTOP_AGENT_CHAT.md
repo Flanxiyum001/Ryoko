@@ -39,9 +39,9 @@ workflow; the inbox does not attempt to auto-merge them.
 
 The event-log DAG remains the source of truth for live task states, usage and
 published file lists. Cards show reported tokens, estimated ledger cost and the
-first two published paths. The status bar reports mission plus chat tokens; its
-USD figure is explicitly *mission ledger estimate only*, not an invoice or a
-bill for chat requests. No fake costs are inferred.
+first two published paths. The status bar reports mission plus chat tokens and combines Mission Control
+ledger estimates with priced chat-model usage. Models without known pricing
+contribute tokens but not a dollar estimate; this is never a provider invoice.
 
 ## Verification
 
@@ -60,4 +60,4 @@ Manual acceptance:
 5. Run an isolated team task and inspect published worktree file proposals
    through Review Inbox. Nothing is merged or saved by opening the diff.
 6. Verify Mission Control cards and the status bar show real event-log usage;
-   check the cost label clearly excludes standalone chat billing.
+   check that chat is included when model pricing is known, without treating estimates as billed costs.
