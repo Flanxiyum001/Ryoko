@@ -704,6 +704,37 @@ mod tests {
     }
 
     #[test]
+    fn review_patch_and_receipt_survive_full_general_context_budget() {
+        let agent = ModelAgent::new(AgentIdentity::new(
+            AgentRole::Custom(crate::review::CODE_REVIEW_ROLE.to_owned()),
+            "peer-review",
+            "review only",
+        ))
+        .with_model("mock/coder");
+        let receipt = "validator:task:unique-execution-receipt";
+        let patch = "diff --git a/src/main.rs b/src/main.rs\n+REGRESSION_MARKER";
+        let task = Task::new(
+            "independently review the compiled change",
+            AgentRole::Custom(crate::review::CODE_REVIEW_ROLE.to_owned()),
+        )
+        .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
+        .with_metadata(CONTEXT_METADATA, "context".repeat(5_000))
+        .with_metadata(REVIEW_EVIDENCE_METADATA, receipt)
+        .with_metadata(REVIEW_DIFF_METADATA, patch);
+        let request = agent.request(&task, "/tmp/project", "main", Vec::new());
+        let user = request
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User)
+            .unwrap()
+            .text_content();
+        assert!(user.contains(receipt));
+        assert!(user.contains(patch));
+        assert!(user.contains("untrusted_validated_change_patch"));
+        assert!(!request.system.as_deref().unwrap_or_default().contains(patch));
+    }
+
+    #[test]
     fn parses_bare_and_fenced_proposals() {
         let bare = parse_structured_proposal(&proposal_json()).unwrap();
         assert_eq!(bare.files.len(), 2);
