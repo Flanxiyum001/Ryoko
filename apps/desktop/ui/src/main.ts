@@ -7,6 +7,7 @@ import '@xterm/xterm/css/xterm.css';
 import * as monaco from 'monaco-editor';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import './styles.css';
+import { mountEditorTabs, selectionAfterClose } from './editor_tabs';
 import { LspClient, type LspState, type LspServerStatus } from './lsp';
 import { registerMonacoCapabilities } from './lsp_bridge';
 import { LANGUAGE_IDS, defaultRunProfile, parseTaskArgs } from './languages';
@@ -68,6 +69,7 @@ interface OpenFile {
   version: number;
   savedText: string;
   dirty: boolean;
+  viewState?: monaco.editor.ICodeEditorViewState | null;
 }
 
 interface FlatProblem {
@@ -338,6 +340,13 @@ let pendingCodeOutput: CodeRunOutput[] = [];
 let codeOutputText = '';
 
 const openFiles = new Map<string, OpenFile>();
+let fileOpenGeneration = 0;
+let workspaceSwitching = false;
+const savingFiles = new Set<string>();
+const renderTabs = mountEditorTabs(element('editorTabs'), selectOpenFile, closeOpenFile);
+function updateTabs(): void {
+  renderTabs([...openFiles.values()], state.current?.path ?? null);
+}
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
 const changeTimers = new Map<string, number>();
 const expandedDirectories = new Set<string>();
@@ -768,8 +777,9 @@ function markDirty(file: OpenFile): void {
   file.dirty = file.model.getValue() !== file.savedText;
   if (state.current === file) {
     dirtyFlag.classList.toggle('hidden', !file.dirty);
-    activePath.textContent = (file.dirty ? '● ' : '') + file.path;
+    activePath.textContent = file.path;
   }
+  updateTabs();
 }
 
 function renderFiles(): void {
@@ -855,28 +865,35 @@ async function loadFiles(): Promise<void> {
 }
 
 async function openFolder(): Promise<void> {
-  const selected = await open({ directory: true, multiple: false });
-  if (typeof selected !== 'string') return;
-  if ([...openFiles.values()].some((file) => file.dirty)
-    && !window.confirm('Switch workspaces and discard unsaved edits?')) {
+  if (workspaceSwitching || savingFiles.size) {
+    setStatus('Wait for the current workspace operation to finish.');
     return;
   }
-  if (runSnapshot?.running
-    && !window.confirm('An agent run is active. Cancel it before switching workspaces?')) {
-    return;
-  }
-  if (runSnapshot?.running) {
-    try {
-      await invoke('cancel_run');
-    } catch (error) {
-      setStatus('Could not cancel the active run: ' + (error instanceof Error ? error.message : String(error)));
+  workspaceSwitching = true;
+  try {
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected !== 'string') return;
+    if ([...openFiles.values()].some((file) => file.dirty)
+      && !window.confirm('Switch workspaces and discard unsaved edits?')) {
       return;
     }
-  }
-  try {
+    if (runSnapshot?.running
+      && !window.confirm('An agent run is active. Cancel it before switching workspaces?')) {
+      return;
+    }
+    if (runSnapshot?.running) {
+      try {
+        await invoke('cancel_run');
+      } catch (error) {
+        setStatus('Could not cancel the active run: ' + (error instanceof Error ? error.message : String(error)));
+        return;
+      }
+    }
+    fileOpenGeneration += 1;
     const info = await invoke<WorkspaceInfo>('open_workspace', { path: selected });
     // Open the new workspace successfully before discarding any old editor
     // buffers. Changing a folder must not erase unsaved content on failure.
+    inlineEdit.reject();
     await lsp.stop();
     quickOpen.close();
     await stopTerminal();
@@ -892,7 +909,10 @@ async function openFolder(): Promise<void> {
     changesSummary.textContent = 'no folder';
     changesList.replaceChildren();
     state.current = null;
+    updateTabs();
     closeDiffReview();
+    editorHost.classList.add('hidden');
+    emptyEditor.classList.remove('hidden');
     missionLogs = [];
     missionSnapshot = null;
     missionSelection = null;
@@ -943,6 +963,8 @@ async function openFolder(): Promise<void> {
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
+  } finally {
+    workspaceSwitching = false;
   }
 }
 
@@ -1731,46 +1753,90 @@ function renderMissionDetail(): void {
   addDetailRow(missionDetail, task.status === 'failed' ? 'Error' : 'Note', task.error ?? '');
 }
 
-async function openFile(path: string): Promise<void> {
-  if (!state.root) return;
+function selectOpenFile(path: string): void {
+  const file = [...openFiles.values()].find((candidate) => candidate.path === path);
+  if (!file) return;
+  fileOpenGeneration += 1;
+  if (state.current && state.current !== file) inlineEdit.reject();
+  if (state.current) state.current.viewState = editor.saveViewState();
   if (!diffReview.classList.contains('hidden')) closeDiffReview();
+  state.current = file;
+  hideFim();
+  editor.setModel(file.model);
+  if (file.viewState) editor.restoreViewState(file.viewState);
+  revealEditor();
+  if (window.matchMedia('(max-width: 720px)').matches) activateView('editor');
+  languageMode.value = file.languageId;
+  configureTaskForPath(path);
+  runActiveFile.disabled = codeSessionId !== null;
+  activePath.textContent = file.path;
+  dirtyFlag.classList.toggle('hidden', !file.dirty);
+  saveButton.disabled = false;
+  renderFiles();
+  updateTabs();
+  updateCursor();
+  setStatus(file.path);
+  quickOpen.remember(file.path);
+}
+
+function closeOpenFile(path: string): void {
+  const file = [...openFiles.values()].find((candidate) => candidate.path === path);
+  if (!file) return;
+  if (savingFiles.has(file.uri)) { setStatus('Wait for this file to finish saving.'); return; }
+  if (file.dirty && !window.confirm(`Discard unsaved changes to ${file.path}?`)) return;
+  fileOpenGeneration += 1;
+  const next = selectionAfterClose([...openFiles.values()].map((item) => item.path), state.current?.path ?? null, path);
+  const wasActive = state.current === file;
+  const timer = changeTimers.get(file.uri);
+  if (timer !== undefined) window.clearTimeout(timer);
+  changeTimers.delete(file.uri);
+  lsp.close(file.uri);
+  openFiles.delete(file.uri);
+  if (wasActive) {
+    inlineEdit.reject();
+    hideFim();
+    state.current = null;
+    editor.setModel(null);
+    closeDiffReview();
+  }
+  file.model.dispose();
+  if (wasActive && next) selectOpenFile(next);
+  else if (wasActive) {
+    editorHost.classList.add('hidden');
+    emptyEditor.classList.remove('hidden');
+    activePath.textContent = 'No file open';
+    dirtyFlag.classList.add('hidden');
+    saveButton.disabled = true;
+    languageMode.value = 'plaintext';
+    configureTaskForPath('');
+    runActiveFile.disabled = true;
+    cursorPos.textContent = '';
+    setStatus('Ready');
+  }
+  updateTabs();
+  renderFiles();
+}
+
+async function openFile(path: string): Promise<void> {
+  if (!state.root || workspaceSwitching) return;
+  const root = state.root;
+  const uri = fileUri(joinWorkspacePath(root, path));
+  // Switching an existing tab is a buffer operation, not a disk reload.
+  // This also keeps a dirty buffer accessible after its disk file is removed.
+  if (openFiles.has(uri)) { selectOpenFile(path); return; }
+  const ticket = ++fileOpenGeneration;
   try {
     setStatus(`Opening ${path}…`);
     const content = await invoke<string>('read_file', { path });
-    const uri = fileUri(joinWorkspacePath(state.root, path));
+    if (ticket !== fileOpenGeneration || state.root !== root || workspaceSwitching) return;
     const languageId = languageForPath(path, content);
-    let file = openFiles.get(uri);
-    // Selection must move before `setValue` so the content-change handler
-    // attributes the reload to this document rather than the previous one.
-    if (file) state.current = file;
-    if (!file) {
-      const existing = monaco.editor.getModel(monaco.Uri.parse(uri));
-      const model = existing ?? monaco.editor.createModel(content, languageId, monaco.Uri.parse(uri));
-      if (existing && existing.getValue() !== content) existing.setValue(content);
-      file = { path, uri, languageId, model, version: 1, savedText: content, dirty: false };
-      openFiles.set(uri, file);
-      state.current = file;
-      lsp.ensureOpen(uri, languageId, file.version, model.getValue());
-    } else if (!file.dirty && file.model.getValue() !== content) {
-      file.savedText = content;
-      file.model.setValue(content);
-    }
-    state.current = file;
-    hideFim();
-    editor.setModel(file.model);
-    revealEditor();
-    languageMode.value = file.languageId;
-    configureTaskForPath(path);
-    runActiveFile.disabled = codeSessionId !== null;
-    activePath.textContent = (file.dirty ? '● ' : '') + path;
-    dirtyFlag.classList.toggle('hidden', !file.dirty);
-    saveButton.disabled = false;
-    renderFiles();
-    updateCursor();
-    setStatus(path);
-    quickOpen.remember(path);
+    const model = monaco.editor.createModel(content, languageId, monaco.Uri.parse(uri));
+    const file: OpenFile = { path, uri, languageId, model, version: 1, savedText: content, dirty: false };
+    openFiles.set(uri, file);
+    lsp.ensureOpen(uri, languageId, file.version, content);
+    selectOpenFile(path);
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : String(error));
+    if (ticket === fileOpenGeneration) setStatus(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -1781,7 +1847,8 @@ function updateCursor(): void {
 
 async function saveCurrent(): Promise<void> {
   const file = state.current;
-  if (!file || !file.dirty) return;
+  if (!file || !file.dirty || savingFiles.has(file.uri) || workspaceSwitching) return;
+  savingFiles.add(file.uri);
   try {
     const content = file.model.getValue();
     await invoke('write_file', { path: file.path, content, expectedContent: file.savedText });
@@ -1795,6 +1862,8 @@ async function saveCurrent(): Promise<void> {
     void refreshHunks();
   } catch (error) {
     setStatus(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    savingFiles.delete(file.uri);
   }
 }
 
@@ -1940,6 +2009,16 @@ saveButton.addEventListener('click', () => {
   void saveCurrent();
 });
 fileFilter.addEventListener('input', renderFiles);
+element('railSearch').addEventListener('click', () => { activateView('editor'); showBottom('search'); });
+element('railExtensions').addEventListener('click', () => element('openMarketplace').click());
+element('quickOpenButton').addEventListener('click', () => quickOpen.open());
+element('welcomeQuickOpen').addEventListener('click', () => quickOpen.open());
+element('welcomeSettings').addEventListener('click', () => openSettings.click());
+element('welcomeMission').addEventListener('click', () => activateView('mission'));
+element('refreshFiles').addEventListener('click', () => {
+  if (state.root) void loadFiles().catch((error) => setStatus(String(error)));
+});
+
 agentSessionRefresh.addEventListener('click', () => {
   void refreshAgentSessions();
 });
@@ -2004,6 +2083,9 @@ function dispatchBinding(action: string): void {
       break;
     case 'workbench.settings':
       openSettings.click();
+      break;
+    case 'editor.close':
+      if (state.current) closeOpenFile(state.current.path);
       break;
     case 'editor.inlineEdit':
       inlineEdit.open();

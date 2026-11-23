@@ -38,6 +38,7 @@ export class InlineEditController {
   private decorations: string[] = [];
   private decoratedFile: { path: string; model: import('monaco-editor').editor.ITextModel } | null = null;
   private busy = false;
+  private generation = 0;
 
   constructor(private readonly deps: InlineEditDeps) {}
 
@@ -93,6 +94,7 @@ export class InlineEditController {
       return;
     }
     this.busy = true;
+    const generation = this.generation;
     input.disabled = true;
     try {
       const context = splitContext(this.contextText, this.contextOffset, this.contextLength);
@@ -106,6 +108,7 @@ export class InlineEditController {
           after: context.after,
         } satisfies InlineEditArgs,
       });
+      if (generation !== this.generation || file.model.isDisposed()) return;
       this.replacement = reply.replacement;
       this.decoratedFile = file;
       this.decorate(file);
@@ -114,6 +117,7 @@ export class InlineEditController {
         'Inline edit ready - press Mod+Enter to accept, Escape to reject',
       );
     } catch (error) {
+      if (generation !== this.generation) return;
       this.deps.setStatus('Inline edit failed: ' + String(error));
       this.hidePrompt();
       this.reject('Inline edit discarded after a backend error.');
@@ -151,6 +155,10 @@ export class InlineEditController {
     if (this.busy || this.replacement === null || this.contextText === null) return;
     const file = this.decoratedFile;
     if (!file) return;
+    if (file.model.isDisposed() || this.deps.currentFile()?.model !== file.model) {
+      this.reject('Active file changed; inline edit discarded.');
+      return;
+    }
     if (file.model.getValue() !== this.contextText) {
       this.reject('Buffer changed since the inline edit; discarded.');
       return;
@@ -181,6 +189,7 @@ export class InlineEditController {
   }
 
   reject(message = 'Inline edit discarded.'): void {
+    this.generation += 1;
     this.clearDecorations();
     this.contextText = null;
     this.replacement = null;
@@ -195,7 +204,7 @@ export class InlineEditController {
 
   private clearDecorations(): void {
     const file = this.decoratedFile;
-    if (file && this.decorations.length > 0) {
+    if (file && !file.model.isDisposed() && this.decorations.length > 0) {
       file.model.deltaDecorations(this.decorations, []);
     }
     this.decorations = [];
