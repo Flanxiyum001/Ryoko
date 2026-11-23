@@ -202,12 +202,12 @@ Return exactly one JSON object, with no Markdown, comments or code changes:
   "verdict": "pass",
   "summary": "what was verified and any remaining uncertainty",
   "findings": [],
-  "evidence_refs": ["validator:<task-uuid>"]
+  "evidence_refs": ["validator:<task-uuid>:<execution-receipt>"]
 }
 For a failing review set verdict to "fail" and include at least one finding:
 {"code":"RYOKO-001","severity":"high","path":"src/file.rs","line":10,
 "message":"reproducible defect","recommendation":"specific fix",
-"evidence_ref":"validator:<task-uuid>"}
+"evidence_ref":"validator:<task-uuid>:<execution-receipt>"}
 Only cite the trusted validator reference supplied in the task's evidence context.
 Do not pretend that an unexecuted test or an uninspected file was checked.
 Critical/high findings block approval. A file proposal is forbidden.
