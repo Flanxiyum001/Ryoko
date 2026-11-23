@@ -125,7 +125,13 @@ application executable (or at `RYOKO_WASM_WORKER_BIN`) for every evaluation:
   to unguarded host execution.
 - Unix hosts keep in-process evaluation; `WasmSandbox::new_with_worker` opts
   any platform into the worker path explicitly (used by the
-  `wasm_worker_process` regression suite).
+  `wasm_worker_process` regression suite, which is green in native Windows
+  CI and in the Linux and macOS platform jobs).
+
+Native CI proves the automated paths only: worker crashes, traps and
+deadline kills are exercised on real GitHub-hosted Windows, macOS and Linux
+runners, while parity certification still requires the manual install tests
+described in the desktop preview testing guide.
 
 ## Planned restricted runner
 
