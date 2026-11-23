@@ -95,6 +95,7 @@ const server = createRyokoServer({
     projectRoot: process.env.RYOKO_PROJECT_ROOT || '',
     projectsRoot: process.env.RYOKO_PROJECTS_ROOT || '',
     botStateFile: process.env.RYOKO_BOT_STATE_FILE || '',
+    approvalStateFile: process.env.RYOKO_APPROVAL_STATE_FILE || '',
     mcp,
   },
 });
