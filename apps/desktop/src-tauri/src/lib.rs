@@ -1,3 +1,4 @@
+mod code_run;
 mod completion;
 mod connectors;
 mod debug_adapter;
@@ -32,6 +33,7 @@ pub fn run() {
         .manage(lsp::LspState::default())
         .manage(run::RunState::default())
         .manage(completion::CompletionState::default())
+        .manage(code_run::CodeRunState::default())
         .manage(terminal::TerminalState::default())
         .manage(debug_adapter::DebugState::default())
         .invoke_handler(tauri::generate_handler![
@@ -71,6 +73,9 @@ pub fn run() {
             run::pause_run,
             run::resume_run,
             run::cancel_run,
+            code_run::code_run_start,
+            code_run::code_run_status,
+            code_run::code_run_stop,
             completion::fim_complete,
             completion::fim_cancel,
             terminal::terminal_start,
@@ -87,6 +92,7 @@ pub fn run() {
             debug_adapter::dap_send,
             debug_adapter::dap_status,
             debug_adapter::dap_stop,
+            debug_adapter::dap_restart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Ryoko desktop shell");
@@ -98,6 +104,9 @@ pub fn run() {
             }
             if let Some(state) = handle.try_state::<run::RunState>() {
                 run::shutdown(&state);
+            }
+            if let Some(state) = handle.try_state::<code_run::CodeRunState>() {
+                code_run::shutdown(&state);
             }
             if let Some(state) = handle.try_state::<terminal::TerminalState>() {
                 terminal::shutdown(&state);

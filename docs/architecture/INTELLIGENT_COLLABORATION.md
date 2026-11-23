@@ -121,3 +121,5 @@ The caller is responsible for configuring real local or hosted models,
 a reviewed sandbox image, and a meaningful `--check-command`. A missing
 provider, unsupported code diff, absent trusted evidence or ambiguous merge
 source causes the task to fail rather than report an unsupported success.
+Evaluation baselines and reproducible coding-task fixtures are documented in
+[`docs/evaluation/BASELINE_REPORT.md`](../evaluation/BASELINE_REPORT.md).
