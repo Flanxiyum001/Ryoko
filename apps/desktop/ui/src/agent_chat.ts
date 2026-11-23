@@ -185,9 +185,9 @@ export function mountAgentChat(deps: AgentChatDeps): { focus: () => void; reset:
     }
   }
 
-  function cancel(): void {
+  async function cancel(): Promise<void> {
     if (!activeRequest) return;
-    // Invalidate the client before cancelling the native generation.
+    // Ignore any late chunks, and do not allow another send until native cancellation resolves.
     if (outputNode) {
       const body = outputNode.querySelector('.chat-turn-body');
       if (body) body.textContent = output + '\n[Stopped]';
@@ -195,10 +195,17 @@ export function mountAgentChat(deps: AgentChatDeps): { focus: () => void; reset:
     activeRequest = null;
     submission = null;
     outputNode = null;
-    send.disabled = false;
+    send.disabled = true;
     stop.disabled = true;
-    note.textContent = 'Stopped. No code was applied.';
-    void invoke('agent_chat_cancel').catch(() => undefined);
+    note.textContent = 'Stopping the current response…';
+    try {
+      await invoke('agent_chat_cancel');
+      note.textContent = 'Stopped. No code was applied.';
+    } catch (error) {
+      note.textContent = 'Could not confirm cancellation: ' + String(error);
+    } finally {
+      send.disabled = false;
+    }
   }
 
   void listen<ChatPayload>('ryoko-chat-chunk', ({ payload }) => {
@@ -215,7 +222,7 @@ export function mountAgentChat(deps: AgentChatDeps): { focus: () => void; reset:
     if (payload.requestId === activeRequest) complete(undefined, payload);
   });
   send.addEventListener('click', () => void submit());
-  stop.addEventListener('click', cancel);
+  stop.addEventListener('click', () => void cancel());
   input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -251,7 +258,7 @@ export function mountAgentChat(deps: AgentChatDeps): { focus: () => void; reset:
   return {
     focus: () => input.focus(),
     reset: () => {
-      cancel();
+      void cancel();
       turns = [];
       attached = [];
       includeSelection = false;
