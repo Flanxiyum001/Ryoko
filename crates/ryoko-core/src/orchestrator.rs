@@ -1234,7 +1234,7 @@ fn publish_failure(
 fn prioritized_repair_feedback(
     reason: &str,
     logs: &[String],
-    changes: &[ProposedChange],
+    changes: &[crate::model::ProposedChange],
 ) -> String {
     let mut output = format!("{reason}\n\n");
     output.push_str(
