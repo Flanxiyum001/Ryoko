@@ -1,6 +1,7 @@
 name: "Feature request"
 description: "Suggest a focused improvement to Ryoko's multi-agent IDE."
 title: "[Feature]: "
+labels: ["enhancement"]
 body:
   - type: markdown
     attributes:

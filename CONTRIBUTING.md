@@ -4,6 +4,8 @@ Thank you for helping improve Ryoko. Ryoko is a **pre-alpha, experimental multi-
 
 Please read [the Code of Conduct](CODE_OF_CONDUCT.md), [the security policy](SECURITY.md), and [the engineering rules](AGENTS.md) before contributing.
 
+For issue priorities, label conventions, and the contribution workflow, see [issue triage](docs/ISSUE_TRIAGE.md). The maintainer's [GitHub review and branch-protection checklist](docs/MAINTAINER_GOVERNANCE.md) describes the required manual repository settings; documentation alone does not enable those protections.
+
 ## Find or discuss a task
 
 1. Search [existing issues](https://github.com/Flanxiyum001/Ryoko/issues) and [pull requests](https://github.com/Flanxiyum001/Ryoko/pulls) before opening a duplicate.
