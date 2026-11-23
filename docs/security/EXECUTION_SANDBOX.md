@@ -80,12 +80,14 @@ tag separately as `image_tag`. `--no-build` reports the tag only; it cannot be
 used to run a check until the operator resolves a local image ID.
 
 Git worktree proposals use capability-relative temporary writes and atomic
-rename. The orchestrator seals a Git tree before validation, rejects changes
-to tracked source while tests run, and publishes a commit built from the sealed
-tree object. Generated untracked test artifacts remain outside that tree.
-External processes with write access to the validation worktree can still
-change and restore a file while a check is in progress; strict isolation
-requires running the check against a separately materialized immutable tree.
+rename. The orchestrator seals a Git tree, checks out that commit into a
+separate validation worktree, rejects changes to its tracked source while
+tests run, and publishes only the sealed commit. Changes to the agent's
+worktree cannot affect validation or the published bytes. Generated untracked
+test artifacts are excluded from the sealed tree. Another process with access
+to the validation checkout could still change and restore a file during a
+check; a read-only mount plus separate writable build overlay is required to
+exclude that adversary.
 
 ## Current guardrail
 
