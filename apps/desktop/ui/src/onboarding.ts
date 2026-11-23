@@ -209,7 +209,7 @@ export function mountOnboarding(deps: OnboardingDeps): {
   });
   dismiss.addEventListener('click', () => dialog.close());
   dialog.addEventListener('cancel', () => { error.textContent = ''; });
-  launch?.addEventListener('click', () => { step = state?.configured ? 1 : 0; renderStep(); dialog.showModal(); });
+  launch?.addEventListener('click', () => { step = 0; renderStep(); dialog.showModal(); });
   clone?.addEventListener('click', () => void cloneRepository());
 
   async function refresh(): Promise<void> {
