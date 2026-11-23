@@ -10,6 +10,7 @@ import './styles.css';
 import { LspClient, type LspState, type LspServerStatus } from './lsp';
 import { registerMonacoCapabilities } from './lsp_bridge';
 import { buildTree, changeKind, filterTreePaths } from './tree';
+import { mountQuickOpen } from './quick_open_view';
 import { mountSearchPanel } from './search_view';
 import {
   renderChanges,
@@ -323,6 +324,12 @@ const changeTimers = new Map<string, number>();
 const expandedDirectories = new Set<string>();
 const workbenchChanges = new Map<string, ReturnType<typeof changeKind>>();
 const keybindings = resolveKeybindings(loadOverrides(localStorage));
+const quickOpen = mountQuickOpen({
+  workspaceRoot: () => state.root,
+  files: () => state.files,
+  openFile,
+  setStatus,
+});
 
 const editor = monaco.editor.create(editorHost, {
   theme: 'vs-dark',
@@ -1679,6 +1686,7 @@ async function openFile(path: string): Promise<void> {
     renderFiles();
     updateCursor();
     setStatus(path);
+    quickOpen.remember(path);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   }
@@ -1896,6 +1904,9 @@ bottomClose.addEventListener('click', () => bottomPanel.classList.add('hidden'))
 
 function dispatchBinding(action: string): void {
   switch (action) {
+    case 'workbench.quickOpen':
+      quickOpen.open();
+      break;
     case 'workbench.search':
       showBottom('search');
       break;
