@@ -214,6 +214,18 @@ export class GitHubBroker {
         if (bytes.byteLength > 200_000 || bytes.includes(0)) throw bad('file is too large or binary', 413);
         return { path: data.path, sha: data.sha, content: bytes.toString('utf8') };
       }
+      case 'pr_diff': {
+        const number = positiveId(options.number, 'pull request');
+        const data = await this.request(root + '/pulls/' + number + '/files?per_page=20', token);
+        const files = Array.isArray(data) ? data : [];
+        return { files: files.slice(0, 20).map((item) => ({
+          path: String(item.filename || '').slice(0, 250),
+          status: String(item.status || 'modified').slice(0, 20),
+          additions: Number.isInteger(item.additions) ? item.additions : 0,
+          deletions: Number.isInteger(item.deletions) ? item.deletions : 0,
+          patch: typeof item.patch === 'string' ? item.patch.slice(0, 8_000) : '',
+        })) };
+      }
       default: throw bad('unsupported repository view');
     }
   }

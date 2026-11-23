@@ -118,7 +118,10 @@ const fakeBroker = {
     if (Number(id) !== 17 || Number(repoId) !== 41) throw Object.assign(new Error('forbidden'), { status: 403 });
     return { id: 41, name: 'repo', full_name: 'approved-owner/repo', default_branch: 'main' };
   },
-  async view() { return []; },
+  async view(userToken, installationId, repoId) {
+    await this.authorizedRepo(userToken, installationId, repoId);
+    return [];
+  },
   executionCount: 0,
   async execute(_token, proposal) {
     this.executionCount++;
@@ -280,4 +283,138 @@ test('desktop pairing requires browser CSRF, is single-use, read-only and revoke
   await req('/api/disconnect', { method: 'POST', sessionCookie: cookie, csrf });
   const revoked = await req('/api/desktop/repositories', { headers });
   assert.equal(revoked.status, 401);
+});
+
+async function pairDesktop() {
+  const { cookie, csrf } = await login();
+  const created = await req('/api/desktop/pair', { method: 'POST', sessionCookie: cookie, csrf });
+  assert.equal(created.status, 201);
+  const { code } = await created.json();
+  const exchanged = await req('/api/desktop/exchange', { method: 'POST', body: { code } });
+  assert.equal(exchanged.status, 200);
+  const { token } = await exchanged.json();
+  return { cookie, csrf, token, headers: { Authorization: 'Bearer ' + token } };
+}
+
+test('desktop views are allowlisted, bounded and restricted to authorized repositories', async () => {
+  const { headers } = await pairDesktop();
+  const unsupported = await req('/api/desktop/view?installationId=17&repoId=41&view=merge_pr', { headers });
+  assert.equal(unsupported.status, 400);
+  const invalidNumber = await req('/api/desktop/view?installationId=17&repoId=41&view=pr_diff&number=0', { headers });
+  assert.equal(invalidNumber.status, 400);
+  const branches = await req('/api/desktop/view?installationId=17&repoId=41&view=branches', { headers });
+  assert.equal(branches.status, 200);
+  assert.deepEqual(await branches.json(), { view: 'branches', data: [] });
+  const forbidden = await req('/api/desktop/view?installationId=17&repoId=100&view=branches', { headers });
+  assert.equal(forbidden.status, 403);
+});
+
+test('pull request file diffs are sliced to 20 files with 8000-character patches', async () => {
+  const broker = new GitHubBroker({ appId: 1, clientId: 'x', clientSecret: 'y', privateKey: 'dummy' });
+  broker.authorizedRepo = async () => ({ full_name: 'owner/repo', default_branch: 'main' });
+  broker.installationToken = async () => 'read-token';
+  const requested = [];
+  broker.request = async (path) => {
+    requested.push(path);
+    return Array.from({ length: 30 }, (_, index) => ({
+      filename: 'src/file-' + index + '.ts', status: 'modified',
+      additions: 1, deletions: 2, patch: 'a'.repeat(9_000),
+    }));
+  };
+  const data = await broker.view('user-token', 17, 41, 'pr_diff', { number: 7 });
+  assert.match(requested[0], /\/pulls\/7\/files\?per_page=20$/);
+  assert.equal(data.files.length, 20);
+  assert.equal(data.files[0].patch.length, 8_000);
+  assert.equal(data.files[0].path, 'src/file-0.ts');
+  await assert.rejects(() => broker.view('user-token', 17, 41, 'pr_diff', { number: 0 }));
+});
+
+test('native desktop can queue, review, deny, then approve a scoped write exactly once', async () => {
+  const { headers } = await pairDesktop();
+  const writes = fakeBroker.executionCount;
+  const malformed = await req('/api/desktop/proposals', {
+    method: 'POST', headers,
+    body: { installationId: 17, repoId: 41, operation: 'merge_pr', params: {} },
+  });
+  assert.equal(malformed.status, 400);
+  const queued = await req('/api/desktop/proposals', {
+    method: 'POST', headers,
+    body: { installationId: 17, repoId: 41, operation: 'create_branch', params: { branch: 'ryoko/native-flow' } },
+  });
+  assert.equal(queued.status, 201);
+  const proposal = await queued.json();
+  assert.equal(proposal.status, 'pending');
+  assert.equal(proposal.source, 'desktop');
+  assert.deepEqual(proposal.params, { branch: 'ryoko/native-flow' });
+  assert.ok(proposal.expiresInSeconds > 500 && proposal.expiresInSeconds <= 600);
+  const list = await req('/api/desktop/proposals', { headers });
+  assert.equal((await list.json()).proposals.some((item) => item.id === proposal.id), true);
+  const detail = await req('/api/desktop/proposals/' + proposal.id, { headers });
+  assert.equal((await detail.json()).operation, 'create_branch');
+  const unknown = await req('/api/desktop/proposals/00000000-0000-0000-0000-000000000000', { headers });
+  assert.equal(unknown.status, 404);
+
+  const denied = await req('/api/desktop/proposals/' + proposal.id + '/reject', { method: 'POST', headers });
+  assert.equal(denied.status, 200);
+  assert.equal((await denied.json()).status, 'rejected');
+  assert.equal(fakeBroker.executionCount, writes);
+  const afterDenial = await req('/api/desktop/proposals/' + proposal.id + '/approve', { method: 'POST', headers });
+  assert.equal(afterDenial.status, 409);
+  assert.equal(fakeBroker.executionCount, writes);
+
+  const second = await req('/api/desktop/proposals', {
+    method: 'POST', headers,
+    body: { installationId: 17, repoId: 41, operation: 'create_branch', params: { branch: 'ryoko/native-flow-2' } },
+  });
+  assert.equal(second.status, 201);
+  const approved = await req('/api/desktop/proposals/' + (await second.json()).id + '/approve', { method: 'POST', headers });
+  assert.equal(approved.status, 200);
+  const reply = await approved.json();
+  assert.equal(reply.status, 'completed');
+  assert.equal(fakeBroker.executionCount, writes + 1);
+  const repeat = await req('/api/desktop/proposals/' + reply.id + '/approve', { method: 'POST', headers });
+  assert.equal(repeat.status, 409);
+  assert.equal(fakeBroker.executionCount, writes + 1);
+});
+
+test('expired desktop proposals fail closed instead of executing', async () => {
+  const { headers } = await pairDesktop();
+  const writes = fakeBroker.executionCount;
+  const queued = await req('/api/desktop/proposals', {
+    method: 'POST', headers,
+    body: { installationId: 17, repoId: 41, operation: 'create_branch', params: { branch: 'ryoko/expire-case' } },
+  });
+  assert.equal(queued.status, 201);
+  const proposal = await queued.json();
+  assert.ok(proposal.expiresInSeconds < 601);
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 11 * 60_000;
+    const approved = await req('/api/desktop/proposals/' + proposal.id + '/approve', { method: 'POST', headers });
+    assert.equal(approved.status, 409);
+    assert.equal((await approved.json()).error, 'proposal expired or already resolved');
+    const staleList = await req('/api/desktop/proposals', { headers });
+    assert.equal((await staleList.json()).proposals.some((item) => item.id === proposal.id), false);
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(fakeBroker.executionCount, writes);
+});
+
+test('signing out of the browser revokes desktop proposal rights and views', async () => {
+  const { cookie, csrf, token, headers } = await pairDesktop();
+  const queued = await req('/api/desktop/proposals', {
+    method: 'POST', headers,
+    body: { installationId: 17, repoId: 41, operation: 'create_branch', params: { branch: 'ryoko/revoked-session' } },
+  });
+  assert.equal(queued.status, 201);
+  const proposal = await queued.json();
+  await req('/api/disconnect', { method: 'POST', sessionCookie: cookie, csrf });
+  assert.equal((await req('/api/desktop/proposals/' + proposal.id, { headers })).status, 401);
+  const denied = await req('/api/desktop/proposals/' + proposal.id + '/approve', { method: 'POST', headers });
+  assert.equal(denied.status, 401);
+  const view = await req('/api/desktop/view?installationId=17&repoId=41&view=branches', { headers });
+  assert.equal(view.status, 401);
+  const list = await req('/api/desktop/proposals', { headers });
+  assert.equal(list.status, 401);
 });

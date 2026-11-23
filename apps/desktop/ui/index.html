@@ -192,6 +192,39 @@
           <div id="githubQueueList" class="github-queue-list">
             <p class="hint">No repository queue loaded.</p>
           </div>
+          <div id="githubExploreToolbar" class="github-queue-toolbar hidden">
+            <button id="githubBranches" class="button ghost compact" type="button">Branches</button>
+            <button id="githubChecks" class="button ghost compact" type="button">CI checks</button>
+            <button id="githubTree" class="button ghost compact" type="button">Files</button>
+          </div>
+          <div class="github-diff-row hidden" id="githubExploreExtra">
+            <input id="githubDiffNumber" type="number" min="1" placeholder="PR #" class="github-diff-input">
+            <button id="githubDiffButton" class="button ghost compact" type="button">PR changes</button>
+            <input id="githubFilePath" type="text" placeholder="src/file.ext" class="github-diff-input" spellcheck="false" autocomplete="off">
+            <button id="githubFileButton" class="button ghost compact" type="button">File</button>
+          </div>
+          <div id="githubExplorer" class="github-explorer hidden"></div>
+          <div id="githubWritePanel" class="github-write hidden">
+            <h4>PROPOSE A GITHUB WRITE</h4>
+            <p class="hint">Queued proposals never touch GitHub until you approve their exact scope once.</p>
+            <label class="sr-only" for="githubOperation">GitHub write operation</label>
+            <select id="githubOperation" aria-label="GitHub write operation">
+              <option value="create_branch">Create isolated branch</option>
+              <option value="commit_file">Commit file to isolated branch</option>
+              <option value="open_pull_request">Open pull request</option>
+              <option value="review_comment">Comment on pull request</option>
+            </select>
+            <div id="githubOperationFields" class="github-operation-fields"></div>
+            <button id="githubReviewScope" class="button ghost compact" type="button">Review exact scope…</button>
+            <div id="githubScopePreview" class="github-scope-preview"></div>
+            <button id="githubQueueProposal" class="button primary compact" type="button" disabled>Queue proposal</button>
+            <div class="github-queue-toolbar">
+              <button id="githubRefreshProposals" class="button ghost compact" type="button">Refresh proposals</button>
+            </div>
+            <div id="githubProposalList" class="github-proposal-list" aria-live="polite">
+              <p class="hint">Pair GitHub to list pending proposals.</p>
+            </div>
+          </div>
         </details>
         <details class="hunk-review">
           <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>

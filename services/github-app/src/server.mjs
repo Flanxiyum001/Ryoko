@@ -165,6 +165,44 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     }
     return session;
   }
+  // Native desktop proposals reuse the exact broker-side approval rules:
+  // pending proposals expire after 10 minutes, only the owning user can
+  // resolve them, and a resolved proposal can never execute twice.
+  async function resolveProposal(id, verb, ownerLogin, userToken) {
+    const item = proposals.get(id);
+    if (!item || item.owner !== ownerLogin) throw bad('proposal not found', 404);
+    if (Date.now() > item.expires || item.status !== 'pending') throw bad('proposal expired or already resolved', 409);
+    if (verb === 'reject') {
+      item.status = 'rejected';
+      return { id: item.id, status: item.status };
+    }
+    item.status = 'executing';
+    try {
+      const result = item.proposal.operation === 'clone_repository'
+        ? await client.clone(userToken, item.proposal, settings.projectsRoot)
+        : await client.execute(userToken, item.proposal);
+      item.status = 'completed';
+      item.result = result;
+      return { id: item.id, status: item.status, result };
+    } catch (error) {
+      item.status = 'failed'; // never automatically re-execute an ambiguous write
+      item.error = safeError(error).message;
+      throw error;
+    }
+  }
+  function desktopProposalView(item) {
+    return {
+      id: item.id,
+      source: item.source,
+      status: item.status,
+      operation: item.proposal.operation,
+      installationId: item.proposal.installationId,
+      repoId: item.proposal.repoId,
+      params: item.proposal.params,
+      createdAt: item.createdAt,
+      expiresInSeconds: Math.max(0, Math.floor((item.expires - Date.now()) / 1000)),
+    };
+  }
   function expireDesktopEntries() {
     for (const [code, item] of desktopPairings) {
       if (item.expires <= Date.now() || !sessions.has(item.sessionId)) desktopPairings.delete(code);
@@ -375,6 +413,53 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
         issues: Array.isArray(issues) ? issues.slice(0, 30) : [],
       });
     }
+    if (req.method === 'GET' && path === '/api/desktop/view') {
+      const session = requireDesktop(req);
+      const desktopViews = new Set(['branches', 'checks', 'tree', 'file', 'pr_diff']);
+      const view = url.searchParams.get('view');
+      if (!desktopViews.has(view)) throw bad('unsupported desktop repository view');
+      const requestedNumber = Number(url.searchParams.get('number'));
+      if (view === 'pr_diff' && (!Number.isInteger(requestedNumber) || requestedNumber <= 0)) {
+        throw bad('invalid pull request number');
+      }
+      const data = await client.view(
+        session.token, url.searchParams.get('installationId'), url.searchParams.get('repoId'),
+        view, {
+          path: url.searchParams.get('path'), ref: url.searchParams.get('ref'),
+          ...(Number.isInteger(requestedNumber) && requestedNumber > 0 ? { number: requestedNumber } : {}),
+        },
+      );
+      return json(res, 200, { view, data });
+    }
+    if (req.method === 'GET' && path === '/api/desktop/proposals') {
+      const session = requireDesktop(req);
+      const owned = Array.from(proposals.values())
+        .filter((item) => item.owner === session.user.login)
+        .filter((item) => Date.now() <= item.expires)
+        .slice(-20);
+      return json(res, 200, { proposals: owned.map(desktopProposalView) });
+    }
+    if (req.method === 'POST' && path === '/api/desktop/proposals') {
+      const session = requireDesktop(req);
+      const proposal = validateProposal(await jsonBody(req));
+      await client.authorizedRepo(session.token, proposal.installationId, proposal.repoId);
+      return json(res, 201, desktopProposalView(addProposal(session.user, proposal, 'desktop')));
+    }
+    const desktopProposalMatch = path.match(/^\/api\/desktop\/proposals\/([a-f0-9-]{36})$/);
+    if (req.method === 'GET' && desktopProposalMatch) {
+      const session = requireDesktop(req);
+      const item = proposals.get(desktopProposalMatch[1]);
+      if (!item || item.owner !== session.user.login) throw bad('proposal not found', 404);
+      return json(res, 200, desktopProposalView(item));
+    }
+    const desktopDecisionMatch = path.match(/^\/api\/desktop\/proposals\/([a-f0-9-]{36})\/(approve|reject)$/);
+    if (req.method === 'POST' && desktopDecisionMatch) {
+      const session = requireDesktop(req);
+      return json(res, 200, await resolveProposal(
+        desktopDecisionMatch[1], desktopDecisionMatch[2], session.user.login, session.token,
+      ));
+    }
+
     if (req.method === 'GET' && path === '/api/installations') {
       const session = requireUser(req);
       return json(res, 200, await client.installations(session.token));
@@ -389,6 +474,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
         session.token, url.searchParams.get('installationId'), url.searchParams.get('repoId'),
         url.searchParams.get('view'), {
           path: url.searchParams.get('path'), ref: url.searchParams.get('ref'),
+          number: Number(url.searchParams.get('number')) || undefined,
         },
       );
       return json(res, 200, result);
@@ -430,26 +516,9 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     if (req.method === 'POST' && proposalMatch) {
       const session = requireUser(req);
       csrf(req, session);
-      const item = proposals.get(proposalMatch[1]);
-      if (!item || item.owner !== session.user.login) throw bad('proposal not found', 404);
-      if (Date.now() > item.expires || item.status !== 'pending') throw bad('proposal expired or already resolved', 409);
-      if (proposalMatch[2] === 'reject') {
-        item.status = 'rejected';
-        return json(res, 200, { id: item.id, status: item.status });
-      }
-      item.status = 'executing';
-      try {
-        const result = item.proposal.operation === 'clone_repository'
-          ? await client.clone(session.token, item.proposal, settings.projectsRoot)
-          : await client.execute(session.token, item.proposal);
-        item.status = 'completed';
-        item.result = result;
-        return json(res, 200, { id: item.id, status: item.status, result });
-      } catch (error) {
-        item.status = 'failed'; // never automatically re-execute an ambiguous write
-        item.error = safeError(error).message;
-        throw error;
-      }
+      return json(res, 200, await resolveProposal(
+        proposalMatch[1], proposalMatch[2], session.user.login, session.token,
+      ));
     }
     if (req.method === 'GET' && path === '/api/events') {
       const session = requireUser(req);

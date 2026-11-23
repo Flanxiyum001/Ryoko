@@ -145,6 +145,27 @@ normal isolation configuration.
 
 The web shell provides repository installation selection, read-only file browser, branches/issues/PRs/CI, dark/light appearance, reduced motion, a persistent sidebar, a Mission Control board with eight agents, a verified GitHub event timeline, and a user approval queue. It is **not yet packaged as a Tauri/native desktop binary**, and the file panel is a read-only inspector rather than a Monaco editor.
 
+### Native desktop integration (paired bridge)
+
+The Tauri sidebar pairs with the broker using a single-use code (see the native
+review queue in `docs/architecture/DESKTOP_ARCHITECTURE.md`) and now exposes:
+
+- **Read-only views:** open pull requests and issues (`/api/desktop/queue`)
+  plus branches, Actions/CI runs, the repository file tree, single file
+  contents and per-file pull request diffs (`/api/desktop/view?view=branches|checks|tree|file|pr_diff`).
+  Each response is bounded and the view name is allowlisted; CI conclusions are
+  shown only when GitHub reports the run completed, never inferred.
+- **Approval-first writes:** the sidebar can queue `create_branch`,
+  `commit_file`, `open_pull_request` and `review_comment` proposals
+  (`POST /api/desktop/proposals`), list and inspect pending proposals, reject
+  them, or approve them through a native dialog that restates the exact scope
+  (repository, branch, path, message, content size). Proposals expire after
+  10 minutes, execute at most once, belong to the pairing user, and die
+  instantly when the browser session signs out. The desktop bridge token is
+  scoped to the paired session and never grants merge, workflow or
+  administration rights; validation, operation restrictions and branch rules
+  are enforced by the same broker code path as browser proposals.
+
 **Still required for the full product:** native desktop packaging, LSP/Monaco editor, terminal, live per-agent inference events, durable audit/job queue, native OAuth token refresh, a first-party Rust agent bridge submitting proposals, bulk patch staging, and staged deployment with proper production controls.
 
 ## 7. Tests and release gates

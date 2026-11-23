@@ -254,10 +254,12 @@ The panel refreshes when a workspace opens and when the operator presses
 **Refresh**. It does not poll, so a stale view is visible rather than silently
 changing while the operator reads it.
 
-## Native GitHub review queue
+## Native GitHub review queue and approval-first writes
 
 The Tauri sidebar can display a read-only snapshot of up to 30 open pull requests
-and 30 open issues from an authorized GitHub App repository. Sign in to the
+and 30 open issues from an authorized GitHub App repository, plus branches,
+Actions/CI runs, the repository file tree, single file contents and per-file
+pull request diffs. Sign in to the
 local GitHub App workbench, choose **Pair native desktop**, then paste the
 single-use code into the sidebar. The native shell exchanges it with the broker
 at `127.0.0.1:4173`; the OAuth token stays inside the Node broker and the
@@ -266,5 +268,16 @@ short-lived bridge token stays in the Rust process, never in Monaco or on disk.
 The backend accepts only the fixed loopback broker, disables redirects and
 proxies, requires a paired bridge token, bounds each response to 256 KiB, and
 permits only canonical `https://github.com/.../pull|issues/<n>` links. Click
-**Refresh** to reload; it does not poll. The queue is read-only and does not
-grant permission to merge or modify GitHub content.
+**Refresh** to reload; it does not poll. CI conclusions are shown only when
+GitHub reports the run completed; queued or running workflows never render as
+successes.
+
+Writes go through the broker's proposal flow, now reachable natively: the
+sidebar queues `create_branch`, `commit_file`, `open_pull_request` or
+`review_comment` as a pending proposal that expires after 10 minutes, previews
+its exact scope, and only executes after an explicit native approval dialog
+restates that scope (repository, branch, path, message, content size). A
+proposal executes at most once and can be rejected at any point before
+approval. Signing out of the browser session revokes the paired bridge
+immediately. No auto-merge, default-branch push, workflow edit or App
+administration action is available from the desktop.

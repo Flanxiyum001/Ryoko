@@ -406,6 +406,41 @@ pre.mission-detail-value {
 .github-queue-item:hover, .github-queue-item:focus-visible {
   color: var(--accent); background: var(--panel-raised);
 }
+.github-diff-row { display: flex; gap: 6px; padding: 0 10px 7px; }
+.github-diff-input {
+  width: 72px; padding: 3px 7px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel-raised); color: var(--text); font-size: 11.5px;
+}
+.github-explorer, .github-write { padding: 0 10px 10px; }
+.github-inspect-title {
+  margin: 6px 2px 3px; color: var(--muted); font-size: 10px;
+  letter-spacing: .08em; text-transform: uppercase; overflow-wrap: anywhere;
+}
+.github-patch {
+  margin: 2px 0 8px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto;
+}
+.github-write h4 {
+  margin: 4px 2px 3px; color: var(--muted); font-size: 10px;
+  letter-spacing: .08em; text-transform: uppercase;
+}
+.github-operation-fields { display: flex; flex-direction: column; gap: 6px; margin: 7px 0; }
+.github-operation-fields input, .github-operation-fields textarea {
+  padding: 4px 7px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel-raised); color: var(--text); font-size: 11.5px;
+  font-family: inherit; resize: vertical;
+}
+.github-scope-preview { margin: 6px 0; }
+.github-scope-preview .hint { display: block; padding: 4px 2px; }
+.github-proposal-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.github-proposal { border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px; }
+.github-proposal-scope {
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 11px; line-height: 1.4; color: var(--text);
+}
+.github-proposal-meta { margin: 5px 0; color: var(--muted); font-size: 10.5px; }
+.github-proposal-actions { display: flex; gap: 6px; }
 
 /* Streaming local FIM ghost text. The content widget is positioned at the
    cursor; layout metrics intentionally match the Monaco model. */
