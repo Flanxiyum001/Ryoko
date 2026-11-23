@@ -52,7 +52,27 @@ function jsonList(value, name) {
 // MCP is entirely opt-in for pipeline runs. Without RYOKO_MCP_SERVER the child
 // process gets no server, and every tool call would be denied anyway.
 const mcpServer = process.env.RYOKO_MCP_SERVER ? resolve(process.env.RYOKO_MCP_SERVER) : '';
-const mcp = mcpServer ? {
+const agentMcpEnabled = process.env.RYOKO_GITHUB_AGENT_MCP === '1';
+if (agentMcpEnabled && mcpServer) {
+  throw new Error('Choose either RYOKO_GITHUB_AGENT_MCP or a custom RYOKO_MCP_SERVER');
+}
+if (agentMcpEnabled && String(process.env.RYOKO_AGENT_BROKER_TOKEN || '').length < 32) {
+  throw new Error('RYOKO_AGENT_BROKER_TOKEN is required for the GitHub agent MCP bridge');
+}
+// This model-facing tool can ONLY enqueue proposals. A separate human approval
+// is still required to execute any GitHub write.
+const agentMcp = agentMcpEnabled ? {
+  server: process.execPath,
+  serverArgs: [fileURLToPath(new URL('./agent-mcp-stdio.mjs', import.meta.url))],
+  allowEnv: [
+    'RYOKO_AGENT_BROKER_TOKEN', 'RYOKO_GITHUB_BROKER_URL',
+    'RYOKO_GITHUB_INSTALLATION_ID', 'RYOKO_GITHUB_REPO_ID',
+  ],
+  allowTools: ['queue_github_proposal'],
+  headlessApprove: ['queue_github_proposal'],
+  maxCalls: 8,
+} : null;
+const mcp = agentMcp || (mcpServer ? {
   server: mcpServer,
   serverArgs: jsonList(process.env.RYOKO_MCP_SERVER_ARGS, 'RYOKO_MCP_SERVER_ARGS'),
   allowEnv: list(process.env.RYOKO_MCP_ALLOW_ENV),
@@ -60,7 +80,7 @@ const mcp = mcpServer ? {
   // The only approval a headless run can obtain. Every other tool stays denied.
   headlessApprove: list(process.env.RYOKO_MCP_HEADLESS_APPROVE),
   maxCalls: Number(process.env.RYOKO_MCP_MAX_CALLS || 0),
-} : null;
+} : null);
 const server = createRyokoServer({
   broker,
   frontendPath,
