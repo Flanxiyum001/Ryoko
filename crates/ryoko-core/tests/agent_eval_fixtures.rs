@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use ryoko_core::eval::{
-    EvaluationConfig, EvaluationMode, EvaluationTaskType, ExpectedOutcome, FailureClassification,
+    EvaluationConfig, EvaluationMode, EvaluationTaskType, FailureClassification,
     builtin_evaluation_fixtures, run_evaluation_fixture, run_evaluation_suite,
 };
 
