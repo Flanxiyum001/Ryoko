@@ -8,8 +8,13 @@ use uuid::Uuid;
 
 pub(crate) fn write(root: &Path, relative: &Path, content: &[u8]) -> std::io::Result<()> {
     let dir = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
-    let parent = relative.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    if parent != Path::new(".") { dir.create_dir_all(parent)?; }
+    let parent = relative
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if parent != Path::new(".") {
+        dir.create_dir_all(parent)?;
+    }
     // The opened directory remains the authority even if an attacker swaps a
     // parent symlink after this point. A temporary file is renamed over the
     // destination, so a final-component symlink is never followed for writes.
@@ -19,10 +24,8 @@ pub(crate) fn write(root: &Path, relative: &Path, content: &[u8]) -> std::io::Re
     })?;
     let temporary = format!(".ryoko-write-{}", Uuid::new_v4());
     let result = (|| {
-        let mut file = parent_dir.open_with(
-            &temporary,
-            OpenOptions::new().write(true).create_new(true),
-        )?;
+        let mut file =
+            parent_dir.open_with(&temporary, OpenOptions::new().write(true).create_new(true))?;
         file.write_all(content)?;
         file.sync_all()?;
         parent_dir.rename(&temporary, &parent_dir, name)
@@ -68,7 +71,10 @@ mod tests {
         symlink(&victim, root.path().join("link")).unwrap();
         write(root.path(), Path::new("link"), b"replacement").unwrap();
         assert_eq!(std::fs::read_to_string(victim).unwrap(), "original");
-        assert_eq!(std::fs::read_to_string(root.path().join("link")).unwrap(), "replacement");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("link")).unwrap(),
+            "replacement"
+        );
     }
 
     #[cfg(unix)]
