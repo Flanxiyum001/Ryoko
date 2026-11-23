@@ -883,3 +883,44 @@ button:focus-visible, input:focus-visible { outline: 1px solid var(--accent); ou
   font: inherit; max-width: 145px; cursor: pointer;
 }
 #languageMode:focus-visible { outline: 1px solid var(--accent); }
+
+/* VS Code-style chrome: compact title bar, icon activity bar, coloured status bar. */
+:root { --accent: #3794ff; --statusbar: #0078d4; --statusbar-text: #fff; }
+#app { grid-template-rows: 38px 1fr 24px; }
+.topbar { gap: 10px; padding: 0 10px; background: #181818; border-bottom: 1px solid #2b2b2b; }
+.brand-mark { width: 20px; height: 20px; border-radius: 5px; font-size: 12px; }
+.command-center { height: 24px; border-color: #3c3c3c; background: #1f1f1f; }
+.command-center:hover { border-color: #555; background: #262626; }
+.top-actions .button { padding: 3px 9px; font-size: 12px; }
+.layout { grid-template-columns: 48px 260px minmax(0, 1fr) 340px; }
+.layout.hide-explorer { grid-template-columns: 48px minmax(0, 1fr) 340px; }
+.layout.hide-inspector { grid-template-columns: 48px 260px minmax(0, 1fr); }
+.layout.hide-explorer.hide-inspector { grid-template-columns: 48px minmax(0, 1fr); }
+.activity-rail { padding: 0; gap: 0; background: #181818; border-right: 1px solid #2b2b2b; }
+.rail-button { position: relative; min-height: 48px; color: #868686; }
+.rail-button.active { border-left-color: #fff; color: #fff; }
+.rail-icon { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.rail-button .rail-label {
+  position: absolute; left: 52px; top: 50%; transform: translateY(-50%); z-index: 20;
+  padding: 4px 8px; font-size: 12px; white-space: nowrap; pointer-events: none;
+  color: #ccc; background: #252526; border: 1px solid #454545; border-radius: 3px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 40%); opacity: 0; transition: opacity .12s .4s;
+}
+.rail-button:hover .rail-label, .rail-button:focus-visible .rail-label { opacity: 1; }
+.explorer, .problems { background: #181818; }
+.panel-head { padding: 0 8px 0 20px; min-height: 35px; font-size: 11px; color: #ccc; letter-spacing: .02em; }
+.editor-tabs { background: #181818; border-bottom: 1px solid #2b2b2b; }
+.editor-tab { border-right-color: #2b2b2b; }
+.editor-tab.selected { background: #1f1f1f; border-top-color: var(--accent); box-shadow: 0 1px 0 #1f1f1f; }
+.editor-column, .empty-editor, .tabbar { background: #1f1f1f; }
+.statusbar { background: var(--statusbar); color: var(--statusbar-text); font-size: 12px; border-top: 0; }
+.statusbar .status-pill, .statusbar .status-pill.ready, .statusbar .status-pill.starting,
+.statusbar .status-pill.error { color: var(--statusbar-text); border-color: transparent; background: transparent; }
+.statusbar .status-pill::before { background: #fff; }
+.statusbar .status-pill.offline { background: #c72e0f; }
+.statusbar .status-message { color: rgb(255 255 255 / 85%); }
+.statusbar #languageMode { color: #fff; border-color: transparent; }
+.statusbar #languageMode option { color: #ccc; background: #252526; }
+@media (max-width: 720px) {
+  .layout, .layout.hide-explorer, .layout.hide-inspector, .layout.hide-explorer.hide-inspector { grid-template-columns: 48px minmax(0, 1fr); }
+}
