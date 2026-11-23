@@ -166,12 +166,17 @@ export function buildRunArgs({ cwd, goal, reportPath, mcp }) {
   return args;
 }
 
-async function defaultRunCli({ binary, cwd, goal, reportPath, timeoutMs, mcp }) {
+async function defaultRunCli({ binary, cwd, goal, reportPath, timeoutMs, mcp, githubScope }) {
   const args = buildRunArgs({ cwd, goal, reportPath, mcp });
   try {
     await exec(binary, args, {
       cwd, timeout: timeoutMs, maxBuffer: 4_000_000, shell: false,
-      env: { ...process.env, RYOKO_NONINTERACTIVE: '1' },
+      env: {
+        ...process.env, RYOKO_NONINTERACTIVE: '1',
+        // Host-created scope; never derived from issue body or model arguments.
+        RYOKO_GITHUB_INSTALLATION_ID: String(githubScope.installationId),
+        RYOKO_GITHUB_REPO_ID: String(githubScope.repoId),
+      },
     });
   } catch (error) {
     const report = await stat(reportPath).catch(() => null);
@@ -216,6 +221,7 @@ export async function runIssuePipeline({
     reportPath,
     timeoutMs: settings.pipelineTimeoutMs || 15 * 60_000,
     mcp: settings.mcp || null,
+    githubScope: { installationId: request.installationId, repoId: request.repoId },
   });
   const report = JSON.parse(await readFile(reportPath, 'utf8'));
   const success = selectIntegratedSuccess(report);
