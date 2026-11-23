@@ -133,7 +133,7 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
 
   function renderProposals(items: GitHubProposal[]) {
     proposalsHost.replaceChildren();
-    proposalCount.textContent = String(items.length);
+    proposalCount.textContent = String(items.filter((item) => item.status === 'pending').length);
     if (!items.length) {
       notice(proposalsHost, 'No pending proposals for this repository.');
       return;
@@ -142,13 +142,13 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
       const details = document.createElement('details');
       details.className = 'github-proposal';
       const summary = document.createElement('summary');
-      summary.textContent = item.operation.replaceAll('_', ' ') + ' · ' + item.source;
+      summary.textContent = item.operation.replaceAll('_', ' ') + ' · ' + item.source + ' · ' + item.status;
       const preview = document.createElement('pre');
       preview.textContent = JSON.stringify(item.params, null, 2);
       preview.className = 'github-proposal-preview';
       const actions = document.createElement('div');
       actions.className = 'github-proposal-actions';
-      for (const decision of ['approve', 'reject'] as const) {
+      for (const decision of (item.status === 'pending' ? ['approve', 'reject'] as const : [])) {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'button ' + (decision === 'approve' ? 'primary' : 'ghost') + ' compact';
