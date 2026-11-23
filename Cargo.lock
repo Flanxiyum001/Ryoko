@@ -2079,6 +2079,7 @@ name = "ryoko-worktree"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cap-std",
  "rusqlite",
  "ryoko-core",
  "ryoko-models",

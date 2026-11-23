@@ -162,6 +162,14 @@ that share an interface.
 ## Budget and cancellation
 
 Reserve budget before dispatch, record actual usage, release the remainder.
+The router admits bounded requests only with known pricing and an output token
+limit. A shared ledger reserves the maximum estimated input and output charge
+atomically against run and task caps before provider dispatch; reported usage
+settles it. A call dropped without a usage event consumes the entire reserved
+allowance conservatively, since the provider may have billed it. Providers that exceed
+the requested output cap or omit usage can still incur unreported charges, so
+the provider adapter must enforce the cap and report usage for hard external
+billing guarantees.
 Enforce per-agent, per-task and per-project ceilings, output caps, timeouts, retry
 limits and concurrency limits. Cancellation must reach the provider stream, tool
 execution and runner process, and must be acknowledged within a bounded interval.
