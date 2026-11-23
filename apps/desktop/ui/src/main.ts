@@ -289,7 +289,7 @@ function activateView(view: WorkbenchView): void {
   }
   workbenchLayout.dataset.activeView = view;
   workbenchLayout.classList.toggle('hide-explorer', view !== 'explorer');
-  workbenchLayout.classList.toggle('hide-inspector', view === 'explorer' || view === 'editor');
+  workbenchLayout.classList.toggle('hide-inspector', view === 'explorer');
   for (const button of railButtons) {
     const active = button.dataset.view === view;
     button.classList.toggle('active', active);
@@ -331,6 +331,7 @@ let missionFocusEnabled = false;
 let missionPolling = false;
 let chatInputTokens = 0;
 let chatOutputTokens = 0;
+let chatEstimatedCostUsd = 0;
 let agentSessions: AgentSession[] = [];
 let agentSessionPolling = false;
 let gitHunks: GitHunkSnapshot | null = null;
@@ -544,17 +545,19 @@ function updateUsageMeter(): void {
   const totals = missionSnapshot?.totals;
   const missionTokens = (totals?.inputTokens ?? 0) + (totals?.outputTokens ?? 0);
   const total = missionTokens + chatInputTokens + chatOutputTokens;
-  usageMeter.textContent = `${formatTokens(total)} tokens · mission est. ${formatLedgerCost(totals?.ledgerCostUsd ?? 0)}`;
-  usageMeter.title = 'Includes reported chat and mission tokens. Cost estimates cover Mission Control ledger only, not chat billing.';
+  const estimatedCost = (totals?.ledgerCostUsd ?? 0) + chatEstimatedCostUsd;
+  usageMeter.textContent = `${formatTokens(total)} tokens · est. ${formatLedgerCost(estimatedCost)}`;
+  usageMeter.title = 'Usage reported by models and missions. Costs are estimates where pricing is known; unpriced requests may be excluded. Not an invoice.';
 }
 
 const agentChat = mountAgentChat({
   files: () => state.files,
   selection: currentSelectionContext,
   review: openSuggestedReview,
-  onTokens: (input, output) => {
+  onTokens: (input, output, estimatedCostUsd) => {
     chatInputTokens += input;
     chatOutputTokens += output;
+    chatEstimatedCostUsd += estimatedCostUsd;
     updateUsageMeter();
   },
   setStatus,
@@ -968,6 +971,7 @@ async function openFolder(): Promise<void> {
     agentChat.reset();
     chatInputTokens = 0;
     chatOutputTokens = 0;
+    chatEstimatedCostUsd = 0;
     updateUsageMeter();
     editorHost.classList.add('hidden');
     emptyEditor.classList.remove('hidden');
@@ -1847,7 +1851,10 @@ function renderMission(): void {
     usageLine.textContent = `${formatTokens(tokenCount)} tok · ${formatLedgerCost(node.task.usage?.ledgerCostUsd ?? 0)}`;
     const filesLine = document.createElement('span');
     filesLine.className = 'mission-node-usage';
-    filesLine.textContent = node.task.pullRequest?.files.slice(0, 2).join(' · ') || 'No files published';
+    const touched = node.task.pullRequest?.files
+      ?? agentSessions.find((session) => session.id === node.task.id)?.files
+      ?? [];
+    filesLine.textContent = touched.slice(0, 2).join(' · ') || 'No files published';
     button.append(role, label, description, usageLine, filesLine);
     button.addEventListener('click', () => {
       missionSelection = node.task.id;
