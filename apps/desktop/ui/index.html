@@ -197,12 +197,15 @@
             <p class="hint">Ryoko never pushes a proposal automatically. Review its exact parameters below, then approve or reject.</p>
             <label for="githubOperation">Operation</label>
             <select id="githubOperation">
+              <option value="clone_repository">Clone selected repository locally</option>
               <option value="create_branch">Create ryoko/ branch</option>
               <option value="commit_file">Commit a text file on ryoko/ branch</option>
               <option value="open_pull_request">Open pull request</option>
               <option value="review_comment">Comment on pull request</option>
               <option value="mark_ready_for_review">Mark draft ready (requires green CI)</option>
             </select>
+            <label id="githubProjectNameLabel" for="githubProjectName" class="hidden">Local project folder name</label>
+            <input id="githubProjectName" class="hidden" type="text" spellcheck="false" placeholder="my-project">
             <label id="githubBranchLabel" for="githubBranch">Branch name (ryoko/…)</label>
             <input id="githubBranch" type="text" autocomplete="off" spellcheck="false" placeholder="ryoko/feature-name">
             <label id="githubPathLabel" for="githubPath" class="hidden">Repository file path</label>
