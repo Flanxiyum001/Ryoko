@@ -483,7 +483,10 @@ fn parse_structured_proposal_inner(
     for edit in &proposal.edits {
         let path = validate_relative_path(&edit.path).map_err(|error| error.to_string())?;
         if full_paths.contains(&path.to_string_lossy().to_ascii_lowercase()) {
-            return Err(format!("cannot mix full-file and symbol edits: {}", edit.path));
+            return Err(format!(
+                "cannot mix full-file and symbol edits: {}",
+                edit.path
+            ));
         }
     }
     Ok(proposal)
@@ -619,13 +622,10 @@ mod tests {
         assert!(result.success, "{:?}", result.error);
         assert!(result.changes[0].content.contains("{ 2 }"));
         assert!(parse_structured_proposal(&proposal.to_string()).is_ok());
-        assert!(!task_result_from_text(
-            uuid::Uuid::new_v4(),
-            &proposal.to_string(),
-            false,
-            None
-        )
-        .success);
+        assert!(
+            !task_result_from_text(uuid::Uuid::new_v4(), &proposal.to_string(), false, None)
+                .success
+        );
     }
 
     #[test]
