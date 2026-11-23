@@ -308,7 +308,8 @@ pub async fn decide_github_proposal(
     decision: String,
     state: State<'_, GitHubQueueState>,
 ) -> Result<serde_json::Value, String> {
-    if id.len() != 36 || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    if id.len() != 36
+        || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
         || !["approve", "reject"].contains(&decision.as_str())
     {
         return Err("invalid GitHub proposal decision".into());
@@ -333,7 +334,9 @@ pub async fn get_github_checks(
     state: State<'_, GitHubQueueState>,
 ) -> Result<GitHubChecks, String> {
     checked_repo(installation_id, repo_id)?;
-    if number == 0 { return Err("invalid pull request number".into()); }
+    if number == 0 {
+        return Err("invalid pull request number".into());
+    }
     let response = client()?
         .get(format!(
             "{BROKER}/api/desktop/checks?installationId={installation_id}&repoId={repo_id}&number={number}"
@@ -361,7 +364,9 @@ pub async fn get_github_jobs(
         .await
         .map_err(|_| "cannot reach local GitHub App".to_owned())?;
     let jobs: JobList = bounded_json(response).await?;
-    if jobs.jobs.len() > 50 { return Err("too many GitHub jobs".into()); }
+    if jobs.jobs.len() > 50 {
+        return Err("too many GitHub jobs".into());
+    }
     Ok(jobs.jobs)
 }
 
@@ -373,7 +378,9 @@ pub async fn start_github_job(
     state: State<'_, GitHubQueueState>,
 ) -> Result<GitHubJob, String> {
     checked_repo(installation_id, repo_id)?;
-    if number == 0 { return Err("invalid issue number".into()); }
+    if number == 0 {
+        return Err("invalid issue number".into());
+    }
     let response = client()?
         .post(format!("{BROKER}/api/desktop/jobs"))
         .bearer_auth(token(&state)?)
