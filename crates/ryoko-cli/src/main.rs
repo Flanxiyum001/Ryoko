@@ -110,6 +110,8 @@ enum Commands {
     Spec(SpecArgs),
     /// Sign and verify merge provenance attestations stored in Git notes.
     Attest(AttestArgs),
+    /// Run repeatable coding-task evaluation fixtures and emit evidence-backed report.
+    Eval(EvalArgs),
 }
 
 #[derive(Debug, Args)]
@@ -232,6 +234,31 @@ struct AttestVerifyArgs {
     /// an SSHSIG does not sign a principal.
     #[arg(long, default_value = "ryoko")]
     identity: String,
+}
+
+#[derive(Debug, Args)]
+struct EvalArgs {
+    /// Emit report in JSON format rather than Markdown.
+    #[arg(long)]
+    json: bool,
+    /// Path to write the evaluation report to.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Specific fixture ID to evaluate (runs all fixtures by default).
+    #[arg(long)]
+    fixture: Option<String>,
+    /// Opt-in to live model provider evaluation (non-blocking, requires provider credentials).
+    #[arg(long)]
+    live: bool,
+    /// Provider name for live evaluation.
+    #[arg(long, default_value = "mock")]
+    provider: String,
+    /// Model ID for live evaluation.
+    #[arg(long, default_value = "mock/eval-agent")]
+    model: String,
+    /// Maximum budget cap in USD for live evaluation.
+    #[arg(long, default_value_t = 0.50)]
+    budget_cap: f64,
 }
 
 #[derive(Debug, Args)]
@@ -948,6 +975,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Spec(args) => spec(args).await,
         Commands::Attest(args) => attest(args).await,
         Commands::Marketplace(args) => marketplace_command(args).await,
+        Commands::Eval(args) => eval_fixtures(args).await,
     }
 }
 
@@ -1138,6 +1166,67 @@ async fn spec(args: SpecArgs) -> Result<(), Box<dyn Error>> {
         "{} specification(s) drifted; update the code or the spec, then re-record with `ryoko spec --record`",
         drift.len()
     )))
+}
+
+async fn eval_fixtures(args: EvalArgs) -> Result<(), Box<dyn Error>> {
+    let all_fixtures = ryoko_core::eval::builtin_evaluation_fixtures();
+    let fixtures_to_run = if let Some(id) = &args.fixture {
+        let matched: Vec<_> = all_fixtures.into_iter().filter(|f| &f.id == id).collect();
+        if matched.is_empty() {
+            return Err(cli_error(format!("unknown fixture ID: {id}")));
+        }
+        matched
+    } else {
+        all_fixtures
+    };
+
+    let config = if args.live {
+        eprintln!(
+            "Running evaluation in OPT-IN LIVE PROVIDER mode ({}/{}, budget cap: ${:.2})",
+            args.provider, args.model, args.budget_cap
+        );
+        ryoko_core::eval::EvaluationConfig {
+            mode: ryoko_core::eval::EvaluationMode::OptInLiveProvider {
+                provider_name: args.provider,
+                model_id: args.model,
+                max_budget_usd: args.budget_cap,
+            },
+            timeout: Duration::from_secs(60),
+        }
+    } else {
+        eprintln!(
+            "Running evaluation in OFFLINE DETERMINISTIC mode (default CI path, zero credentials)"
+        );
+        ryoko_core::eval::EvaluationConfig::default()
+    };
+
+    let report = ryoko_core::eval::run_evaluation_suite(&fixtures_to_run, &config).await;
+
+    let content = if args.json {
+        report.to_json()?
+    } else {
+        report.to_markdown()
+    };
+
+    if let Some(path) = &args.output {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, &content).await?;
+        eprintln!("Evaluation report saved to: {}", path.display());
+    } else {
+        println!("{content}");
+    }
+
+    if report.summary.failed_tasks > 0 {
+        eprintln!(
+            "Evaluation finished with {} failed task(s)",
+            report.summary.failed_tasks
+        );
+        std::process::exit(1);
+    }
+
+    Ok(())
 }
 
 async fn roles() -> Result<(), Box<dyn Error>> {
