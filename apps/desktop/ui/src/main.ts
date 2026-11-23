@@ -2034,12 +2034,57 @@ void listen<DapLog>('ryoko-dap-log', (event) => {
   }
 });
 
+async function pollTerminalStatus(): Promise<void> {
+  if (terminalSessionId === null || terminalStarting || terminalStatusPolling) return;
+  terminalStatusPolling = true;
+  const observedId = terminalSessionId;
+  try {
+    const status = await invoke<TerminalStatus>('terminal_status');
+    if (!status.running && terminalSessionId === observedId) {
+      terminalSessionId = null;
+      terminalStart.disabled = false;
+      terminalStop.disabled = true;
+      bottomStatus.textContent = 'Shell exited';
+      xterm?.write('\r\n[Shell exited]\r\n');
+    }
+  } catch (error) {
+    bottomStatus.textContent = 'Terminal status unavailable: ' + String(error);
+  } finally {
+    terminalStatusPolling = false;
+  }
+}
+
+async function pollDebugStatus(): Promise<void> {
+  if (dapSessionId === null || dapStatusPolling) return;
+  dapStatusPolling = true;
+  const observedId = dapSessionId;
+  try {
+    const status = await invoke<DapStatus>('dap_status');
+    if (!status.running && dapSessionId === observedId) {
+      dapSessionId = null;
+      updateDapButtons(false);
+      debugStatus.textContent = 'Debug adapter exited';
+    }
+  } catch (error) {
+    debugStatus.textContent = 'Debug status unavailable: ' + String(error);
+  } finally {
+    dapStatusPolling = false;
+  }
+}
+
 window.setInterval(() => {
   if (state.root && document.visibilityState === 'visible') {
     void refreshMissionLogs();
     void refreshRunStatus();
   }
 }, 1200);
+
+window.setInterval(() => {
+  if (document.visibilityState === 'visible') {
+    void pollTerminalStatus();
+    void pollDebugStatus();
+  }
+}, 2500);
 
 updateRunLabels();
 refreshRunStatus();
