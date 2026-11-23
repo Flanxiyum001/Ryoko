@@ -273,6 +273,7 @@ pub async fn create_github_proposal(
 ) -> Result<String, String> {
     checked_repo(installation_id, repo_id)?;
     if ![
+        "clone_repository",
         "create_branch",
         "commit_file",
         "open_pull_request",
