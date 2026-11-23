@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { GitHubBroker } from './github.mjs';
 import { issueAgentRequest, runIssuePipeline } from './pipeline.mjs';
+import { issueBotCommand, postBotComment, botStatus } from './bot.mjs';
 import { isAllowedOrigin, validateProposal, verifyWebhookSignature } from './security.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -63,7 +64,7 @@ function summarizeWebhook(type, payload) {
   };
 }
 
-export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = {}) {
+export function createRyokoServer({ broker, config, frontendPath, fetchImpl, runPipeline = runIssuePipeline } = {}) {
   const settings = {
     appSlug: config?.appSlug || '',
     origin: config?.origin || 'http://127.0.0.1:4173',
@@ -135,6 +136,16 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       if (client.installations.has(event.installationId)) {
         client.res.write('event: github\n' + 'data: ' + JSON.stringify(event) + '\n\n');
       }
+    }
+  }
+
+  // Bot notifications are best-effort. A GitHub API outage must never approve
+  // or repeat a write, and no backend exception details reach public comments.
+  async function notifyIssue(request, message) {
+    try {
+      await postBotComment(client, request, message);
+    } catch {
+      console.warn('Ryoko GitHub bot could not deliver an issue update');
     }
   }
 
@@ -218,37 +229,73 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       deliveries.set(delivery, Date.now());
       if (deliveries.size > 1000) deliveries.delete(deliveries.keys().next().value);
       if (allowed.includes(type) && payload.installation?.id) emit(summarizeWebhook(type, payload));
-      const pipelineRequest = issueAgentRequest(type, payload);
-      if (pipelineRequest) {
+      // Only allowlisted operators can request work through an issue comment.
+      // Label-based runs require GitHub's *newly applied* ryoko-fix label.
+      const command = issueBotCommand(type, payload, settings.allowedUsers);
+      const pipelineRequest = command?.command === 'status'
+        ? null : (command || issueAgentRequest(type, payload));
+      if (command?.command === 'status' && settings.agentRepoIds.includes(command.repoId)) {
+        const key = `${command.repoId}:${command.number}`;
+        void notifyIssue(command, botStatus(command, pipelineJobs.get(key)));
+      }
+      if (pipelineRequest && settings.agentRepoIds.includes(pipelineRequest.repoId)) {
         const key = `${pipelineRequest.repoId}:${pipelineRequest.number}`;
-        if (!pipelineJobs.has(key)) {
-          const started = {
-            id: randomUUID(), type: 'pipeline', action: 'started',
-            installationId: pipelineRequest.installationId,
-            repositoryId: pipelineRequest.repoId,
-            repository: pipelineRequest.fullName,
-            summary: `Issue #${pipelineRequest.number}: ${pipelineRequest.title}`.slice(0, 180),
-            timestamp: new Date().toISOString(),
-          };
-          pipelineJobs.set(key, { status: 'running', startedAt: Date.now() });
-          emit(started);
-          void runIssuePipeline({ broker: client, request: pipelineRequest, settings })
-            .then((result) => {
-              pipelineJobs.set(key, { status: 'completed', ...result, finishedAt: Date.now() });
-              emit({
-                ...started, id: randomUUID(), action: 'completed',
-                summary: `Draft PR #${result.number} opened`.slice(0, 180),
-                timestamp: new Date().toISOString(),
-              });
-            })
-            .catch((error) => {
-              const message = safeError(error).message;
-              pipelineJobs.set(key, { status: 'failed', error: message, finishedAt: Date.now() });
-              emit({
-                ...started, id: randomUUID(), action: 'failed', summary: message.slice(0, 180),
-                timestamp: new Date().toISOString(),
-              });
-            });
+        const previous = pipelineJobs.get(key);
+        const retry = command?.command === 'retry';
+        const canStart = (!previous && !retry) || (retry && previous?.status === 'failed');
+        if (!canStart) {
+          if (command) {
+            void notifyIssue(command, retry && !previous
+              ? 'Ryoko has no failed job to retry in this broker session. Use `/ryoko run` for a new request.'
+              : botStatus(command, previous));
+          }
+        } else {
+          // The in-memory queue is bounded. Never evict a running job.
+          if (pipelineJobs.size >= 300) {
+            for (const [oldKey, oldJob] of pipelineJobs) {
+              if (oldJob.status !== 'running' && Date.now() - oldJob.finishedAt > 86_400_000) {
+                pipelineJobs.delete(oldKey);
+              }
+            }
+          }
+          if (pipelineJobs.size >= 300 && !previous) {
+            if (command) void notifyIssue(command, 'Ryoko is at its job limit. Contact the operator.');
+          } else {
+            const started = {
+              id: randomUUID(), type: 'pipeline', action: 'started',
+              installationId: pipelineRequest.installationId,
+              repositoryId: pipelineRequest.repoId,
+              repository: pipelineRequest.fullName,
+              summary: `Issue #${pipelineRequest.number}: ${pipelineRequest.title}`.slice(0, 180),
+              timestamp: new Date().toISOString(),
+            };
+            pipelineJobs.set(key, { status: 'running', startedAt: Date.now() });
+            emit(started);
+            void (async () => {
+              await notifyIssue(pipelineRequest,
+                `Ryoko started work on issue #${pipelineRequest.number}. I'll report the result here. If successful, I'll open a **draft PR** for manual review—never merge automatically.`);
+              try {
+                const result = await runPipeline({ broker: client, request: pipelineRequest, settings });
+                const finished = { status: 'completed', ...result, finishedAt: Date.now() };
+                pipelineJobs.set(key, finished);
+                emit({
+                  ...started, id: randomUUID(), action: 'completed',
+                  summary: `Draft PR #${result.number} opened`.slice(0, 180),
+                  timestamp: new Date().toISOString(),
+                });
+                await notifyIssue(pipelineRequest, botStatus(pipelineRequest, finished));
+              } catch (error) {
+                const message = safeError(error).message;
+                const failed = { status: 'failed', error: message, finishedAt: Date.now() };
+                pipelineJobs.set(key, failed);
+                emit({
+                  ...started, id: randomUUID(), action: 'failed', summary: message.slice(0, 180),
+                  timestamp: new Date().toISOString(),
+                });
+                await notifyIssue(pipelineRequest, botStatus(pipelineRequest, failed));
+              }
+            })();
+          }
         }
       }
       return json(res, 202, { accepted: true });
