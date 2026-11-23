@@ -18,6 +18,7 @@ mod sessions;
 mod sessions_projection;
 mod settings;
 mod terminal;
+mod terminal_decode;
 mod workbench;
 mod workspace;
 
