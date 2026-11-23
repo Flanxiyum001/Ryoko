@@ -227,6 +227,13 @@ pub struct GitHubChecks {
 }
 
 #[derive(Deserialize)]
+struct VerifiedIssue {
+    repository: String,
+    number: u64,
+    title: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrustedProposalPreview {
     repository: String,
@@ -422,10 +429,44 @@ pub async fn start_github_job(
     repo_id: u64,
     number: u64,
     state: State<'_, GitHubQueueState>,
+    app: AppHandle,
 ) -> Result<GitHubJob, String> {
     checked_repo(installation_id, repo_id)?;
     if number == 0 {
         return Err("invalid issue number".into());
+    }
+    // A model or compromised renderer cannot initiate cost-incurring remote
+    // repository writes by invoking IPC: the OS owns the confirmation.
+    let issue_response = client()?
+        .get(format!(
+            "{BROKER}/api/desktop/issue?installationId={installation_id}&repoId={repo_id}&number={number}"
+        ))
+        .bearer_auth(token(&state)?)
+        .send()
+        .await
+        .map_err(|_| "cannot inspect the GitHub issue before approval".to_owned())?;
+    let issue: VerifiedIssue = bounded_json(issue_response).await?;
+    if issue.number != number {
+        return Err("broker returned an unexpected issue".into());
+    }
+    let description = format!(
+        "Run the Ryoko engineering agents for {} issue #{}: {}?\n\nThis may incur model costs and push an isolated branch plus a draft PR. It will NEVER merge.",
+        issue.repository, issue.number, issue.title
+    );
+    let confirmed = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(description)
+            .title("Ryoko — authorize agent run")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Run agents".to_owned(),
+                "Deny".to_owned(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "could not display OS agent-run approval".to_owned())?;
+    if !confirmed {
+        return Err("agent run denied in the OS approval dialog".into());
     }
     let response = client()?
         .post(format!("{BROKER}/api/desktop/jobs"))
