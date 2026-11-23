@@ -248,6 +248,44 @@ const searchReplace = element<HTMLInputElement>('searchReplace');
 const changesDetails = element<HTMLDetailsElement>('changesDetails');
 const changesRefresh = element<HTMLButtonElement>('changesRefresh');
 const openSettings = element<HTMLButtonElement>('openSettings');
+const workbenchLayout = document.querySelector<HTMLElement>('.layout')!;
+const inspectorPane = element('inspectorPane');
+const railButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.rail-button'));
+
+type WorkbenchView = 'explorer' | 'editor' | 'mission' | 'changes' | 'problems' | 'settings';
+
+function activateView(view: WorkbenchView): void {
+  if (view === 'settings') {
+    openSettings.click();
+    return;
+  }
+  workbenchLayout.dataset.activeView = view;
+  workbenchLayout.classList.toggle('hide-explorer', view !== 'explorer');
+  workbenchLayout.classList.toggle('hide-inspector', view === 'explorer' || view === 'editor');
+  for (const button of railButtons) {
+    const active = button.dataset.view === view;
+    button.classList.toggle('active', active);
+    if (button.dataset.view !== 'settings') button.setAttribute('aria-pressed', String(active));
+  }
+  if (view === 'changes') {
+    changesDetails.open = true;
+    changesDetails.scrollIntoView({ block: 'nearest' });
+  } else if (view === 'mission') {
+    inspectorPane.querySelector('.mission')?.scrollIntoView({ block: 'nearest' });
+  } else if (view === 'problems') {
+    problemList.scrollIntoView({ block: 'nearest' });
+  }
+  requestAnimationFrame(() => editor.layout());
+}
+
+railButtons.forEach((button) => button.addEventListener('click', () => {
+  const view = button.dataset.view;
+  if (view === 'explorer' || view === 'editor' || view === 'mission' ||
+      view === 'changes' || view === 'problems' || view === 'settings') {
+    activateView(view);
+  }
+}));
+element<HTMLButtonElement>('emptyOpenFolder').addEventListener('click', () => openFolderButton.click());
 
 const state: {
   root: string;
@@ -725,6 +763,7 @@ function renderFiles(): void {
       button.title = node.change ? `${node.path} (${node.change})` : node.path;
       button.addEventListener('click', () => {
         void openFile(node.path);
+        if (window.matchMedia('(max-width: 720px)').matches) activateView('editor');
       });
       fragment.append(button);
     }
@@ -1865,7 +1904,7 @@ function dispatchBinding(action: string): void {
       searchReplace.focus();
       break;
     case 'workbench.changes':
-      changesDetails.open = !changesDetails.open;
+      activateView('changes');
       break;
     case 'workbench.settings':
       openSettings.click();
