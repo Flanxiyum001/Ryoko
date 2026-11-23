@@ -18,6 +18,7 @@ export function startGithubWorker({
   let active = true;
   let current = null;
   let nextMaintenance = 0;
+  let nextWorkerHeartbeat = 0;
 
   async function notify(request, message) {
     if (request.kind === 'goal') return;
@@ -60,7 +61,11 @@ export function startGithubWorker({
   const stopped = (async () => {
     while (active) {
       try {
-        store.recoverStale();
+        if (Date.now() >= nextWorkerHeartbeat) {
+          store.touchWorker(workerId);
+          store.recoverStale();
+          nextWorkerHeartbeat = Date.now() + 10_000;
+        }
         if (Date.now() >= nextMaintenance) {
           store.prune();
           store.pruneJobs();
@@ -78,6 +83,8 @@ export function startGithubWorker({
       }
       if (active) await sleep(pollMs);
     }
+    try { store.releaseWorker(workerId); }
+    catch { logger.warn?.('could not release worker heartbeat row'); }
   })();
 
   return {
