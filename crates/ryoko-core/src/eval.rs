@@ -10,19 +10,17 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::agent::TaskContext;
+use crate::agent::{AgentRuntime, TaskContext};
 use crate::agents::{ModelAgent, StructuredProposal};
 use crate::error::CoreResult;
 use crate::event::EventSink;
 use crate::memory::SharedMemory;
-use crate::model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task, TaskResult};
+use crate::model::{AgentIdentity, AgentRole, ProjectContext, ProposedChange, Task};
 use crate::review::trusted_validation_evidence;
 use crate::validation::{ChangeValidator, StagedChanges, ValidationReport};
 use crate::workspace::{InMemoryWorkspaceProvider, WorkspaceProvider, validate_relative_path};
-use ryoko_models::mock::{MockProvider, ScriptedTurn};
-use ryoko_models::{ModelRouter, Usage};
+use ryoko_models::{MockProvider, ModelRouter, ScriptedTurn, Usage};
 
 /// Classification of evaluation task types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
