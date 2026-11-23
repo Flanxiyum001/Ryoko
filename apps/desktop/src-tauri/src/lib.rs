@@ -8,6 +8,7 @@ mod inline_edit;
 mod lsp;
 mod lsp_frame;
 mod marketplace;
+mod menu;
 mod mission;
 mod model_runtime;
 mod paths;
@@ -20,14 +21,23 @@ mod sessions_projection;
 mod settings;
 mod terminal;
 mod terminal_decode;
+mod updater;
 mod workbench;
 mod workspace;
 
 use tauri::Manager;
 
 pub fn run() {
-    let app = tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let updates_configured = updater::is_configured(&context.config().plugins.0);
+    let builder = updater::register(tauri::Builder::default(), updates_configured);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(|handle| menu::build(handle))
+        .on_menu_event(|handle, event| menu::forward(handle, event.id().as_ref()));
+    let app = builder
         .plugin(tauri_plugin_dialog::init())
+        .manage(updater::UpdaterState::new(updates_configured))
         .manage(workspace::WorkspaceState::default())
         .manage(github_queue::GitHubQueueState::default())
         .manage(lsp::LspState::default())
@@ -93,8 +103,11 @@ pub fn run() {
             debug_adapter::dap_status,
             debug_adapter::dap_stop,
             debug_adapter::dap_restart,
+            updater::update_status,
+            updater::update_check,
+            updater::update_install,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building the Ryoko desktop shell");
 
     app.run(|handle, event| {

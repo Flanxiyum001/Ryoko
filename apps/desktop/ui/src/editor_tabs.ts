@@ -1,3 +1,4 @@
+import { fileIconElement } from './file_icons';
 /** Tab ordering is independent of Monaco models and never discards buffers. */
 export function selectionAfterClose(
   paths: readonly string[], active: string | null, closing: string,
@@ -43,7 +44,10 @@ export function mountEditorTabs(
       // Full paths disambiguate files with the same basename.
       const name = file.path.split('/').pop() ?? file.path;
       const duplicate = tabs.some((other) => other.path !== file.path && other.path.split('/').pop() === name);
-      tab.textContent = duplicate ? file.path : name;
+      const title = document.createElement('span');
+      title.className = 'tab-title';
+      title.textContent = duplicate ? file.path : name;
+      tab.replaceChildren(fileIconElement(file.path), title);
       tab.addEventListener('click', () => select(file.path));
       tab.addEventListener('keydown', (event) => {
         let next: number;
