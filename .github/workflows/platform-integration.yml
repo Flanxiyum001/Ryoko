@@ -60,15 +60,6 @@ jobs:
           npm --version
           printf 'Runner: %s\nRef: %s\nCommit: %s\n' "$RUNNER_OS" "$GITHUB_REF" "$GITHUB_SHA"
 
-      # Temporary diagnostic: print Cargo's exact requested lockfile delta
-      # before the locked test suite, without pushing generated files.
-      - name: Diagnose Pulley lockfile resolution
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo metadata --format-version 1 > /dev/null
-          git diff -- Cargo.lock
-
       - name: Frontend unit tests and production build
         working-directory: apps/desktop
         run: |
