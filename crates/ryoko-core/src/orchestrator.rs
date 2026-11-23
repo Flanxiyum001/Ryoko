@@ -1430,12 +1430,9 @@ mod tests {
     #[test]
     fn independent_review_plan_rejects_forged_parent_links() {
         let producer = Task::new("implement", AgentRole::SeniorDeveloper);
-        let review = Task::new(
-            "review",
-            AgentRole::Custom(CODE_REVIEW_ROLE.to_owned()),
-        )
-        .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
-        .with_metadata(REVIEW_TARGET_METADATA, producer.id.to_string());
+        let review = Task::new("review", AgentRole::Custom(CODE_REVIEW_ROLE.to_owned()))
+            .with_metadata(INDEPENDENT_REVIEW_METADATA, "true")
+            .with_metadata(REVIEW_TARGET_METADATA, producer.id.to_string());
         assert!(Orchestrator::validate_plan(&[producer.clone(), review.clone()]).is_err());
         let valid = review.depends_on(&producer);
         assert!(Orchestrator::validate_plan(&[producer, valid]).is_ok());
@@ -1666,13 +1663,12 @@ mod tests {
         validator: Arc<dyn ChangeValidator>,
         propose_files: bool,
     ) -> OrchestrationReport {
-        let orchestrator = Orchestrator::new(workspace(), validator, router()).with_config(
-            OrchestratorConfig {
+        let orchestrator =
+            Orchestrator::new(workspace(), validator, router()).with_config(OrchestratorConfig {
                 max_concurrency: 2,
                 max_attempts: 1,
                 max_repair_cycles: 0,
-            },
-        );
+            });
         let producer = Task::new("producer", AgentRole::SeniorDeveloper);
         let reviewer_role = AgentRole::Custom(CODE_REVIEW_ROLE.to_owned());
         let reviewer = Task::new("review", reviewer_role.clone())
@@ -1702,20 +1698,31 @@ mod tests {
     async fn independent_review_requires_executed_validation_evidence() {
         let no_proof = independent_review_run(Arc::new(AllowAllValidator), false).await;
         assert_eq!(no_proof.failed.len(), 1);
-        assert!(no_proof.failed[0].error.contains("no executed test evidence"));
+        assert!(
+            no_proof.failed[0]
+                .error
+                .contains("no executed test evidence")
+        );
         assert!(no_proof.successful_reviews().is_empty());
 
         let proved = independent_review_run(Arc::new(ExecutedValidator), false).await;
         assert!(proved.all_succeeded(), "{:?}", proved.failed);
         assert_eq!(proved.successful_reviews().len(), 1);
-        assert_eq!(proved.successful_reviews()[0].1.verdict, ReviewVerdict::Pass);
+        assert_eq!(
+            proved.successful_reviews()[0].1.verdict,
+            ReviewVerdict::Pass
+        );
     }
 
     #[tokio::test]
     async fn independent_review_cannot_publish_file_changes() {
         let report = independent_review_run(Arc::new(ExecutedValidator), true).await;
         assert_eq!(report.failed.len(), 1);
-        assert!(report.failed[0].error.contains("must not propose file changes"));
+        assert!(
+            report.failed[0]
+                .error
+                .contains("must not propose file changes")
+        );
         assert!(report.successful_reviews().is_empty());
     }
 
