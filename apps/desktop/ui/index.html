@@ -176,12 +176,12 @@
           <pre id="connectorInspect" class="connector-inspect hidden" aria-live="polite"></pre>
         </details>
         <details class="github-queue">
-          <summary>GITHUB PR / ISSUE QUEUE <span id="githubQueueCount" class="counter">not connected</span></summary>
+          <summary>GITHUB MISSION CONTROL <span id="githubQueueCount" class="counter">not connected</span></summary>
           <div class="github-pair">
             <p class="hint">Sign in to the local GitHub App workbench, select “Pair native desktop”, then paste its single-use code here. OAuth secrets stay server-side.</p>
             <label class="sr-only" for="githubPairCode">Single-use GitHub desktop code</label>
             <input id="githubPairCode" type="password" autocomplete="off" spellcheck="false" placeholder="Single-use pairing code">
-            <button id="githubPair" class="button ghost compact" type="button">Pair read-only</button>
+            <button id="githubPair" class="button ghost compact" type="button">Pair desktop</button>
           </div>
           <div class="github-queue-toolbar">
             <label class="sr-only" for="githubRepo">Authorized GitHub repository</label>
@@ -192,6 +192,37 @@
           <div id="githubQueueList" class="github-queue-list">
             <p class="hint">No repository queue loaded.</p>
           </div>
+          <section class="github-action-panel" aria-label="Propose a GitHub action">
+            <h4>Propose a repository action</h4>
+            <p class="hint">Ryoko never pushes a proposal automatically. Review its exact parameters below, then approve or reject.</p>
+            <label for="githubOperation">Operation</label>
+            <select id="githubOperation">
+              <option value="create_branch">Create ryoko/ branch</option>
+              <option value="commit_file">Commit a text file on ryoko/ branch</option>
+              <option value="open_pull_request">Open pull request</option>
+              <option value="review_comment">Comment on pull request</option>
+              <option value="mark_ready_for_review">Mark draft ready (requires green CI)</option>
+            </select>
+            <label id="githubBranchLabel" for="githubBranch">Branch name (ryoko/…)</label>
+            <input id="githubBranch" type="text" autocomplete="off" spellcheck="false" placeholder="ryoko/feature-name">
+            <label id="githubPathLabel" for="githubPath" class="hidden">Repository file path</label>
+            <input id="githubPath" class="hidden" type="text" autocomplete="off" spellcheck="false" placeholder="src/example.ts">
+            <label id="githubMessageLabel" for="githubMessage" class="hidden">Commit message</label>
+            <input id="githubMessage" class="hidden" type="text" autocomplete="off" placeholder="feat: implement change">
+            <label id="githubNumberLabel" for="githubNumber" class="hidden">PR number</label>
+            <input id="githubNumber" class="hidden" type="number" min="1" step="1">
+            <label id="githubTitleLabel" for="githubTitle" class="hidden">PR title</label>
+            <input id="githubTitle" class="hidden" type="text" autocomplete="off" maxlength="140">
+            <label id="githubContentLabel" for="githubContent" class="hidden">Complete text content / PR description / review comment</label>
+            <textarea id="githubContent" class="hidden" spellcheck="false" rows="5"></textarea>
+            <button id="githubQueueProposal" class="button ghost compact" type="button">Queue for explicit approval</button>
+          </section>
+          <section class="github-action-panel" aria-label="GitHub approval inbox">
+            <h4>Approval inbox <span id="githubProposalCount" class="counter">0</span></h4>
+            <div id="githubProposalList" class="github-proposal-list" aria-live="polite">
+              <p class="hint">Pair GitHub to review pending writes.</p>
+            </div>
+          </section>
         </details>
         <details class="hunk-review">
           <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>
