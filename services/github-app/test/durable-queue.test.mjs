@@ -33,6 +33,7 @@ test('bot ledger fails closed on unsafe paths and malformed state', () => {
     const state = new BotJobStore(file);
     assert.throws(() => state.setJob('wrong', { status: 'running' }), /invalid job/);
     assert.throws(() => state.setJob('1:2', { status: 'unknown' }), /invalid job/);
+    state.recordDelivery('deadbeef-1234-1234-1234-123456789abc');
     const persisted = new BotJobStore(file);
     assert.deepEqual([...persisted.jobs.keys()], []);
     chmodSync(file, 0o644);
