@@ -21,7 +21,7 @@ use ryoko_core::{
     CodeReviewSummary, EventSink, FileSummary, Language, ModelAgent, Orchestrator,
     OrchestratorConfig, OrchestratorEvent, ProjectContext, ProjectMemory, ProposedChange,
     RETRY_FEEDBACK_METADATA, ReviewConfig, SharedMemory, SourceFile, StagedChanges, Task,
-    TaskContext, WorkspaceIndex, extract_files, render_markdown_summary,
+    TaskComplexity, TaskContext, WorkspaceIndex, extract_files, render_markdown_summary,
     spec_link::SpecIndex,
     team::{application_plan, dynamic_plan_with_reviews, standard_team},
     validation::ValidationReport,
@@ -108,6 +108,8 @@ enum Commands {
     Sessions(SessionsArgs),
     /// Compare markdown specifications with the code they govern.
     Spec(SpecArgs),
+    /// Record architectural decisions, conventions, or review rejections in project memory.
+    Memory(MemoryArgs),
     /// Sign and verify merge provenance attestations stored in Git notes.
     Attest(AttestArgs),
     /// Run repeatable coding-task evaluation fixtures and emit evidence-backed report.
@@ -496,6 +498,52 @@ struct PlanArgs {
 }
 
 #[derive(Debug, Args)]
+struct MemoryArgs {
+    /// Project checkout that owns the memory files.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[command(subcommand)]
+    command: MemoryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// Record an architectural decision.
+    Decision {
+        /// Title of the decision.
+        title: String,
+        /// Body of the decision (rationale, context, alternatives considered).
+        body: String,
+    },
+    /// Record a codebase convention.
+    Convention {
+        /// Title of the convention.
+        title: String,
+        /// Body of the convention (rules, examples, exceptions).
+        body: String,
+    },
+    /// Record a review rejection (typically used by CI/human reviewers).
+    Rejection {
+        /// Title of the rejected proposal.
+        title: String,
+        /// Reason for rejection.
+        body: String,
+    },
+    /// Show current project memory.
+    Show {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: MemoryFormat,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum MemoryFormat {
+    Markdown,
+    Json,
+}
+
+#[derive(Debug, Args)]
 struct ProvidersArgs {
     #[arg(long)]
     config: PathBuf,
@@ -579,8 +627,12 @@ struct RunArgs {
     #[arg(long, value_name = "PATH")]
     report: Option<PathBuf>,
     /// Execute a four-role code/test DAG instead of a single developer.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "auto_team")]
     team: bool,
+    /// Automatically choose between single-agent and multi-agent DAG based on
+    /// task complexity. Mutually exclusive with --team.
+    #[arg(long, conflicts_with = "team")]
+    auto_team: bool,
     /// Number of concurrent agents in team mode, between 1 and 4.
     #[arg(long, default_value_t = 2)]
     max_concurrency: usize,
@@ -973,6 +1025,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Doctor(args) => doctor(args).await,
         Commands::Sessions(args) => sessions(args).await,
         Commands::Spec(args) => spec(args).await,
+        Commands::Memory(args) => memory(args).await,
         Commands::Attest(args) => attest(args).await,
         Commands::Marketplace(args) => marketplace_command(args).await,
         Commands::Eval(args) => eval_fixtures(args).await,
@@ -1243,6 +1296,42 @@ async fn plan(args: PlanArgs) -> Result<(), Box<dyn Error>> {
     let tasks = application_plan(&args.goal);
     Orchestrator::validate_plan(&tasks)?;
     println!("{}", serde_json::to_string_pretty(&tasks)?);
+    Ok(())
+}
+
+async fn memory(args: MemoryArgs) -> Result<(), Box<dyn Error>> {
+    let root = canonical_root(&args.repo)?;
+    match args.command {
+        MemoryCommand::Decision { title, body } => {
+            ProjectMemory::append_decision(&root, &title, &body)?;
+            println!("Recorded decision: {title}");
+        }
+        MemoryCommand::Convention { title, body } => {
+            ProjectMemory::append_convention(&root, &title, &body)?;
+            println!("Recorded convention: {title}");
+        }
+        MemoryCommand::Rejection { title, body } => {
+            ProjectMemory::append_rejection(&root, &title, &body)?;
+            println!("Recorded rejection: {title}");
+        }
+        MemoryCommand::Show { format } => {
+            let memory = ProjectMemory::load(&root)?;
+            match format {
+                MemoryFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&memory)?);
+                }
+                MemoryFormat::Markdown => {
+                    const MAX_MEMORY_BYTES: usize = 256 * 1024;
+                    let rendered = memory.render_for_context(MAX_MEMORY_BYTES);
+                    if rendered.is_empty() {
+                        println!("No project memory recorded yet.");
+                    } else {
+                        println!("{rendered}");
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2373,14 +2462,23 @@ async fn run_goal(args: RunArgs) -> Result<(), Box<dyn Error>> {
         .with_ui_capture(ui)
         .with_artifacts_root(root.join(".ryoko/artifacts")),
     );
-    if args.team && !(1..=4).contains(&args.max_concurrency) {
+    if (args.team || args.auto_team) && !(1..=4).contains(&args.max_concurrency) {
         return Err(cli_error("--max-concurrency must be between 1 and 4"));
     }
     let goal = args.goal.clone();
+    // Determine whether to use team mode: explicit --team, or --auto-team with
+    // complexity classification.
+    let use_team = if args.team {
+        true
+    } else if args.auto_team {
+        matches!(TaskComplexity::from_goal(&goal), TaskComplexity::Complex)
+    } else {
+        false
+    };
     // Dynamic routing: the project-manager decomposition decides which
     // specialists this goal actually needs, so a UI/UX or DevOps agent is only
     // registered (and only allocated a worktree) when the plan activates it.
-    let dynamic = args.team.then(|| {
+    let dynamic = use_team.then(|| {
         dynamic_plan_with_reviews(
             &goal,
             ReviewConfig {
