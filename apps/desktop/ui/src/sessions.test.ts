@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  changeCounts,
+  changeStatusLabel,
   sessionAge,
   sessionMeta,
   sessionTitle,
@@ -35,5 +37,16 @@ describe('agent session formatting', () => {
     expect(sessionTitle(session)).toBe('Add a bounded parser');
     expect(sessionTitle({ ...session, summary: null })).toBe('task-1');
     expect(sessionTitle({ ...session, summary: '   ' })).toBe('task-1');
+  });
+});
+
+describe('session change formatting', () => {
+  it('labels statuses and counts', () => {
+    expect(changeStatusLabel('added')).toBe('added');
+    expect(changeStatusLabel('binary')).toBe('binary');
+    expect(changeCounts({ path: 'a.rs', status: 'modified', additions: 3, deletions: 2 }))
+      .toBe('+3 −2');
+    expect(changeCounts({ path: 'a.png', status: 'binary', additions: 0, deletions: 0 }))
+      .toBe('binary');
   });
 });

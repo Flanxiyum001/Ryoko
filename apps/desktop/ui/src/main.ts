@@ -30,10 +30,35 @@ import {
   type ChangesSnapshot,
 } from './changes_view';
 import { mountSettingsDialog } from './settings_view';
+import {
+  KEYMAP_OPTIONS,
+  keymapById,
+  loadKeymap,
+  saveKeymap,
+  shouldDeferToEditor,
+  type KeymapPreset,
+} from './keymap_preset';
+import {
+  IMPORTED_THEME_STORAGE,
+  loadImportedSettings,
+  loadImportedTheme,
+  monacoOptionsFor,
+  parseVscodeSettings,
+  parseVscodeTheme,
+  saveImportedSettings,
+  saveImportedTheme,
+  type ImportedTheme,
+} from './vscode_import';
 import { mountOnboarding } from './onboarding';
 import { createNotifier } from './toasts';
 import { InlineEditController } from './inline_edit_view';
-import { mountAgentChat, type CodeSuggestion, type EditorSelectionContext } from './agent_chat';
+import {
+  mountAgentChat,
+  type CodeSuggestion,
+  type EditorSelectionContext,
+  type MentionPreview,
+  type SymbolSuggestion,
+} from './agent_chat';
 import { previewAccepted, proposalHunks, type ProposalHunk } from './proposal_review';
 import { DebugViewController } from './debug_view';
 import {
@@ -66,9 +91,14 @@ import {
   type PublishDiagnosticsParams,
 } from './protocol';
 import {
+  changeCounts,
+  changeStatusLabel,
   sessionMeta,
   sessionTitle,
   type AgentSession,
+  type SessionActionResult,
+  type SessionChange,
+  type SessionFileDiff,
 } from './sessions';
 
 interface WorkspaceInfo {
@@ -208,6 +238,7 @@ const fileCount = element('fileCount');
 const activePath = element('activePath');
 const dirtyFlag = element('dirtyFlag');
 const editorHost = element('editor');
+const vimStatus = element('vimStatus');
 const emptyEditor = element('emptyEditor');
 const problemList = element('problemList');
 const problemCount = element('problemCount');
@@ -228,6 +259,8 @@ const hunkValidation = element('hunkValidation');
 const diffReview = element('diffReview');
 const diffReviewPath = element('diffReviewPath');
 const diffReviewClose = element<HTMLButtonElement>('diffReviewClose');
+const diffPrevFile = element<HTMLButtonElement>('diffPrevFile');
+const diffNextFile = element<HTMLButtonElement>('diffNextFile');
 const diffEditorHost = element('diffEditor');
 const runForm = element<HTMLFormElement>('runForm');
 const runGoal = element<HTMLTextAreaElement>('runGoal');
@@ -349,6 +382,16 @@ let chatOutputTokens = 0;
 let chatEstimatedCostUsd = 0;
 let agentSessions: AgentSession[] = [];
 let agentSessionPolling = false;
+const sessionChanges = new Map<string, SessionChange[]>();
+const sessionExpanded = new Set<string>();
+interface SessionDiffContext {
+  taskId: string;
+  branch: string;
+  changes: SessionChange[];
+  index: number;
+}
+let sessionDiffContext: SessionDiffContext | null = null;
+let sessionDiffTicket = 0;
 let gitHunks: GitHunkSnapshot | null = null;
 let hunkPolling = false;
 let missionPreferredLog: string | null = null;
@@ -409,6 +452,67 @@ const editor = monaco.editor.create(editorHost, {
   padding: { top: 10 },
   smoothScrolling: true,
 });
+
+let keymapPreset: KeymapPreset = loadKeymap(localStorage);
+let keymapHandle: { dispose(): void } | null = null;
+let keymapTicket = 0;
+async function applyKeymap(preset: KeymapPreset): Promise<void> {
+  const ticket = ++keymapTicket;
+  keymapHandle?.dispose();
+  keymapHandle = null;
+  vimStatus.hidden = true;
+  vimStatus.classList.add('hidden');
+  keymapPreset = preset;
+  saveKeymap(localStorage, preset);
+  const picker = document.getElementById('settingsKeymap') as HTMLSelectElement | null;
+  if (picker) picker.value = preset;
+  if (preset === 'vim') {
+    try {
+      type VimInit = (
+        target: monaco.editor.IStandaloneCodeEditor,
+        status: HTMLElement,
+      ) => { dispose(): void };
+      const module = await import('monaco-vim') as unknown as {
+        initVimMode?: VimInit;
+        default?: { initVimMode?: VimInit };
+      };
+      if (ticket !== keymapTicket) return;
+      const initVimMode = module.initVimMode ?? module.default?.initVimMode;
+      if (!initVimMode) throw new Error('monaco-vim did not expose initVimMode');
+      keymapHandle = initVimMode(editor, vimStatus);
+      vimStatus.hidden = false;
+      vimStatus.classList.remove('hidden');
+    } catch (error) {
+      if (ticket !== keymapTicket) return;
+      keymapPreset = 'default';
+      setStatus('Vim keymap unavailable: ' + (error instanceof Error ? error.message : String(error)));
+      return;
+    }
+  } else if (preset === 'emacs') {
+    try {
+      type EmacsConstructor = new (
+        target: monaco.editor.IStandaloneCodeEditor,
+      ) => { start(): void; dispose(): void };
+      const module = await import('monaco-emacs') as unknown as {
+        EmacsExtension?: EmacsConstructor;
+        default?: EmacsConstructor;
+      };
+      if (ticket !== keymapTicket) return;
+      const EmacsExtension = module.EmacsExtension ?? module.default;
+      if (!EmacsExtension) throw new Error('monaco-emacs did not expose EmacsExtension');
+      const extension = new EmacsExtension(editor);
+      extension.start();
+      keymapHandle = extension;
+    } catch (error) {
+      if (ticket !== keymapTicket) return;
+      keymapPreset = 'default';
+      setStatus('Emacs keymap unavailable: ' + (error instanceof Error ? error.message : String(error)));
+      return;
+    }
+  }
+  setStatus('Editor keymap: ' + keymapById(preset).label);
+}
+void applyKeymap(keymapPreset);
 
 // Ghost text is a content widget rather than Monaco's inline-completions API:
 // the provider API resolves once, while local FIM tokens arrive incrementally.
@@ -518,6 +622,10 @@ function acceptFim(): void {
   hideFim();
 }
 
+const importedSettings = loadImportedSettings(localStorage);
+if (importedSettings) {
+  editor.updateOptions(monacoOptionsFor(importedSettings));
+}
 const diffEditor = monaco.editor.createDiffEditor(diffEditorHost, {
   theme: initialTheme.monaco,
   automaticLayout: true,
@@ -530,6 +638,9 @@ const diffEditor = monaco.editor.createDiffEditor(diffEditorHost, {
   scrollBeyondLastLine: false,
   padding: { top: 10 },
 });
+if (importedSettings) {
+  diffEditor.updateOptions(monacoOptionsFor(importedSettings));
+}
 
 const lsp = new LspClient({
   onDiagnostics: (params, server) => applyDiagnostics(params, server),
@@ -572,6 +683,11 @@ const agentChat = mountAgentChat({
   files: () => state.files,
   selection: currentSelectionContext,
   review: openSuggestedReview,
+  searchSymbols: (query) => invoke<SymbolSuggestion[]>('search_context_symbols', { query }),
+  resolveMention: (mention) => invoke<MentionPreview>('resolve_context_mention', {
+    kind: mention.kind,
+    value: mention.value,
+  }),
   onTokens: (input, output, estimatedCostUsd) => {
     chatInputTokens += input;
     chatOutputTokens += output;
@@ -1035,6 +1151,10 @@ async function openFolder(selectedPath?: string): Promise<void> {
     missionGraph.replaceChildren();
     missionDetail.replaceChildren();
     agentSessions = [];
+    sessionChanges.clear();
+    sessionExpanded.clear();
+    sessionDiffTicket += 1;
+    sessionDiffContext = null;
     agentSessionList.replaceChildren();
     reviewInboxList.replaceChildren();
     reviewInboxCount.textContent = '0';
@@ -1078,6 +1198,237 @@ function sessionStateLabel(session: AgentSession): string {
   return session.state === 'active' ? 'working' : session.state;
 }
 
+function sessionActionButton(
+  label: string,
+  title: string,
+  className: string,
+  run: () => void,
+): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = className;
+  button.textContent = label;
+  button.title = title;
+  button.addEventListener('click', () => {
+    button.disabled = true;
+    run();
+  });
+  return button;
+}
+
+function renderSessionChanges(
+  container: HTMLElement,
+  session: AgentSession,
+  changes: SessionChange[],
+): void {
+  container.replaceChildren();
+  if (changes.length === 0) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'This published branch has no text changes against its base.';
+    container.append(hint);
+    return;
+  }
+  changes.forEach((change, index) => {
+    const row = document.createElement('div');
+    row.className = 'agent-session-change';
+    const status = document.createElement('span');
+    status.className = `agent-session-change-status status-${change.status}`;
+    status.textContent = changeStatusLabel(change.status);
+    const path = document.createElement('code');
+    path.className = 'agent-session-change-path';
+    path.textContent = change.path;
+    path.title = change.path;
+    const counts = document.createElement('span');
+    counts.className = 'agent-session-change-counts';
+    counts.textContent = changeCounts(change);
+    const diff = sessionActionButton(
+      'Diff',
+      'Open a read-only diff of this file on the published branch',
+      'button ghost compact',
+      () => void openSessionDiff(session, changes, index),
+    );
+    diff.disabled = change.status === 'binary';
+    row.append(status, path, counts, diff);
+    container.append(row);
+  });
+}
+
+async function loadSessionChanges(session: AgentSession, container: HTMLElement): Promise<void> {
+  const cached = sessionChanges.get(session.id);
+  if (cached) {
+    renderSessionChanges(container, session, cached);
+    return;
+  }
+  container.replaceChildren();
+  const loading = document.createElement('p');
+  loading.className = 'hint';
+  loading.textContent = 'Reading the published branch diff…';
+  container.append(loading);
+  const openedRoot = state.root;
+  try {
+    const changes = await invoke<SessionChange[]>('list_agent_session_changes', {
+      taskId: session.id,
+    });
+    if (openedRoot !== state.root) return;
+    sessionChanges.set(session.id, changes);
+    renderSessionChanges(container, session, changes);
+  } catch (error) {
+    if (openedRoot !== state.root) return;
+    const message = error instanceof Error ? error.message : String(error);
+    container.replaceChildren();
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'Could not read the session diff: ' + message;
+    container.append(hint);
+  }
+}
+
+interface MergeOptions {
+  target: string;
+  checkCommand: string;
+}
+
+function promptMergeOptions(session: AgentSession): Promise<MergeOptions | null> {
+  return new Promise((resolve) => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'merge-dialog';
+    dialog.setAttribute('aria-label', 'Merge published agent branch');
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    form.className = 'merge-form';
+    const heading = document.createElement('h2');
+    heading.textContent = `Merge ${session.branch}`;
+    const explanation = document.createElement('p');
+    explanation.className = 'marketplace-description';
+    explanation.textContent =
+      `A passing sandboxed check is required. Ryoko merges only if the check passes, then removes the isolated worktree. Sandbox image: ${runSandbox.value.trim()}.`;
+    const targetLabel = document.createElement('label');
+    targetLabel.textContent = 'Target branch';
+    const target = document.createElement('input');
+    target.type = 'text';
+    target.required = true;
+    target.maxLength = 200;
+    target.value = !session.baseBranch || session.baseBranch === 'HEAD' ? 'main' : session.baseBranch;
+    targetLabel.append(target);
+    const checkLabel = document.createElement('label');
+    checkLabel.textContent = 'Optional check command';
+    const check = document.createElement('input');
+    check.type = 'text';
+    check.maxLength = 2000;
+    check.placeholder = 'Leave empty to auto-detect';
+    checkLabel.append(check);
+    const note = document.createElement('p');
+    note.className = 'marketplace-browser-message';
+    const actions = document.createElement('div');
+    actions.className = 'merge-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button ghost';
+    cancel.textContent = 'Cancel';
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.className = 'button primary';
+    submit.textContent = 'Validate and merge';
+    actions.append(cancel, submit);
+    form.append(heading, explanation, targetLabel, checkLabel, note, actions);
+    dialog.append(form);
+    let settled = false;
+    const finish = (value: MergeOptions | null): void => {
+      if (settled) return;
+      settled = true;
+      dialog.remove();
+      resolve(value);
+    };
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const targetValue = target.value.trim();
+      if (!targetValue) {
+        note.textContent = 'Enter a target branch.';
+        target.focus();
+        return;
+      }
+      dialog.close();
+      finish({ target: targetValue, checkCommand: check.value.trim() });
+    });
+    cancel.addEventListener('click', () => {
+      dialog.close();
+      finish(null);
+    });
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      dialog.close();
+      finish(null);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    target.focus();
+  });
+}
+
+async function runSessionAction(
+  session: AgentSession,
+  action: 'release' | 'discard' | 'merge',
+): Promise<void> {
+  if (action === 'merge') {
+    const sandboxImage = runSandbox.value.trim();
+    if (!sandboxImage) {
+      setStatus('Set a reviewed OCI sandbox image before merging; validation cannot be skipped.');
+      renderAgentSessions();
+      return;
+    }
+    const options = await promptMergeOptions(session);
+    if (!options) {
+      setStatus('Merge cancelled; nothing changed.');
+      renderAgentSessions();
+      return;
+    }
+    try {
+      const result = await invoke<SessionActionResult>('merge_agent_session', {
+        taskId: session.id,
+        targetBranch: options.target,
+        sandboxImage,
+        checkCommand: options.checkCommand || null,
+        timeoutSecs: 300,
+      });
+      if (result.passed === false) {
+        setStatus('Merge blocked by validation: ' + (result.summary ?? result.message));
+      } else if (result.merge_commit) {
+        setStatus(`Merged ${session.branch} at ${result.merge_commit}. ${result.message}`);
+      } else {
+        setStatus(result.message);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('cancelled')) {
+        setStatus('Merge cancelled; nothing changed.');
+        await refreshAgentSessions();
+        return;
+      }
+      setStatus('Merge failed: ' + message);
+    }
+  } else {
+    try {
+      const result = await invoke<SessionActionResult>(
+        action === 'release' ? 'release_agent_session' : 'discard_agent_session',
+        { taskId: session.id },
+      );
+      setStatus(result.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('cancelled')) {
+        setStatus(`Session ${action} cancelled; nothing changed.`);
+        await refreshAgentSessions();
+        return;
+      }
+      setStatus(`Session ${action} failed: ` + message);
+    }
+  }
+  sessionChanges.delete(session.id);
+  sessionExpanded.delete(session.id);
+  await refreshAgentSessions();
+}
+
 function renderAgentSessions(): void {
   agentSessionList.replaceChildren();
   agentSessionSummary.textContent = agentSessions.length === 1
@@ -1117,6 +1468,48 @@ function renderAgentSessions(): void {
       files.textContent = session.files.slice(0, 4).join(' · ')
         + (session.files.length > 4 ? ` · +${session.files.length - 4}` : '');
       item.append(files);
+    }
+    if (session.state === 'published') {
+      const actions = document.createElement('div');
+      actions.className = 'agent-session-actions';
+      const expanded = sessionExpanded.has(session.id);
+      actions.append(
+        sessionActionButton(
+          expanded ? 'Hide files' : 'Files & diffs',
+          'List changed files and open read-only diffs',
+          'button ghost compact',
+          () => {
+            if (sessionExpanded.has(session.id)) sessionExpanded.delete(session.id);
+            else sessionExpanded.add(session.id);
+            renderAgentSessions();
+          },
+        ),
+        sessionActionButton(
+          'Detach',
+          'Remove the isolated worktree from disk but keep its branch',
+          'button ghost compact',
+          () => void runSessionAction(session, 'release'),
+        ),
+        sessionActionButton(
+          'Discard',
+          'Delete the isolated worktree and its branch. Irreversible.',
+          'button ghost compact danger',
+          () => void runSessionAction(session, 'discard'),
+        ),
+        sessionActionButton(
+          'Merge…',
+          'Run the sandboxed check and merge only if it passes',
+          'button primary compact',
+          () => void runSessionAction(session, 'merge'),
+        ),
+      );
+      item.append(actions);
+      if (expanded) {
+        const changes = document.createElement('div');
+        changes.className = 'agent-session-changes';
+        item.append(changes);
+        void loadSessionChanges(session, changes);
+      }
     }
     agentSessionList.append(item);
   }
@@ -1204,6 +1597,13 @@ async function refreshAgentSessions(): Promise<void> {
     const sessions = await invoke<AgentSession[]>('list_agent_sessions');
     if (openedRoot !== state.root) return;
     agentSessions = sessions;
+    const live = new Set(sessions.map((session) => session.id));
+    for (const key of sessionChanges.keys()) {
+      if (!live.has(key)) sessionChanges.delete(key);
+    }
+    for (const key of sessionExpanded) {
+      if (!live.has(key)) sessionExpanded.delete(key);
+    }
     renderAgentSessions();
     renderReviewInbox();
   } catch (error) {
@@ -1419,6 +1819,10 @@ function applyApprovedProposal(): void {
 }
 
 function clearDiffEditor(): void {
+  sessionDiffTicket += 1;
+  sessionDiffContext = null;
+  diffPrevFile.hidden = true;
+  diffNextFile.hidden = true;
   pendingProposal = null;
   proposalToolbar.classList.add('hidden');
   proposalHunksNode.replaceChildren();
@@ -1463,6 +1867,68 @@ async function openPathDiff(path: string): Promise<void> {
     setStatus(`Reviewing ${path} against HEAD`);
   } catch (error) {
     setStatus('Diff review failed: ' + (error instanceof Error ? error.message : String(error)));
+  }
+}
+
+async function openSessionDiffAt(index: number): Promise<void> {
+  const context = sessionDiffContext;
+  if (!context || context.changes.length === 0) return;
+  const next = Math.max(0, Math.min(index, context.changes.length - 1));
+  const session = agentSessions.find((entry) => entry.id === context.taskId);
+  if (!session) {
+    setStatus('The agent session disappeared while reviewing its diff.');
+    return;
+  }
+  await openSessionDiff(session, context.changes, next);
+}
+
+async function openSessionDiff(
+  session: AgentSession,
+  changes: SessionChange[],
+  index: number,
+): Promise<void> {
+  if (!state.root) return;
+  if ([...openFiles.values()].some((file) => file.dirty)) {
+    setStatus('Save or discard unsaved Monaco edits before reviewing an agent branch.');
+    return;
+  }
+  const change = changes[index];
+  if (!change) return;
+  const openedRoot = state.root;
+  const ticket = ++sessionDiffTicket;
+  try {
+    const review = await invoke<SessionFileDiff>('read_agent_session_file', {
+      taskId: session.id,
+      path: change.path,
+    });
+    if (openedRoot !== state.root || ticket !== sessionDiffTicket) return;
+    clearDiffEditor();
+    sessionDiffContext = { taskId: session.id, branch: session.branch, changes, index };
+    const languageId = languageForPath(change.path);
+    const suffix = encodeURIComponent(`${session.id}/${change.path}`).replaceAll('%', '_');
+    diffOriginalModel = monaco.editor.createModel(
+      review.original,
+      languageId,
+      monaco.Uri.parse(`ryoko-session://original/${suffix}`),
+    );
+    diffModifiedModel = monaco.editor.createModel(
+      review.modified,
+      languageId,
+      monaco.Uri.parse(`ryoko-session://modified/${suffix}`),
+    );
+    diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
+    diffReviewPath.textContent = `${session.branch} · ${change.path} (${index + 1}/${changes.length})`;
+    diffReview.classList.remove('hidden');
+    editorHost.classList.add('hidden');
+    emptyEditor.classList.add('hidden');
+    diffEditor.layout();
+    diffPrevFile.hidden = false;
+    diffNextFile.hidden = false;
+    diffPrevFile.disabled = index <= 0;
+    diffNextFile.disabled = index >= changes.length - 1;
+    setStatus(`Reviewing ${change.path} on ${session.branch} (read-only)`);
+  } catch (error) {
+    setStatus('Session diff failed: ' + (error instanceof Error ? error.message : String(error)));
   }
 }
 
@@ -2319,6 +2785,12 @@ hunkStage.addEventListener('click', () => {
   void stageSelectedHunks();
 });
 diffReviewClose.addEventListener('click', closeDiffReview);
+diffPrevFile.addEventListener('click', () => {
+  if (sessionDiffContext) void openSessionDiffAt(sessionDiffContext.index - 1);
+});
+diffNextFile.addEventListener('click', () => {
+  if (sessionDiffContext) void openSessionDiffAt(sessionDiffContext.index + 1);
+});
 proposalApply.addEventListener('click', applyApprovedProposal);
 proposalDiscard.addEventListener('click', () => {
   closeDiffReview();
@@ -2422,7 +2894,10 @@ window.addEventListener('keydown', (event) => {
     void debugController.toggleCurrentBreakpoint();
     return;
   }
-  const action = keybindings.byChord.get(chordForEvent(event));
+  const chord = chordForEvent(event);
+  const inEditor = event.target instanceof Node && editorHost.contains(event.target);
+  if (shouldDeferToEditor(keymapPreset, chord, inEditor)) return;
+  const action = keybindings.byChord.get(chord);
   if (!action || action === 'editor.save') return;
   event.preventDefault();
   dispatchBinding(action);
@@ -2630,11 +3105,72 @@ function shortcutFor(id: string): string | null {
   return chord ? formatChord(chord, isMac) : null;
 }
 
+let importedTheme: ImportedTheme | null = loadImportedTheme(localStorage);
+let importedChromeVariables: string[] = [];
+
+function clearImportedChrome(): void {
+  for (const variable of importedChromeVariables) {
+    document.documentElement.style.removeProperty(variable);
+  }
+  importedChromeVariables = [];
+}
+
+function refreshImportedThemeOption(): void {
+  const picker = document.getElementById('settingsTheme') as HTMLSelectElement | null;
+  if (!picker) return;
+  picker.querySelector('option[value="imported"]')?.remove();
+  if (!importedTheme) return;
+  const option = document.createElement('option');
+  option.value = 'imported';
+  option.textContent = `Imported: ${importedTheme.name}`;
+  picker.append(option);
+}
+
+function applyImportedTheme(theme: ImportedTheme): void {
+  clearImportedChrome();
+  monaco.editor.defineTheme('ryoko-imported', theme.monacoTheme);
+  monaco.editor.setTheme('ryoko-imported');
+  for (const [variable, value] of Object.entries(theme.chrome)) {
+    document.documentElement.style.setProperty(variable, value);
+    importedChromeVariables.push(variable);
+  }
+  document.documentElement.style.colorScheme = theme.monacoTheme.base === 'vs' ? 'light' : 'dark';
+  importedTheme = theme;
+  refreshImportedThemeOption();
+  setStatus(`Imported VS Code theme: ${theme.name}`);
+}
+
+function resetImportedTheme(): void {
+  clearImportedChrome();
+  importedTheme = null;
+  try {
+    localStorage.removeItem(IMPORTED_THEME_STORAGE);
+  } catch {
+    // Storage is optional.
+  }
+  applyThemeToDocument(currentTheme);
+  monaco.editor.setTheme(currentTheme.monaco);
+  refreshImportedThemeOption();
+  const picker = document.getElementById('settingsTheme') as HTMLSelectElement | null;
+  if (picker) picker.value = currentTheme.id;
+  setStatus('Imported theme removed. Built-in theme restored.');
+}
+
 function setTheme(theme: ThemeDefinition): void {
   currentTheme = theme;
   applyThemeToDocument(theme);
+  if (importedTheme) {
+    clearImportedChrome();
+    importedTheme = null;
+    try {
+      localStorage.removeItem(IMPORTED_THEME_STORAGE);
+    } catch {
+      // Storage is optional.
+    }
+  }
   monaco.editor.setTheme(theme.monaco);
   saveTheme(localStorage, theme.id);
+  refreshImportedThemeOption();
   const picker = document.getElementById('settingsTheme') as HTMLSelectElement | null;
   if (picker) picker.value = theme.id;
   setStatus(`Color theme: ${theme.label}`);
@@ -2913,7 +3449,80 @@ for (const theme of THEMES) {
   themePicker.append(option);
 }
 themePicker.value = currentTheme.id;
-themePicker.addEventListener('change', () => setTheme(themeById(themePicker.value)));
+refreshImportedThemeOption();
+if (importedTheme) {
+  applyImportedTheme(importedTheme);
+  themePicker.value = 'imported';
+}
+themePicker.addEventListener('change', () => {
+  if (themePicker.value === 'imported' && importedTheme) applyImportedTheme(importedTheme);
+  else setTheme(themeById(themePicker.value));
+});
+
+// Settings › Editor mode.
+const keymapPicker = element<HTMLSelectElement>('settingsKeymap');
+for (const option of KEYMAP_OPTIONS) {
+  const entry = document.createElement('option');
+  entry.value = option.id;
+  entry.textContent = option.label;
+  entry.title = option.description;
+  keymapPicker.append(entry);
+}
+keymapPicker.value = keymapPreset;
+keymapPicker.addEventListener('change', () => void applyKeymap(keymapPicker.value as KeymapPreset));
+
+// Settings › Import from VS Code.
+const vscodeImportFile = element<HTMLInputElement>('vscodeImportFile');
+const vscodeImportThemeButton = element<HTMLButtonElement>('vscodeImportTheme');
+const vscodeImportSettingsButton = element<HTMLButtonElement>('vscodeImportSettings');
+const vscodeResetThemeButton = element<HTMLButtonElement>('vscodeResetTheme');
+const vscodeImportNote = element('vscodeImportNote');
+
+async function readImportFile(): Promise<string> {
+  const file = vscodeImportFile.files?.[0];
+  if (!file) throw new Error('choose a .json file first');
+  if (file.size > 512 * 1024) throw new Error('file exceeds the 512 KiB import limit');
+  return file.text();
+}
+
+vscodeImportThemeButton.addEventListener('click', () => {
+  void (async () => {
+    try {
+      const theme = parseVscodeTheme(await readImportFile());
+      saveImportedTheme(localStorage, theme);
+      applyImportedTheme(theme);
+      themePicker.value = 'imported';
+      vscodeImportNote.textContent = `Imported “${theme.name}”.`
+        + (theme.warnings.length ? ' ' + theme.warnings.slice(0, 3).join(' ') : '');
+    } catch (error) {
+      vscodeImportNote.textContent = 'Theme import failed: '
+        + (error instanceof Error ? error.message : String(error));
+    }
+  })();
+});
+
+vscodeImportSettingsButton.addEventListener('click', () => {
+  void (async () => {
+    try {
+      const parsed = parseVscodeSettings(await readImportFile());
+      saveImportedSettings(localStorage, parsed.settings);
+      editor.updateOptions(monacoOptionsFor(parsed.settings));
+      diffEditor.updateOptions(monacoOptionsFor(parsed.settings));
+      const applied = Object.keys(parsed.settings).filter((key) => parsed.settings[key as keyof typeof parsed.settings] !== undefined);
+      vscodeImportNote.textContent = applied.length
+        ? `Applied: ${applied.join(', ')}.` + (parsed.warnings.length ? ' ' + parsed.warnings.slice(0, 3).join(' ') : '')
+        : 'No supported editor settings were found.';
+    } catch (error) {
+      vscodeImportNote.textContent = 'Settings import failed: '
+        + (error instanceof Error ? error.message : String(error));
+    }
+  })();
+});
+
+vscodeResetThemeButton.addEventListener('click', () => {
+  resetImportedTheme();
+  vscodeImportNote.textContent = 'Imported theme removed.';
+});
 
 // macOS shows the native application menu (built in Rust with the same
 // command ids) instead of the in-window menu bar. Menu events carry only a

@@ -315,6 +315,7 @@ pub async fn sandbox_init(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // flat Tauri IPC signature
 pub fn start_run(
     goal: String,
     sandbox_image: String,

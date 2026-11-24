@@ -35,3 +35,41 @@ export function sessionTitle(session: AgentSession): string {
   if (!summary) return session.id;
   return summary.length > 140 ? `${summary.slice(0, 140)}…` : summary;
 }
+
+export type SessionChangeStatus = 'added' | 'modified' | 'deleted' | 'binary';
+
+export interface SessionChange {
+  path: string;
+  status: SessionChangeStatus;
+  additions: number;
+  deletions: number;
+}
+
+export interface SessionFileDiff {
+  path: string;
+  status: SessionChangeStatus;
+  original: string;
+  modified: string;
+}
+
+export interface SessionActionResult {
+  action: string;
+  message: string;
+  merge_commit?: string;
+  passed?: boolean;
+  summary?: string;
+}
+
+export function changeStatusLabel(status: SessionChangeStatus): string {
+  switch (status) {
+    case 'added': return 'added';
+    case 'deleted': return 'deleted';
+    case 'binary': return 'binary';
+    case 'modified': return 'modified';
+  }
+}
+
+export function changeCounts(change: SessionChange): string {
+  if (change.status === 'binary') return 'binary';
+  return `+${change.additions} −${change.deletions}`;
+}

@@ -43,13 +43,6 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Install Linux Tauri dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-            librsvg2-dev patchelf libssl-dev build-essential
-
       - name: Record native toolchain
         shell: bash
         run: |
@@ -91,7 +84,10 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then EXT=".exe"; fi
           cp "target/debug/ryoko-lsp$EXT" "apps/desktop/src-tauri/binaries/ryoko-lsp-$HOST$EXT"
 
+      # Linux Tauri compilation is covered by the Tauri shell job in ci.yml,
+      # which installs WebKit once instead of repeating the slow apt download here.
       - name: Check and test native Tauri shell
+        if: runner.os != 'Linux'
         run: |
           cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
           cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked

@@ -15,6 +15,11 @@ This change enforces:
 - Preserve existing per-chunk artifact size checks and clean up partial downloads after
   stream, size, or rename failures.
 
+The desktop catalog remains browse-only for remote artifacts. It can install a
+local extension directory through `ryoko plugin install` after a native
+confirmation and an optional SHA-256 pin. That path copies reviewed bytes; it does
+not execute the module, write a policy entry or contact the registry.
+
 **Remaining requirements before an untrusted public marketplace launch:** independently verified
 publisher identities or signed manifests, a reviewed registry policy, permission prompts,
 extension/skill sandbox execution tests, and cross-platform installation/update tests. Avoid
