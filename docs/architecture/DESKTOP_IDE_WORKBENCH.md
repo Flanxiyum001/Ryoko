@@ -94,6 +94,8 @@ the plugin policy or run the module.
 - Pin `@file`, `@symbol`, `@docs` and `@git-diff`; an unknown pin blocks the send
   and a symbol pin without an index reports how to build one. Resolve file and
   symbol pins from a workspace reached through a symlinked path.
+- Pin a file through `..` or a sensitive name (`.env`, `.ssh`); both are rejected
+  with an error and no context is attached.
 - Expand a published session, open two files and navigate with Previous/Next.
   Cancel Detach, Discard and Merge before confirming; no branch or worktree
   changes. A merge with a failing check reports failure and leaves the checkout
