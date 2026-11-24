@@ -20,9 +20,9 @@
 
 html, body, #app { height: 100%; margin: 0; }
 
-body { overflow: hidden; }
-
-button, input { font: inherit; color: inherit; }
+body { overflow: hidden; font-size: 13px; }
+/* Form controls follow the workbench type scale instead of browser defaults. */
+button, input, select, textarea { font: inherit; color: inherit; }
 
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -175,7 +175,15 @@ button, input { font: inherit; color: inherit; }
   display: flex; flex-direction: column; min-height: 0;
   background: var(--panel); border-right: 1px solid var(--border);
 }
-.problems { border-right: 0; border-left: 1px solid var(--border); overflow: hidden; }
+.problems { border-right: 0; border-left: 1px solid var(--border); overflow-x: hidden; overflow-y: auto; }
+/* Inspector sections keep their natural height; the column scrolls instead of
+   squeezing sections until their content paints over the next one. */
+.problems > section, .problems > details, .problems > .panel-head { flex-shrink: 0; }
+.problems > details > summary {
+  padding: 10px 14px; font-size: 10.5px; letter-spacing: 0.14em;
+  color: var(--muted); cursor: pointer; border-top: 1px solid var(--border);
+}
+.problems > details > summary .counter { float: right; letter-spacing: normal; }
 
 .panel-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -276,9 +284,10 @@ button, input { font: inherit; color: inherit; }
 
 /* Mission Control: a compact, read-only DAG over orchestrator event logs. */
 .mission {
-  display: flex; flex-direction: column; min-height: 140px; flex: 1 1 34%;
+  display: flex; flex-direction: column; min-height: 140px; flex: 0 0 auto;
   border-bottom: 1px solid var(--border);
 }
+.run-controls > label { font-size: 11px; color: var(--muted); }
 .run-controls {
   display: flex; flex-direction: column; gap: 6px;
   margin: 0 10px 10px; padding: 8px; border: 1px solid var(--border);
@@ -484,8 +493,8 @@ pre.mission-detail-value {
 }
 
 /* Read-only GitHub queue backed by the user's authenticated gh CLI. */
-.github-queue {
-  display: flex; flex-direction: column; flex: 0 0 23%; min-height: 126px;
+.github-queue[open] {
+  display: flex; flex-direction: column; flex: 0 0 auto;
   border-bottom: 1px solid var(--border);
 }
 .github-queue-toolbar { display: flex; padding: 0 10px 7px; }
@@ -1272,6 +1281,8 @@ img.empty-mark { width: 112px; height: 112px; border-radius: 22px; object-fit: c
 /* Onboarding, rich welcome and transient notification polish. */
 .brand-mark { overflow: hidden; background: #111827; }
 .brand-mark img { width: 100%; height: 100%; display: block; border-radius: inherit; }
+.empty-mark { overflow: hidden; border-radius: 16px; }
+.empty-mark img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .empty-mark { width: 70px; height: 70px; flex: 0 0 70px; }
 .empty-mark img { display: block; width: 100%; height: 100%; border-radius: 17px; }
 .welcome-content { width: min(860px, 100%); }
@@ -1289,7 +1300,7 @@ img.empty-mark { width: 112px; height: 112px; border-radius: 22px; object-fit: c
 .recent-folder strong { color: #e1edfc; font-size: 12px; font-weight: 550; }
 .recent-folder small { color: #9ca9b9; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .welcome-tips-title { margin: 22px 0 10px !important; }
-.welcome-tips { display: grid; gap: 6px; }
+.welcome-tips { display: grid; gap: 6px; margin-bottom: 28px; }
 .welcome-tips span { display: flex; align-items: center; gap: 10px; color: #abb6c5; font-size: 12px; }
 .welcome-tips kbd {
   display: inline-flex; justify-content: center; min-width: 95px;

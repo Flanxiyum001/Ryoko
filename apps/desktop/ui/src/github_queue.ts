@@ -130,7 +130,11 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
 
   pair.addEventListener('click', () => {
     const submitted = code.value.trim();
-    if (!submitted) return;
+    if (!submitted) {
+      showNotice('Paste the single-use pairing code from the GitHub workbench first.');
+      code.focus();
+      return;
+    }
     pair.disabled = true;
     void (async () => {
       try {

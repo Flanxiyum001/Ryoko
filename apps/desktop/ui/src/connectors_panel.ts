@@ -17,7 +17,7 @@ function byId<T extends HTMLElement>(id: string): T {
   return item as T;
 }
 
-export function mountConnectors(setStatus: (value: string) => void): void {
+export function mountConnectors(setStatus: (value: string) => void): { reload: () => void } {
   const count = byId<HTMLElement>('connectorCount');
   const path = byId<HTMLElement>('connectorPath');
   const refresh = byId<HTMLButtonElement>('connectorRefresh');
@@ -187,7 +187,7 @@ export function mountConnectors(setStatus: (value: string) => void): void {
     }
   }
 
-  function load() {
+  function load(quiet = false) {
     refresh.disabled = true;
     void invoke<ConnectorSnapshot>('list_connectors')
       .then((snapshot) => {
@@ -195,15 +195,18 @@ export function mountConnectors(setStatus: (value: string) => void): void {
         render(snapshot);
       })
       .catch((error: unknown) => {
-        count.textContent = 'unavailable';
+        count.textContent = 'no folder';
         path.textContent = 'Open a folder to configure connectors.';
-        fail(error);
+        // Before a workspace is open this always fails; that is not an error
+        // worth a toast. Explicit refreshes still report the reason.
+        if (!quiet) fail(error);
       })
       .finally(() => {
         refresh.disabled = false;
       });
   }
 
-  refresh.addEventListener('click', load);
-  load();
+  refresh.addEventListener('click', () => load());
+  load(true);
+  return { reload: () => load(true) };
 }

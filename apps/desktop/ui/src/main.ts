@@ -456,7 +456,7 @@ const editor = monaco.editor.create(editorHost, {
 let keymapPreset: KeymapPreset = loadKeymap(localStorage);
 let keymapHandle: { dispose(): void } | null = null;
 let keymapTicket = 0;
-async function applyKeymap(preset: KeymapPreset): Promise<void> {
+async function applyKeymap(preset: KeymapPreset, announce = true): Promise<void> {
   const ticket = ++keymapTicket;
   keymapHandle?.dispose();
   keymapHandle = null;
@@ -510,9 +510,10 @@ async function applyKeymap(preset: KeymapPreset): Promise<void> {
       return;
     }
   }
-  setStatus('Editor keymap: ' + keymapById(preset).label);
+  if (announce) setStatus('Editor keymap: ' + keymapById(preset).label);
 }
-void applyKeymap(keymapPreset);
+// Restoring the saved keymap at startup is silent; only user changes announce.
+void applyKeymap(keymapPreset, false);
 
 // Ghost text is a content widget rather than Monaco's inline-completions API:
 // the provider API resolves once, while local FIM tokens arrive incrementally.
@@ -1186,6 +1187,8 @@ async function openFolder(selectedPath?: string): Promise<void> {
     void refreshMissionLogs();
     void refreshHunks();
     void refreshRunStatus();
+    connectors.reload();
+    syncWorkspaceButtons();
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
@@ -1287,6 +1290,65 @@ async function loadSessionChanges(session: AgentSession, container: HTMLElement)
 interface MergeOptions {
   target: string;
   checkCommand: string;
+}
+
+function promptFolderPath(): Promise<string | null> {
+  // Fallback for Linux desktops where the native GTK/portal folder picker
+  // never appears (for example some Wayland or tiling window managers).
+  return new Promise((resolve) => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'merge-dialog';
+    dialog.setAttribute('aria-label', 'Open folder by path');
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    form.className = 'merge-form';
+    const heading = document.createElement('h2');
+    heading.textContent = 'Open folder by path';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.placeholder = '/home/you/projects/my-app';
+    input.setAttribute('aria-label', 'Absolute folder path');
+    const actions = document.createElement('div');
+    actions.className = 'merge-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button ghost compact';
+    cancel.textContent = 'Cancel';
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.className = 'button primary compact';
+    submit.textContent = 'Open';
+    actions.append(cancel, submit);
+    form.append(heading, input, actions);
+    dialog.append(form);
+    let done = false;
+    const finish = (value: string | null) => {
+      if (done) return;
+      done = true;
+      dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = input.value.trim();
+      finish(value ? value : null);
+    });
+    cancel.addEventListener('click', () => finish(null));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      finish(null);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+  });
+}
+
+async function openFolderByPath(): Promise<void> {
+  const path = await promptFolderPath();
+  if (path) await openFolder(path);
 }
 
 function promptMergeOptions(session: AgentSession): Promise<MergeOptions | null> {
@@ -2761,6 +2823,9 @@ editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, () => {
 openFolderButton.addEventListener('click', () => {
   void openFolder();
 });
+element<HTMLButtonElement>('welcomeOpenPath').addEventListener('click', () => {
+  void openFolderByPath();
+});
 saveButton.addEventListener('click', () => {
   void saveCurrent();
 });
@@ -2771,6 +2836,22 @@ element('quickOpenButton').addEventListener('click', () => quickOpen.open());
 element('welcomeQuickOpen').addEventListener('click', () => quickOpen.open());
 element('welcomeSettings').addEventListener('click', () => openSettings.click());
 element('welcomeMission').addEventListener('click', () => activateView('mission'));
+
+// Actions that only make sense inside an open workspace are disabled until one
+// is open, so they never look clickable while silently doing nothing.
+const workspaceOnlyButtons = ['refreshFiles', 'agentSessionRefresh', 'missionRefresh', 'hunkRefresh', 'changesRefresh']
+  .map((id) => element<HTMLButtonElement>(id));
+function syncWorkspaceButtons(): void {
+  const open = Boolean(state.root);
+  for (const button of workspaceOnlyButtons) {
+    if (!open) button.disabled = true;
+    else if (button.dataset.workspaceGated === 'off') button.disabled = false;
+    button.dataset.workspaceGated = open ? 'on' : 'off';
+    button.title = open ? '' : 'Open a folder first';
+  }
+}
+syncWorkspaceButtons();
+
 element('refreshFiles').addEventListener('click', () => {
   if (state.root) void loadFiles().catch((error) => setStatus(String(error)));
 });
@@ -3019,7 +3100,7 @@ window.addEventListener('beforeunload', () => {
 setLspState('offline');
 renderMissionOptions();
 mountGithubQueue(setStatus);
-mountConnectors(setStatus);
+const connectors = mountConnectors(setStatus);
 mountMarketplaceBrowser(setStatus);
 mountSearchPanel({ openFile, setStatus });
 mountSettingsDialog({ setStatus });
@@ -3386,6 +3467,7 @@ const definitions: WorkbenchCommand[] = [
   { id: 'workbench.commandPalette', category: 'View', title: 'Command Palette…', run: () => palette.open() },
   { id: 'workbench.quickOpen', category: 'File', title: 'Go to File…', run: () => quickOpen.open() },
   { id: 'workspace.openFolder', category: 'File', title: 'Open Folder…', run: () => openFolderButton.click() },
+  { id: 'workspace.openFolderByPath', category: 'File', title: 'Open Folder by Path…', run: () => { void openFolderByPath(); } },
   { id: 'editor.save', category: 'File', title: 'Save', run: () => saveButton.click(), enabled: () => !saveButton.disabled },
   { id: 'editor.close', category: 'File', title: 'Close Editor', run: () => { if (state.current) closeOpenFile(state.current.path); }, enabled: () => !!state.current },
   { id: 'workbench.settings', category: 'Preferences', title: 'Open Settings', run: () => openSettings.click() },

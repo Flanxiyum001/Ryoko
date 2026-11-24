@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Ryoko</title>
-  <link rel="icon" type="image/svg+xml" href="/ryoko-mark.svg">
+  <link rel="icon" type="image/png" href="/ryoko-logo.png">
 </head>
 <body>
-  <div id="startupSplash" class="startup-splash" aria-hidden="true"><img src="/ryoko-mark.svg" alt=""><span>RYOKO</span><small>PREPARING YOUR WORKSPACE</small></div>
+  <div id="startupSplash" class="startup-splash" aria-hidden="true"><img src="/ryoko-logo.png" alt=""><span>RYOKO</span><small>PREPARING YOUR WORKSPACE</small></div>
   <div id="app">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/ryoko-mark.svg" alt=""></span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/ryoko-logo.png" alt=""></span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
       <div id="menuBar" class="menu-bar"></div>
       <button id="quickOpenButton" class="command-center" type="button" title="Quick open file (Ctrl+P / Cmd+P)"><span aria-hidden="true">⌕</span><span id="workspaceName">Search files in workspace</span><kbd>Ctrl / ⌘ P</kbd></button>
       <div class="top-actions">
@@ -78,11 +78,12 @@
         </div>
         <div id="emptyEditor" class="empty-editor">
           <div class="welcome-content">
-            <div class="welcome-heading"><div class="empty-mark" aria-hidden="true"><img src="/ryoko-mark.svg" alt=""></div><div><h1>Ryoko</h1><p>Your code. Your workspace.</p></div></div>
+            <div class="welcome-heading"><div class="empty-mark" aria-hidden="true"><img src="/ryoko-logo.png" alt=""></div><div><h1>Ryoko</h1><p>Your code. Your workspace.</p></div></div>
             <div class="welcome-columns">
               <section class="welcome-start" aria-label="Get started">
                 <h2>Start</h2>
                 <button id="emptyOpenFolder" class="welcome-action" type="button"><span>Open folder…</span><span>Choose a local project</span></button>
+                <button id="welcomeOpenPath" class="welcome-action" type="button"><span>Open folder by path…</span><span>Type a path if the folder picker does not appear</span></button>
                 <button id="welcomeClone" class="welcome-action" type="button"><span>Clone a repository…</span><span>Bring a Git repository onto your machine</span></button>
                 <button id="welcomeOnboarding" class="welcome-action" type="button"><span>Configure your AI provider</span><span>Secure keychain setup and a guided first task</span></button>
                 <button id="welcomeQuickOpen" class="welcome-action" type="button"><span>Go to file…</span><span>Find a file in your workspace</span></button>
@@ -293,7 +294,7 @@
             <p class="hint">Select a task to inspect its brief, validation and output.</p>
           </div>
         </section>
-        <details class="connectors" id="connectorsPanel" open>
+        <details class="connectors" id="connectorsPanel">
           <summary>CONNECTORS <span id="connectorCount" class="counter">not loaded</span></summary>
           <div class="connectors-toolbar">
             <span id="connectorPath" class="connector-path">Open a folder to configure connectors.</span>
@@ -334,7 +335,7 @@
           </div>
           <pre id="hunkValidation" class="hunk-validation hidden" aria-live="polite"></pre>
         </details>
-                <details class="changes" id="changesDetails">
+        <details class="changes" id="changesDetails">
           <summary>CHANGES <span id="changesSummary" class="counter">no folder</span></summary>
           <div class="hunk-toolbar">
             <button id="changesRefresh" class="button ghost compact" type="button">Scan</button>
@@ -343,7 +344,7 @@
             <p class="hint">Open a Git repository to review every modified file.</p>
           </div>
         </details>
-<div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
+        <div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
         <div id="problemList" class="problem-list">
           <p class="hint">No diagnostics yet.</p>
         </div>

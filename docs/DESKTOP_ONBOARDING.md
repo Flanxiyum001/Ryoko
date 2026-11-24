@@ -32,7 +32,7 @@ The clone dialog accepts HTTPS URLs only, rejects embedded username/password, qu
 
 ## Brand assets
 
-The source-of-truth vector is `apps/desktop/ui/public/ryoko-mark.svg`. Renderer welcome, header and splash all use it. Run `npm run icons` from `apps/desktop` to regenerate platform PNG/ICO/ICNS assets. Signed and unsigned installer workflows generate the native icon set before packaging.
+The source-of-truth logo is `apps/desktop/ui/public/ryoko-logo.png` (512×512 dragon mark). Renderer welcome, header, splash and favicon all use it. Run `npm run icons` from `apps/desktop` to regenerate platform PNG/ICO/ICNS assets. Signed and unsigned installer workflows generate the native icon set before packaging.
 
 ## Validation / manual acceptance
 
