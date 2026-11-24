@@ -1,6 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
@@ -950,7 +949,13 @@ debugController.mount();
 
 function setLspState(connection: LspState, detail?: string): void {
   lspStatus.className = 'status-pill ' + connection;
-  lspStatus.textContent = connection === 'ready' ? 'ryoko-lsp ready' : 'ryoko-lsp ' + connection;
+  // "offline" just means no workspace is open yet, so it reads as idle
+  // rather than as a failure; only a real start failure is shown as an error.
+  const label: Record<LspState, string> = {
+    offline: 'idle', starting: 'starting…', ready: 'ready', error: 'failed', stopped: 'stopped',
+  };
+  lspStatus.textContent = 'ryoko-lsp ' + label[connection];
+  lspStatus.title = connection === 'offline' ? 'Starts when you open a folder' : detail ?? '';
   if (detail) setStatus(`ryoko-lsp: ${detail}`);
 }
 
@@ -1085,7 +1090,8 @@ async function openFolder(selectedPath?: string): Promise<void> {
   }
   workspaceSwitching = true;
   try {
-    const selected = selectedPath ?? await open({ directory: true, multiple: false });
+    // Native picker attached to the main window (see pick_workspace_folder).
+    const selected = selectedPath ?? await invoke<string | null>('pick_workspace_folder');
     if (typeof selected !== 'string') return;
     if ([...openFiles.values()].some((file) => file.dirty)
       && !window.confirm('Switch workspaces and discard unsaved edits?')) {

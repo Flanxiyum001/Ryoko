@@ -1,7 +1,6 @@
 /** First-run setup and the welcome page. Secrets are sent only to the native
  * keychain command, and never enter localStorage or provider catalog JSON. */
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
 
 export interface SetupState {
   provider: string;
@@ -130,7 +129,7 @@ export function mountOnboarding(deps: OnboardingDeps): {
       input.focus();
     });
     if (!value) return;
-    const parent = await open({ directory: true, multiple: false, title: 'Choose where to clone the repository' });
+    const parent = await invoke<string | null>('pick_workspace_folder', { title: 'Choose where to clone the repository' });
     if (typeof parent !== 'string') return;
     try {
       deps.notify('Cloning repository…');

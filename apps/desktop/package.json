@@ -12,6 +12,7 @@
     "test": "vitest run",
     "bench:quick-open": "vitest run --config vitest.bench.config.ts",
     "tauri": "tauri",
+    "sidecar": "node scripts/build-sidecar.mjs",
     "icons": "tauri icon ui/public/ryoko-logo.png",
     "test:ui": "playwright test"
   },

@@ -2,7 +2,6 @@
  * Remote HTML and remote executable installation remain disabled.
  */
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
 
 type CatalogKind = 'extension' | 'skill';
 interface CatalogItem {
@@ -185,7 +184,7 @@ export function mountMarketplaceBrowser(setStatus: (message: string) => void): v
   installLocal.addEventListener('click', () => {
     void (async () => {
       try {
-        const selected = await open({ directory: true, multiple: false });
+        const selected = await invoke<string | null>('pick_workspace_folder', { title: 'Choose a folder' });
         if (typeof selected !== 'string') return;
         const trimmed = shaInput.value.trim();
         if (trimmed && !/^[0-9a-fA-F]{64}$/.test(trimmed)) {

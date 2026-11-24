@@ -327,14 +327,13 @@ See [the architecture and security audit](docs/ARCHITECTURE_SECURITY_AUDIT.md) a
 
 `apps/desktop` contains the native shell: a Tauri v2 window around a Vite + TypeScript frontend using Monaco. It edits a local folder through root-confined Rust commands and talks to `ryoko-lsp` and registered standard language servers through a multiplexed stdio-to-event bridge, so open documents are stored in `ryoko-vfs` by the language server. Writes to sensitive paths (`.env*`, CI workflows, credential files) additionally require an OS-native, one-time confirmation before any filesystem mutation; cancellation denies the write. This does not yet gate arbitrary agent shell/network actions, which are not exposed through the current desktop IPC.
 
-    cargo build -p ryoko-native --bin ryoko-lsp
     cd apps/desktop
     npm ci
     npm test
     npm run build
-    RYOKO_LSP_BIN="$PWD/../../target/debug/ryoko-lsp" npm run tauri dev
+    npm run tauri dev
 
-Without `RYOKO_LSP_BIN`, the shell looks for a `ryoko-lsp` binary next to the app executable (the bundled sidecar); it never resolves the language server from `PATH`. Production installers are built by the `Desktop installers` workflow on macOS, Windows and Linux runners; macOS and Windows jobs refuse to run without Developer ID and Authenticode signing secrets and verify the signatures before uploading; Linux packages are not signed, and there is no auto-updater yet. The browser GitHub workbench at `http://127.0.0.1:4173` is unchanged and still served from the files at the desktop root.
+`npm run tauri dev` first runs `npm run sidecar`, which builds `ryoko-lsp` and copies it to `src-tauri/binaries/ryoko-lsp-<target-triple>` where Tauri's `externalBin` expects it. The shell resolves the language server from `RYOKO_LSP_BIN` if set, then a `ryoko-lsp` binary next to the app executable (the bundled sidecar), and in debug builds only, the workspace `target/debug` or `target/release` directory; it never resolves the language server from `PATH`. On Linux, building the shell needs the GTK 3 and WebKitGTK 4.1 development packages (for example `libwebkit2gtk-4.1-dev` and `libgtk-3-dev` on Debian/Ubuntu). Production installers are built by the `Desktop installers` workflow on macOS, Windows and Linux runners; macOS and Windows jobs refuse to run without Developer ID and Authenticode signing secrets and verify the signatures before uploading; Linux packages are not signed, and there is no auto-updater yet. The browser GitHub workbench at `http://127.0.0.1:4173` is unchanged and still served from the files at the desktop root.
 
 ## Editor integration
 

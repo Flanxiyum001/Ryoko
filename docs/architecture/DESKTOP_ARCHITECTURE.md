@@ -67,12 +67,16 @@ terminal_status()               running state and session id
 terminal_stop()                 terminate the shell
 dap_start(adapter, args)       spawn a user-selected DAP adapter over stdio
 dap_restart(adapter, args)     terminate active adapter and spawn a fresh session
+pick_workspace_folder(title?)  native folder picker; on Linux a modal GTK
+                              chooser made transient for the main window
 dap_send(message)              validate JSON and write one framed DAP request
 dap_status() / dap_stop()      inspect or terminate the adapter
 ```
 
 `lsp_start` resolves `ryoko-lsp` from `RYOKO_LSP_BIN`, then a sibling
-`ryoko-lsp` binary (the bundled Tauri sidecar), then `PATH`; registered servers
+`ryoko-lsp` binary (the bundled Tauri sidecar), then, in debug builds only, the
+nearest ancestor `target/debug` or `target/release` directory, so a workspace
+build is found during `tauri dev`; it never falls back to `PATH`. Registered servers
 resolve as bare names through `PATH` under the open workspace. Output frames
 are parsed in Rust and emitted per server as `lsp-frame` events with an
 explicit `{ server, message }` payload; stderr lines become `lsp-log`; process

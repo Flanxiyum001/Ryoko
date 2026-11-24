@@ -3132,6 +3132,7 @@ name = "ryoko-desktop"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "gtk",
  "ignore",
  "portable-pty",
  "regex",

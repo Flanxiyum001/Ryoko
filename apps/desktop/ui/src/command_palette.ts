@@ -4,7 +4,6 @@
 
 import { commandLabel, rankCommands, type CommandMatch, type CommandRegistry } from './commands';
 import { nextQuickOpenSelection } from './quick_open_model';
-import './quick_open.css';
 
 const RECENT_KEY = 'ryoko.commandPalette.recent.v1';
 const MAX_RECENT = 12;
