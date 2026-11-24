@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { GitHubBroker } from './github.mjs';
 import { issueAgentRequest, runIssuePipeline } from './pipeline.mjs';
 import { isAllowedOrigin, validateProposal, verifyWebhookSignature } from './security.mjs';
+import { createBugReportHandler } from './bug-report.mjs';
 
 const execFileAsync = promisify(execFile);
 const BODY_LIMIT = 150_000;
@@ -77,6 +78,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     pipelineTimeoutMs: config?.pipelineTimeoutMs || 15 * 60_000,
     // Operator-owned MCP settings for pipeline runs. Absent means no MCP tools.
     mcp: config?.mcp && typeof config.mcp === 'object' ? config.mcp : null,
+    bugReportToken: config?.bugReportToken || '',
+    bugReportRepo: config?.bugReportRepo || 'Flanxiyum001/Ryoko',
   };
   const client = broker || new GitHubBroker(config || {});
   const pagesRoot = frontendPath || resolve('apps/desktop');
@@ -89,6 +92,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
   const desktopSessions = new Map();
   const pipelineJobs = new Map();
   const isSecure = new URL(settings.origin).protocol === 'https:';
+  const submitBugReport = createBugReportHandler({ token: settings.bugReportToken, repository: settings.bugReportRepo });
 
   function sessionFor(req) {
     const id = cookieId(req);
@@ -200,6 +204,11 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
 
     if (req.method === 'GET' && path === '/health') {
       return json(res, 200, { service: 'ryoko-github-app', status: 'ok', configured: Boolean(client.configured) });
+    }
+    if (req.method === 'POST' && path === '/api/bug-report') {
+      const body = await jsonBody(req);
+      const result = await submitBugReport(req, body);
+      return json(res, 201, result);
     }
     if (req.method === 'POST' && path === '/webhooks/github') {
       if (!settings.webhookSecret) throw bad('webhook secret not configured', 503);
