@@ -62,6 +62,7 @@ target repository with Issues: write permission:
 
     export RYOKO_BUG_REPORT_GITHUB_TOKEN="<server-only-token>"
     export RYOKO_BUG_REPORT_REPOSITORY="Flanxiyum001/Ryoko"
+    export RYOKO_BUG_REPORT_ALLOWED_ORIGINS="tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost:1420"
 
 Do not put the token in desktop code, frontend bundles, or logs. The endpoint
 currently has an in-memory rate limiter; public production deployment should
