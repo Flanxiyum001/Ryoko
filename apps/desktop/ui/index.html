@@ -58,10 +58,13 @@
           <button id="toggleDebug" class="button ghost compact" type="button">Debug</button>
         </div>
         <div id="editor" class="editor hidden" role="tabpanel" aria-label="Active file editor"></div>
+        <div id="vimStatus" class="vim-status hidden" aria-live="polite"></div>
         <div class="diff-review hidden" id="diffReview">
           <div class="diff-review-bar">
             <span id="diffReviewPath">Review diff</span>
             <span class="hint">Inline hunk actions update the working tree or start a revision run.</span>
+            <button id="diffPrevFile" class="button ghost compact" type="button" hidden>← Previous file</button>
+            <button id="diffNextFile" class="button ghost compact" type="button" hidden>Next file →</button>
             <button id="diffReviewClose" class="button ghost compact" type="button">Close diff</button>
           </div>
           <div id="proposalToolbar" class="proposal-toolbar hidden" aria-label="Review model proposal">
@@ -210,16 +213,23 @@
         <section class="agent-chat" id="agentChat" aria-label="Agent chat">
           <div class="panel-head"><span>AGENT CHAT</span><span class="counter">READ-ONLY CHAT</span></div>
           <div id="chatHistory" class="chat-history" role="log" aria-live="polite">
-            <p class="hint">Ask your coding assistant about the workspace. Attach @file or @selection for focused context.</p>
+            <p class="hint">Ask your coding assistant about the workspace. Pin @file, @symbol, @docs, @git-diff or @selection for focused context.</p>
           </div>
           <div class="chat-compose">
             <div id="chatAttachments" class="chat-attachments"></div>
             <textarea id="chatInput" rows="3" maxlength="8000" spellcheck="true" placeholder="Ask Ryoko… (Enter to send, Shift+Enter for a new line)"></textarea>
             <div class="chat-file-row">
-              <label class="sr-only" for="chatFilePath">Workspace file to attach</label>
-              <input id="chatFilePath" list="chatFileChoices" placeholder="@file path…" autocomplete="off">
-              <datalist id="chatFileChoices"></datalist>
-              <button id="chatAttachFile" class="button ghost compact" type="button">Attach</button>
+              <label class="sr-only" for="chatMentionKind">Context pin type</label>
+              <select id="chatMentionKind" class="chat-mention-kind">
+                <option value="file">@file</option>
+                <option value="symbol">@symbol</option>
+                <option value="docs">@docs</option>
+              </select>
+              <label class="sr-only" for="chatMentionValue">Context pin value</label>
+              <input id="chatMentionValue" list="chatMentionChoices" placeholder="File path, symbol or docs query…" autocomplete="off">
+              <datalist id="chatMentionChoices"></datalist>
+              <button id="chatPinMention" class="button ghost compact" type="button">Pin</button>
+              <button id="chatPinDiff" class="button ghost compact" type="button">@git-diff</button>
               <button id="chatAttachSelection" class="button ghost compact" type="button">@selection</button>
             </div>
             <div class="chat-compose-actions">
@@ -379,6 +389,23 @@
         <p class="hint">Changes the workbench and the editor together. Also available from View › Color Theme.</p>
         <label class="sr-only" for="settingsTheme">Color theme</label>
         <select id="settingsTheme" class="settings-theme"></select>
+      </section>
+      <section class="settings-section">
+        <h2>Editor mode</h2>
+        <p class="hint">Vim and Emacs modes apply to the Monaco editor. Workbench chords such as <code>Mod+S</code> still save; single-modifier editor motions stay with the editor.</p>
+        <label class="sr-only" for="settingsKeymap">Editor keymap</label>
+        <select id="settingsKeymap" class="settings-theme"></select>
+      </section>
+      <section class="settings-section">
+        <h2>Import from VS Code</h2>
+        <p class="hint">Import a VS Code color-theme JSON or <code>settings.json</code>. Values are validated locally; nothing is uploaded. Theme colors are mapped onto Ryoko's Monaco theme and workbench variables.</p>
+        <div class="settings-actions">
+          <input id="vscodeImportFile" type="file" accept=".json,application/json">
+          <button id="vscodeImportTheme" class="button ghost compact" type="button">Import theme</button>
+          <button id="vscodeImportSettings" class="button ghost compact" type="button">Import settings</button>
+          <button id="vscodeResetTheme" class="button ghost compact" type="button">Reset imported theme</button>
+        </div>
+        <p id="vscodeImportNote" class="hint"></p>
       </section>
       <section class="settings-section">
         <h2>Updates</h2>

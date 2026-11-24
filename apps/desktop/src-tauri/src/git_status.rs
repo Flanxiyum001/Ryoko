@@ -121,7 +121,7 @@ pub fn working_tree_changes(root: &Path) -> Option<Vec<ChangeEntry>> {
             .read_to_end(&mut output)
     });
     let read = match read {
-        Some(Ok(read)) => read as usize,
+        Some(Ok(read)) => read,
         _ => {
             let _ = child.kill();
             let _ = child.wait();

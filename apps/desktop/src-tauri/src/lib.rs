@@ -3,8 +3,10 @@ mod agent_review;
 mod code_run;
 mod completion;
 mod connectors;
+mod context_mentions;
 mod credential_store;
 mod debug_adapter;
+mod extensions;
 mod git_status;
 mod github_queue;
 mod inline_edit;
@@ -27,6 +29,7 @@ mod terminal;
 mod terminal_decode;
 mod updater;
 mod workbench;
+mod worktree_ops;
 mod workspace;
 
 use tauri::Manager;
@@ -62,6 +65,8 @@ pub fn run() {
             workspace::write_file,
             agent_chat::agent_chat,
             agent_chat::agent_chat_cancel,
+            context_mentions::resolve_context_mention,
+            context_mentions::search_context_symbols,
             agent_review::read_agent_candidate,
             workbench::git_changes,
             workbench::workspace_search,
@@ -84,6 +89,13 @@ pub fn run() {
             github_queue::list_github_repositories,
             github_queue::get_github_queue,
             sessions::list_agent_sessions,
+            worktree_ops::list_agent_session_changes,
+            worktree_ops::read_agent_session_file,
+            worktree_ops::release_agent_session,
+            worktree_ops::discard_agent_session,
+            worktree_ops::merge_agent_session,
+            extensions::list_installed_extensions,
+            extensions::install_wasi_extension,
             review::list_review_hunks,
             review::stage_review_hunks,
             review::reject_review_hunks,

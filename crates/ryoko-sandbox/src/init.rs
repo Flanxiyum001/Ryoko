@@ -926,12 +926,24 @@ if (!grandchild) {
 }
 await stopServer(child);
 // The kill is a promise the kernel keeps on its own schedule, so a single probe
-// right after stopServer races signal delivery and reaping. Bounded polling
-// still fails the test if the grandchild really survived.
+// right after stopServer races signal delivery and reaping. A zombie is dead:
+// this container's PID 1 does not always reap reparented children promptly.
+function zombie(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
+  } catch {
+    return false;
+  }
+}
 let alive = true;
 for (let attempt = 0; attempt < 80 && alive; attempt += 1) {
   try {
     process.kill(grandchild, 0);
+    if (zombie(grandchild)) {
+      alive = false;
+      break;
+    }
     await new Promise((resolve) => setTimeout(resolve, 25));
   } catch {
     alive = false;
