@@ -92,7 +92,8 @@ the plugin policy or run the module.
   the window has no horizontal overflow.
 - Switch workspaces while dirty: cancel preserves buffers; confirm clears tabs.
 - Pin `@file`, `@symbol`, `@docs` and `@git-diff`; an unknown pin blocks the send
-  and a symbol pin without an index reports how to build one.
+  and a symbol pin without an index reports how to build one. Resolve file and
+  symbol pins from a workspace reached through a symlinked path.
 - Expand a published session, open two files and navigate with Previous/Next.
   Cancel Detach, Discard and Merge before confirming; no branch or worktree
   changes. A merge with a failing check reports failure and leaves the checkout
