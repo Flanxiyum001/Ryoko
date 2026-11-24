@@ -17,7 +17,7 @@ const bad = (message, status = 400) => Object.assign(new Error(message), { statu
 const random = () => randomBytes(32).toString('base64url');
 
 function json(res, status, data) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.writeHead(status, { ...res.getHeaders(), 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
 }
 function redirect(res, location, cookie) {
