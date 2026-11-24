@@ -800,10 +800,16 @@ mod tests {
         assert!(file_context(&root, ".env").is_err());
         assert!(file_context(&root, "missing.rs").is_err());
         assert!(file_context(&root, &"a".repeat(241)).is_err());
-        fs::write(root.join("large.txt"), "x".repeat(MAX_FILE_BYTES as usize + 1)).unwrap();
-        assert!(file_context(&root, "large.txt")
-            .unwrap_err()
-            .contains("exceeds 32 KiB"));
+        fs::write(
+            root.join("large.txt"),
+            "x".repeat(MAX_FILE_BYTES as usize + 1),
+        )
+        .unwrap();
+        assert!(
+            file_context(&root, "large.txt")
+                .unwrap_err()
+                .contains("exceeds 32 KiB")
+        );
         fs::write(root.join(".env"), "SECRET=1\n").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
