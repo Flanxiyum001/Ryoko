@@ -137,6 +137,7 @@ pub const MENUS: &[(&str, &[Entry])] = &[
         "Help",
         &[
             Command("help.welcome", "Welcome", None),
+            Command("help.reportBug", "Report a Bug…", None),
             Command("help.keyboardShortcuts", "Keyboard Shortcuts", None),
             Separator,
             Command("help.checkForUpdates", "Check for Updates…", None),
