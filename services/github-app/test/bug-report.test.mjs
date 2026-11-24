@@ -67,6 +67,8 @@ test('bug reports are rate limited per client address', async () => {
 });
 
 test('bug reporter refuses to run without a credential and accepts only repository slugs', async () => {
+  const backslash = createBugReportHandler({ token: 'token', repository: 'ow\\ner/repo' });
+  await assert.rejects(() => backslash(request(), valid), /not configured/);
   const missing = createBugReportHandler({ token: '' });
   await assert.rejects(() => missing(request(), valid), /not configured/);
   const invalid = createBugReportHandler({ token: 'token', repository: '../bad' });
