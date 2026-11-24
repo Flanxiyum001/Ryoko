@@ -77,7 +77,9 @@ fn validate(args: &AgentChatArgs) -> Result<(), String> {
         return Err("chat message must contain 1–8000 characters".into());
     }
     if args.files.len() > MAX_LEGACY_FILES {
-        return Err(format!("at most {MAX_LEGACY_FILES} @file attachments are allowed"));
+        return Err(format!(
+            "at most {MAX_LEGACY_FILES} @file attachments are allowed"
+        ));
     }
     if args.files.len().saturating_add(args.mentions.len()) > MAX_MENTIONS {
         return Err(format!("at most {MAX_MENTIONS} context pins are allowed"));

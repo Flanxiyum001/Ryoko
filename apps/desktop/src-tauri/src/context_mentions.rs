@@ -151,7 +151,10 @@ pub(crate) fn valid_symbol_name(name: &str) -> bool {
     name.len() <= 128
         && characters.all(|character| {
             character.is_ascii_alphanumeric()
-                || matches!(character, '_' | ':' | '<' | '>' | '.' | ',' | '$' | '#' | '?' | '!' | '~' | '-')
+                || matches!(
+                    character,
+                    '_' | ':' | '<' | '>' | '.' | ',' | '$' | '#' | '?' | '!' | '~' | '-'
+                )
         })
 }
 
@@ -207,17 +210,20 @@ pub(crate) fn file_context(root: &Path, path: &str) -> Result<String, String> {
     if !allowed_context_path(path) {
         return Err(format!("sensitive file cannot be pinned: {path}"));
     }
-    let candidate = safe_join(root, path)?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve the workspace: {error}"))?;
+    let candidate = safe_join(&root, path)?;
     let canonical = candidate
         .canonicalize()
         .map_err(|error| format!("cannot pin {path}: {error}"))?;
-    if !canonical.starts_with(root) || !canonical.is_file() {
+    if !canonical.starts_with(&root) || !canonical.is_file() {
         return Err(format!(
             "pin escapes the workspace or is not a file: {path}"
         ));
     }
     let canonical_relative = canonical
-        .strip_prefix(root)
+        .strip_prefix(&root)
         .map_err(|_| format!("pin escapes the workspace: {path}"))?
         .to_string_lossy()
         .replace('\\', "/");
@@ -240,6 +246,9 @@ pub(crate) fn file_context(root: &Path, path: &str) -> Result<String, String> {
 }
 
 fn index_path(root: &Path) -> Result<Option<PathBuf>, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve the workspace: {error}"))?;
     let candidate = root.join(".ryoko/state/symbols.sqlite3");
     let metadata = match fs::symlink_metadata(&candidate) {
         Ok(metadata) => metadata,
@@ -252,7 +261,7 @@ fn index_path(root: &Path) -> Result<Option<PathBuf>, String> {
     let canonical = candidate
         .canonicalize()
         .map_err(|error| format!("cannot resolve the symbol index: {error}"))?;
-    if !canonical.starts_with(root) {
+    if !canonical.starts_with(&root) {
         return Err("the symbol index escapes the open workspace".to_owned());
     }
     Ok(Some(canonical))
@@ -313,7 +322,10 @@ pub(crate) fn symbol_context(root: &Path, name: &str) -> Result<String, String> 
         block.push_str("\" line=\"");
         block.push_str(&start_line.to_string());
         block.push_str("\">");
-        block.push_str(&escape_attr(&truncate_chars(&signature, MAX_SIGNATURE_CHARS)));
+        block.push_str(&escape_attr(&truncate_chars(
+            &signature,
+            MAX_SIGNATURE_CHARS,
+        )));
         block.push_str("</definition>\n");
     }
     let rows = callers
@@ -326,7 +338,8 @@ pub(crate) fn symbol_context(root: &Path, name: &str) -> Result<String, String> 
         })
         .map_err(|error| format!("cannot query symbol callers: {error}"))?;
     for row in rows {
-        let (path, caller, line) = row.map_err(|error| format!("cannot read a caller row: {error}"))?;
+        let (path, caller, line) =
+            row.map_err(|error| format!("cannot read a caller row: {error}"))?;
         block.push_str("  <caller path=\"");
         block.push_str(&escape_attr(&path));
         block.push_str("\" line=\"");
@@ -464,7 +477,9 @@ fn docs_context(root: &Path, query: &str) -> Result<String, String> {
         return Ok(block);
     }
     if !valid_docs_query(query) {
-        return Err("docs pin must be a short word or path (letters, digits, `_ . : / -`)".to_owned());
+        return Err(
+            "docs pin must be a short word or path (letters, digits, `_ . : / -`)".to_owned(),
+        );
     }
     let needle = query.to_ascii_lowercase();
     let mut files = memory_files(root);
@@ -541,7 +556,9 @@ fn git_root(root: &Path) -> Result<(), String> {
 
 fn safe_diff_path(path: &str) -> bool {
     !Path::new(path).is_absolute()
-        && !path.split(['/', '\\']).any(|part| part.is_empty() || part == "..")
+        && !path
+            .split(['/', '\\'])
+            .any(|part| part.is_empty() || part == "..")
         && allowed_context_path(path)
 }
 
@@ -573,8 +590,8 @@ fn safe_diff_paths(root: &Path) -> Result<Vec<String>, String> {
         if raw.is_empty() {
             continue;
         }
-        let path = std::str::from_utf8(raw)
-            .map_err(|_| "Git returned a non-UTF-8 path".to_owned())?;
+        let path =
+            std::str::from_utf8(raw).map_err(|_| "Git returned a non-UTF-8 path".to_owned())?;
         if safe_diff_path(path) {
             paths.push(path.to_owned());
         }
@@ -592,17 +609,15 @@ pub(crate) fn git_diff_context(root: &Path) -> Result<String, String> {
         return Err("there are no non-sensitive tracked working-tree changes to pin".to_owned());
     }
     let mut command = Command::new("git");
-    command
-        .current_dir(root)
-        .args([
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--ignore-submodules=all",
-            "HEAD",
-            "--",
-        ]);
+    command.current_dir(root).args([
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--ignore-submodules=all",
+        "HEAD",
+        "--",
+    ]);
     for path in &paths {
         command.arg(format!(":(literal){path}"));
     }
@@ -792,6 +807,25 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_workspace_root_is_canonicalized() {
+        let root = temp_root("canonical-root");
+        fs::write(root.join("ok.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(root.join(".ryoko/state")).unwrap();
+        fs::write(root.join(".ryoko/state/symbols.sqlite3"), b"").unwrap();
+        let alias = root.with_file_name(format!(
+            "{}-alias",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = fs::remove_dir_all(&alias);
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        assert!(file_context(&alias, "ok.rs").unwrap().contains("fn main"));
+        assert!(index_path(&alias).unwrap().is_some());
+        fs::remove_dir_all(&alias).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn symbol_context_reads_definitions_and_callers() {
         let root = temp_root("symbol");
@@ -849,11 +883,8 @@ mod tests {
         fs::create_dir_all(root.join(".ryoko/memory")).unwrap();
         fs::write(root.join(".env"), "SECRET=1\n").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            root.join(".env"),
-            root.join(".ryoko/memory/decisions.md"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(root.join(".env"), root.join(".ryoko/memory/decisions.md"))
+            .unwrap();
         #[cfg(unix)]
         assert!(docs_context(&root, "").is_err());
         fs::remove_dir_all(root).unwrap();
@@ -871,8 +902,16 @@ mod tests {
                 .unwrap()
         };
         assert!(git(&["init", "-q"]).status.success());
-        assert!(git(&["config", "user.email", "tests@example.com"]).status.success());
-        assert!(git(&["config", "user.name", "Ryoko Tests"]).status.success());
+        assert!(
+            git(&["config", "user.email", "tests@example.com"])
+                .status
+                .success()
+        );
+        assert!(
+            git(&["config", "user.name", "Ryoko Tests"])
+                .status
+                .success()
+        );
         fs::write(root.join("keep.rs"), "pub fn keep() {}\n").unwrap();
         fs::write(root.join(".env"), "SECRET=one\n").unwrap();
         assert!(git(&["add", "-f", "."]).status.success());
