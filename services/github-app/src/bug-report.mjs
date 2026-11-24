@@ -38,6 +38,7 @@ export function createBugReportHandler({ token = '', repository = 'Flanxiyum001/
       for (const [key, value] of buckets) if (now - value.started >= WINDOW_MS) buckets.delete(key);
     }
 
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('invalid bug report');
     const title = cleanText(body?.title, 'title', MAX_TITLE, true);
     const description = cleanText(body?.description, 'description', MAX_TEXT, true);
     const expected = cleanText(body?.expected, 'expected behavior');
@@ -73,7 +74,8 @@ export function createBugReportHandler({ token = '', repository = 'Flanxiyum001/
     });
     let data = {};
     try { data = await response.json(); } catch {}
-    if (!response.ok || typeof data.html_url !== 'string' || !Number.isInteger(data.number)) {
+    if (!response.ok || typeof data.html_url !== 'string' || !Number.isInteger(data.number)
+      || data.html_url !== 'https://github.com/' + repository + '/issues/' + data.number) {
       const error = bad('GitHub issue creation failed (' + response.status + ')', response.status === 403 ? 403 : 502);
       throw error;
     }
