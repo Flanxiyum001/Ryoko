@@ -201,6 +201,7 @@ impl LspRegistry {
     }
 
     /// The server id that owns a language, if any.
+    #[cfg(test)]
     pub fn owner_of(&self, language: &str) -> Option<&str> {
         self.servers
             .iter()
@@ -218,9 +219,11 @@ pub fn registry_path(root: &Path) -> PathBuf {
     root.join(".ryoko/desktop/lsp.json")
 }
 
+#[cfg(test)]
 const WORKSPACE_REQUESTS: [&str; 2] = ["workspace/executeCommand", "workspace/symbol"];
 
 /// Decides which registered servers receive an outbound JSON-RPC message.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     /// The shell-level lifecycle: the multiplexer sends these per server.
@@ -235,6 +238,7 @@ pub enum Route {
     RyokoOnly,
 }
 
+#[cfg(test)]
 pub fn route_outbound(registry: &LspRegistry, language: &str, method: &str) -> Route {
     if matches!(method, "initialize" | "initialized" | "shutdown" | "exit") {
         return Route::Lifecycle;

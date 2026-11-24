@@ -82,6 +82,14 @@ references, rename, find in files, diagnostics and markers, formatting, integrat
 terminal, Git status and diff, configurable keybindings, command palette, autosave
 and crash recovery, workspace settings.
 
+The desktop workbench now ships three keymaps: Default, Vim and Emacs. Modal
+editing is delegated to Monaco adapters and loaded lazily; the workbench retains
+save and command chords. Single-modifier editor motions are not intercepted while
+focus is in the editor, so `C-b` and `C-p` reach the modal layer. A VS Code color
+theme or `settings.json` can be imported locally. Import is a parser boundary, not
+an extension host: only mapped hex colors, bounded token rules and a fixed set of
+editor options are accepted, and the result is stored in local storage.
+
 ## Review surface
 
 Agent changes appear as a diff against the proposal's base, with task, agent,
@@ -106,3 +114,17 @@ single text diff:
 
 Binary, rename, copy, deletion, mode-only and submodule changes are still
 excluded from text-hunk review; they are never guessed.
+
+The desktop session list exposes the same review actions without making the CLI
+mandatory: changed-file enumeration, a read-only Monaco diff, Detach, Discard and
+Merge. Merge requires a reviewed OCI sandbox image and calls the CLI's
+`review --accept --json` path after native confirmation; a failed validation
+leaves the checkout unchanged. Detach and Discard are explicit, separate actions.
+
+## Prompt context pins
+
+Agent prompts may pin `@file:path`, `@symbol:name`, `@docs:query`, `@docs`,
+`@git-diff` and `@selection`. The webview parser is presentational; the native
+resolver re-checks workspace containment, sensitive paths, symbol-index
+availability and byte limits before anything reaches a model. Context is wrapped
+as untrusted project text. An unresolved pin blocks the send.

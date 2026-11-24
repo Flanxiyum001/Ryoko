@@ -49,6 +49,7 @@ use crate::ui_capture::UiCapture;
 use ryoko_scripting::{
     PluginAgent, PluginHost, PluginLimits, PluginManifest, PluginPolicy, sha256_hex,
 };
+use serde::Serialize;
 
 /// Outline budget shared by the run and review agent contexts.
 const STRUCTURAL_CONTEXT_BYTES: usize = 5_000;
@@ -89,7 +90,7 @@ enum Commands {
     /// Inspect a project and build its offline validation image.
     Sandbox(SandboxArgs),
     /// Review published worktrees and accept, reject, or send feedback.
-    Review(ReviewArgs),
+    Review(Box<ReviewArgs>),
     /// Generate a structured summary of a published task's changes.
     Summarize(SummarizeArgs),
     /// Marketplace operations for extensions and skills.
@@ -711,6 +712,18 @@ struct ReviewArgs {
     /// Start with compact changed-file summary; press D to toggle full patch.
     #[arg(long)]
     compact: bool,
+    /// Validate and merge without prompting. Requires a passing sandboxed check.
+    #[arg(long, conflicts_with_all = ["release", "discard"])]
+    accept: bool,
+    /// Detach the published worktree from disk but keep its branch for later.
+    #[arg(long, conflicts_with_all = ["accept", "discard"])]
+    release: bool,
+    /// Discard the published worktree and delete its branch. Irreversible.
+    #[arg(long, conflicts_with_all = ["accept", "release"])]
+    discard: bool,
+    /// Print one machine-readable result object on stdout.
+    #[arg(long)]
+    json: bool,
     /// Published task to review. Required when several are waiting.
     #[arg(long)]
     task: Option<Uuid>,
@@ -964,7 +977,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Check(args) => check_worktree(args).await,
         Commands::Index(args) => index_workspace(args).await,
         Commands::Sandbox(args) => sandbox(args).await,
-        Commands::Review(args) => review(args).await,
+        Commands::Review(args) => review(*args).await,
         Commands::Summarize(args) => summarize(args).await,
         Commands::Mcp(args) => mcp_command(args).await,
         Commands::Connectors(args) => connectors_command(args).await,
@@ -2812,6 +2825,42 @@ fn report_merge_refusal(error: &WorktreeError, target: &str) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewMode {
+    Interactive,
+    Accept,
+    Release,
+    Discard,
+}
+
+fn review_mode(accept: bool, release: bool, discard: bool) -> Result<ReviewMode, Box<dyn Error>> {
+    match (accept, release, discard) {
+        (false, false, false) => Ok(ReviewMode::Interactive),
+        (true, false, false) => Ok(ReviewMode::Accept),
+        (false, true, false) => Ok(ReviewMode::Release),
+        (false, false, true) => Ok(ReviewMode::Discard),
+        _ => Err(cli_error(
+            "--accept, --release and --discard are mutually exclusive",
+        )),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReviewOutcome {
+    action: &'static str,
+    task_id: String,
+    branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    message: String,
+}
+
 async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
     let root = canonical_root(&args.repo)?;
     let manager = GitWorktreeManager::new(&root);
@@ -2822,6 +2871,54 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
         .collect();
     let record = select_record(&published, args.task)?;
     let session = manager.resume_worktree(record.session.id).await?;
+    let mode = review_mode(args.accept, args.release, args.discard)?;
+    match mode {
+        ReviewMode::Discard => {
+            manager.abandon_worktree(&session).await?;
+            let outcome = ReviewOutcome {
+                action: "discard",
+                task_id: session.id.to_string(),
+                branch: session.branch_name.clone(),
+                target: None,
+                merge_commit: None,
+                passed: None,
+                summary: None,
+                message: format!(
+                    "Discarded {}. The main checkout is untouched.",
+                    session.branch_name
+                ),
+            };
+            if args.json {
+                println!("{}", serde_json::to_string(&outcome)?);
+            } else {
+                println!("{}", outcome.message);
+            }
+            return Ok(());
+        }
+        ReviewMode::Release => {
+            manager.release_worktree(&session).await?;
+            let outcome = ReviewOutcome {
+                action: "release",
+                task_id: session.id.to_string(),
+                branch: session.branch_name.clone(),
+                target: None,
+                merge_commit: None,
+                passed: None,
+                summary: None,
+                message: format!(
+                    "Detached {}. Its branch is kept for a later review.",
+                    session.branch_name
+                ),
+            };
+            if args.json {
+                println!("{}", serde_json::to_string(&outcome)?);
+            } else {
+                println!("{}", outcome.message);
+            }
+            return Ok(());
+        }
+        ReviewMode::Interactive | ReviewMode::Accept => {}
+    }
     let target = args
         .target
         .clone()
@@ -2868,15 +2965,71 @@ async fn review(args: ReviewArgs) -> Result<(), Box<dyn Error>> {
     };
     let mut reader = BufReader::new(tokio::io::stdin());
 
-    println!(
-        "Reviewing {} against {target} (worktree {})",
-        session.branch_name,
-        session.path.display()
-    );
+    if !args.json {
+        println!(
+            "Reviewing {} against {target} (worktree {})",
+            session.branch_name,
+            session.path.display()
+        );
+    }
 
     let mut diff = manager.diff_worktree(&session, &target).await?;
     let mut report = validate_worktree(&validator, &session, &diff).await?;
     clean_after_check(&manager, &session).await;
+    if mode == ReviewMode::Accept {
+        if !report.passed {
+            let outcome = ReviewOutcome {
+                action: "accept",
+                task_id: session.id.to_string(),
+                branch: session.branch_name.clone(),
+                target: Some(target.clone()),
+                merge_commit: None,
+                passed: Some(false),
+                summary: Some(report.summary.clone()),
+                message: "Validation failed; the branch was not merged.".to_owned(),
+            };
+            if args.json {
+                println!("{}", serde_json::to_string(&outcome)?);
+            }
+            return Err(cli_error(
+                "cannot accept: the sandboxed pre-flight check is still failing",
+            ));
+        }
+        let receipt = manager.merge_worktree(&session, &target, &report).await?;
+        let mut message = format!(
+            "Merged {} into {} at {}",
+            receipt.source_branch, receipt.target_branch, receipt.merge_commit
+        );
+        if let Some(key) = &attest_key {
+            match attest_accepted_merge(&root, key, &receipt, &report, &provenance).await {
+                Ok(attested) => message.push_str(&format!("\n{attested}")),
+                Err(error) => message.push_str(&format!(
+                    "\nwarning: merge succeeded but attestation failed: {error}"
+                )),
+            }
+        }
+        if let Err(error) = manager.clean_worktree(&session).await {
+            message.push_str(&format!(
+                "\nwarning: merge succeeded but cleanup failed: {error}"
+            ));
+        }
+        let outcome = ReviewOutcome {
+            action: "accept",
+            task_id: session.id.to_string(),
+            branch: session.branch_name.clone(),
+            target: Some(target.clone()),
+            merge_commit: Some(receipt.merge_commit.clone()),
+            passed: Some(true),
+            summary: Some(report.summary.clone()),
+            message,
+        };
+        if args.json {
+            println!("{}", serde_json::to_string(&outcome)?);
+        } else {
+            println!("{}", outcome.message);
+        }
+        return Ok(());
+    }
     let mut refresh = false;
     let mut show_patch = !args.compact;
 
@@ -3996,6 +4149,14 @@ mod tests {
             .args(["init", "-q"])
             .output()
             .unwrap();
+        // A local empty value overrides any developer-global identity.
+        for key in ["user.name", "user.email"] {
+            std::process::Command::new("git")
+                .current_dir(root)
+                .args(["config", key, ""])
+                .output()
+                .unwrap();
+        }
         let error = git_identity(root).unwrap_err().to_string();
         assert!(error.contains("user.name"), "{error}");
     }
@@ -4347,5 +4508,41 @@ mod marketplace_browser_cli_tests {
                 MarketplaceCmds::List { json: true, .. }
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod review_mode_tests {
+    use super::*;
+
+    #[test]
+    fn review_modes_are_explicit_and_exclusive() {
+        assert_eq!(
+            review_mode(false, false, false).unwrap(),
+            ReviewMode::Interactive
+        );
+        assert_eq!(review_mode(true, false, false).unwrap(), ReviewMode::Accept);
+        assert_eq!(
+            review_mode(false, true, false).unwrap(),
+            ReviewMode::Release
+        );
+        assert_eq!(
+            review_mode(false, false, true).unwrap(),
+            ReviewMode::Discard
+        );
+        for (accept, release, discard) in [
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            assert!(review_mode(accept, release, discard).is_err());
+        }
+    }
+
+    #[test]
+    fn clap_rejects_combined_review_actions() {
+        assert!(Cli::try_parse_from(["ryoko", "review", "--accept", "--discard"]).is_err());
+        assert!(Cli::try_parse_from(["ryoko", "review", "--release", "--accept"]).is_err());
     }
 }

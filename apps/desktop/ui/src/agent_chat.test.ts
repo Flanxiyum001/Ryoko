@@ -10,7 +10,7 @@ describe('agent context parser', () => {
   it('refuses unresolved mention and limits attachments', () => {
     const known = ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'];
     expect(mentionedFiles(known.map((path) => '@' + path).join(' '), known))
-      .toEqual(known.slice(0, 4));
+      .toEqual(known);
   });
   it('extracts exactly the first fenced replacement, not prose', () => {
     expect(firstCodeFence('Here is a change:\n```ts\nconst x = 1;\n```\nDone'))

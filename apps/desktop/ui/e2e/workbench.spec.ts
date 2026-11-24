@@ -105,7 +105,8 @@ test('navigation exposes search and browse-only extensions', async ({ page }) =>
   await expect(page.locator('#searchInput')).toBeVisible();
   await page.getByRole('button', { name: 'Browse extensions', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Marketplace preview' })).toBeVisible();
-  await expect(page.getByText('Installing third-party code is disabled during alpha testing.', { exact: false })).toBeVisible();
+  await expect(page.getByText('remote installation and automatic policy changes stay disabled', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Install local extension…' })).toBeVisible();
   await page.getByRole('button', { name: 'Close', exact: true }).last().click();
   // Quick open intentionally requires an active workspace; verify the native
   // folder flow before expecting the palette to appear.
@@ -180,6 +181,25 @@ test('theme and layout choices persist across reloads', async ({ page }) => {
     const restored = await page.locator('#explorerPane').evaluate((pane) => pane.getBoundingClientRect().width);
     return Math.abs(restored - width);
   }).toBeLessThan(2);
+});
+
+test('Vim keymap mounts and persists across reloads', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#openSettings').click();
+  await page.locator('#settingsKeymap').selectOption('vim');
+  await expect(page.locator('#vimStatus')).toBeVisible();
+  await page.reload();
+  await expect(page.locator('#vimStatus')).toBeVisible();
+  await page.locator('#openSettings').click();
+  await expect(page.locator('#settingsKeymap')).toHaveValue('vim');
+});
+
+test('Emacs keymap applies without an unavailable fallback', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('#openSettings').click();
+  await page.locator('#settingsKeymap').selectOption('emacs');
+  await expect(page.locator('.toast-item').filter({ hasText: 'Editor keymap: Emacs' })).toBeVisible();
+  await expect(page.locator('.toast-error').filter({ hasText: 'Emacs keymap unavailable' })).toHaveCount(0);
 });
 
 test('explorer shows file-type icons and breadcrumbs for the active file', async ({ page }) => {
