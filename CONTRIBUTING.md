@@ -71,3 +71,7 @@ Ryoko's currently published source code is licensed under the **[Apache License,
 The Apache-2.0 license permits commercial use, including commercial products built using Ryoko, subject to its conditions. Previously released Apache-2.0 code cannot later be made exclusive merely by changing the license on a new release. Future separately developed commercial features or services may use different terms, but changing the licensing of another contributor's copyrighted work may require additional permission. No contributor license agreement or copyright assignment is required by this repository at present.
 
 This contribution policy does not authorize use of the Ryoko name, logos, or other trademarks beyond rights granted by applicable law.
+
+### Proposed future licensing transition
+
+A possible future transition to AGPL-3.0-only and a dual-licensing contributor agreement is under discussion in [the licensing proposal](docs/licensing/TRANSITION_PROPOSAL.md). **That proposal is not currently adopted.** The root `LICENSE` remains Apache-2.0, the contribution terms above remain in force, and no CLA is currently required or being collected. Any future change will be announced with a clear effective release boundary and a separately approved contribution process.
