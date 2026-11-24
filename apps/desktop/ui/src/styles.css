@@ -1397,3 +1397,26 @@ img.empty-mark { width: 112px; height: 112px; border-radius: 22px; object-fit: c
   font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .merge-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* In-app bug reporting */
+.bug-report-dialog {
+  width: min(640px, calc(100vw - 28px)); max-height: min(88vh, 860px); padding: 0;
+  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 45%); overflow: auto;
+}
+.bug-report-dialog::backdrop { background: rgb(0 0 0 / 68%); backdrop-filter: blur(5px); }
+.bug-report-form { display: flex; flex-direction: column; gap: 12px; padding: 18px; }
+.bug-report-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.bug-report-header h2 { margin: 0; font-size: 18px; font-weight: 650; }
+.bug-report-header p { margin: 5px 0 0; }
+.bug-report-field { display: flex; flex-direction: column; gap: 6px; }
+.bug-report-field label { color: var(--text); font-size: 12px; font-weight: 600; }
+.bug-report-input { width: 100%; min-width: 0; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font: inherit; font-size: 12px; outline: none; }
+.bug-report-input:focus { border-color: var(--accent); }
+.bug-report-field textarea { resize: vertical; min-height: 64px; }
+.bug-report-field input[type='url'] { min-height: 36px; }
+.bug-report-note { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 0; }
+.bug-report-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+.bug-report-result { border-top: 1px solid var(--border); padding-top: 10px; font-size: 12px; overflow-wrap: anywhere; }
+.bug-report-success { color: #9fd8b4; }
+.bug-report-url { color: var(--muted); margin: 6px 0; }
