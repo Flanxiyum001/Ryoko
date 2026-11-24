@@ -53,6 +53,15 @@ fn resolve_binary(name: &str) -> Result<PathBuf, String> {
                 return Ok(candidate);
             }
         }
+        // `tauri dev` builds the desktop crate in its own target directory
+        // (it is excluded from the workspace), while `ryoko-lsp` lands in the
+        // workspace `target/`. Debug builds also look there so a local
+        // `cargo build -p ryoko-native --bin ryoko-lsp` is picked up.
+        if cfg!(debug_assertions) {
+            if let Some(candidate) = find_in_ancestor_targets(&executable, &file) {
+                return Ok(candidate);
+            }
+        }
         return Err(format!(
             "ryoko-lsp was not found next to {}; build it with \
              `cargo build -p ryoko-native --bin ryoko-lsp` and point RYOKO_LSP_BIN at it",
@@ -62,6 +71,17 @@ fn resolve_binary(name: &str) -> Result<PathBuf, String> {
     // Registry commands are bare names resolved through PATH; spawn fails
     // loudly later if the operator never installed the server.
     Ok(PathBuf::from(&file))
+}
+
+/// Looks for `target/debug/<file>` or `target/release/<file>` in every
+/// ancestor directory of `start`, nearest first.
+fn find_in_ancestor_targets(start: &Path, file: &str) -> Option<PathBuf> {
+    start.ancestors().skip(1).find_map(|directory| {
+        ["debug", "release"]
+            .iter()
+            .map(|profile| directory.join("target").join(profile).join(file))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 fn current_executable_hint() -> String {
@@ -324,4 +344,27 @@ pub fn lsp_registry(state: State<'_, WorkspaceState>) -> Result<LspServerInfo, S
         registry,
         registry_path,
     })
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::find_in_ancestor_targets;
+    use std::fs;
+
+    #[test]
+    fn finds_workspace_build_from_a_nested_desktop_target() {
+        let root = std::env::temp_dir().join(format!("ryoko-lsp-resolve-{}", std::process::id()));
+        let workspace_bin = root.join("target/debug");
+        let desktop_bin = root.join("apps/desktop/src-tauri/target/debug");
+        fs::create_dir_all(&workspace_bin).unwrap();
+        fs::create_dir_all(&desktop_bin).unwrap();
+        fs::write(workspace_bin.join("ryoko-lsp"), b"").unwrap();
+        let exe = desktop_bin.join("ryoko-desktop");
+        assert_eq!(
+            find_in_ancestor_targets(&exe, "ryoko-lsp"),
+            Some(workspace_bin.join("ryoko-lsp"))
+        );
+        assert_eq!(find_in_ancestor_targets(&exe, "missing-binary"), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

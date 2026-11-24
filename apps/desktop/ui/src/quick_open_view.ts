@@ -4,7 +4,6 @@ import {
   nextQuickOpenSelection,
   type QuickOpenMatch,
 } from './quick_open_model';
-import './quick_open.css';
 
 const RECENT_PREFIX = 'ryoko.quickOpen.recent.v1:';
 const MAX_RECENTS = 20;

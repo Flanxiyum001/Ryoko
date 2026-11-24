@@ -16,7 +16,7 @@ test.beforeEach(async ({ page }) => {
         transformCallback: () => 1,
         unregisterCallback() {},
         async invoke(command: string, args: Record<string, string> = {}) {
-          if (command === 'plugin:dialog|open') return '/demo/workspace';
+          if (command === 'pick_workspace_folder') return '/demo/workspace';
           if (command === 'open_workspace') return { root: '/demo/workspace', name: 'workspace' };
           if (command === 'list_files') return Object.keys(files);
           if (command === 'read_file') { reads++; document.body.dataset.reads = String(reads); return files[args.path]; }

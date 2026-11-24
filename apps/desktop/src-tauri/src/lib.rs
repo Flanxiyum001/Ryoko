@@ -56,6 +56,7 @@ pub fn run() {
         .manage(debug_adapter::DebugState::default())
         .invoke_handler(tauri::generate_handler![
             workspace::open_workspace,
+            workspace::pick_workspace_folder,
             onboarding::onboarding_state,
             onboarding::onboarding_configure,
             onboarding::onboarding_remember_folder,

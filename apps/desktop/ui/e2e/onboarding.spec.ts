@@ -20,7 +20,7 @@ test('first launch configures a local provider, opens a folder and prepares a re
             setup.recentFolders.unshift(String(args.path));
             return { ...setup };
           }
-          if (command === 'plugin:dialog|open') return '/tmp/example-project';
+          if (command === 'pick_workspace_folder') return '/tmp/example-project';
           if (command === 'open_workspace') return { root: '/tmp/example-project', name: 'example-project' };
           if (command === 'list_files') return ['README.md'];
           if (command === 'git_changes') return { isRepository: false, entries: [] };

@@ -30,5 +30,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 
+# The Linux folder picker is a GTK dialog made transient for the main window;
+# gtk is already part of the Tauri dependency tree on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]

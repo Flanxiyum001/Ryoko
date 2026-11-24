@@ -34,6 +34,83 @@ pub(crate) fn current_root(state: &State<'_, WorkspaceState>) -> Result<PathBuf,
         .ok_or_else(|| "no workspace is open".to_owned())
 }
 
+/// Shows a native folder picker that stays attached to the Ryoko window.
+///
+/// The dialog plugin only parents its picker on Windows and macOS. On Linux an
+/// unparented GTK dialog can open behind the main window or on another
+/// workspace, which looks like the button does nothing. Here Linux gets a
+/// modal GTK chooser that is transient for the main window instead.
+#[tauri::command]
+pub async fn pick_workspace_folder(
+    window: tauri::WebviewWindow,
+    title: Option<String>,
+) -> Result<Option<String>, String> {
+    let title = title.unwrap_or_else(|| "Open Folder".to_owned());
+    #[cfg(target_os = "linux")]
+    {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let target = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let _ = sender.send(linux_pick_folder(&target, &title));
+            })
+            .map_err(|error| format!("cannot show the folder picker: {error}"))?;
+        tauri::async_runtime::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|error| format!("folder picker failed: {error}"))?
+            .map_err(|_| "folder picker closed unexpectedly".to_owned())?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let picked = tauri::async_runtime::spawn_blocking(move || {
+            window
+                .dialog()
+                .file()
+                .set_parent(&window)
+                .set_title(title)
+                .blocking_pick_folder()
+        })
+        .await
+        .map_err(|error| format!("folder picker failed: {error}"))?;
+        picked
+            .map(|path| {
+                path.into_path()
+                    .map(|path| path.display().to_string())
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pick_folder(window: &tauri::WebviewWindow, title: &str) -> Result<Option<String>, String> {
+    use gtk::prelude::*;
+
+    let parent = window
+        .gtk_window()
+        .map_err(|error| format!("cannot find the main window: {error}"))?;
+    let dialog = gtk::FileChooserDialog::with_buttons(
+        Some(title),
+        Some(&parent),
+        gtk::FileChooserAction::SelectFolder,
+        &[
+            ("_Cancel", gtk::ResponseType::Cancel),
+            ("_Open", gtk::ResponseType::Accept),
+        ],
+    );
+    dialog.set_modal(true);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+    let response = dialog.run();
+    let path = (response == gtk::ResponseType::Accept)
+        .then(|| dialog.filename())
+        .flatten()
+        .map(|path| path.display().to_string());
+    // SAFETY: the dialog is owned here, was created on this (main) thread and
+    // is not used after being destroyed.
+    unsafe { dialog.destroy() };
+    Ok(path)
+}
+
 #[tauri::command]
 pub fn open_workspace(
     path: String,
