@@ -80,6 +80,8 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     mcp: config?.mcp && typeof config.mcp === 'object' ? config.mcp : null,
     bugReportToken: config?.bugReportToken || '',
     bugReportRepo: config?.bugReportRepo || 'Flanxiyum001/Ryoko',
+    bugReportAllowedOrigins: (config?.bugReportAllowedOrigins || ['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost', 'http://localhost:1420']).map(String),
+    bugReportFetch: config?.bugReportFetch,
   };
   const client = broker || new GitHubBroker(config || {});
   const pagesRoot = frontendPath || resolve('apps/desktop');
@@ -92,7 +94,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
   const desktopSessions = new Map();
   const pipelineJobs = new Map();
   const isSecure = new URL(settings.origin).protocol === 'https:';
-  const submitBugReport = createBugReportHandler({ token: settings.bugReportToken, repository: settings.bugReportRepo });
+  const submitBugReport = createBugReportHandler({ token: settings.bugReportToken, repository: settings.bugReportRepo, fetchImpl: settings.bugReportFetch });
 
   function sessionFor(req) {
     const id = cookieId(req);
@@ -205,11 +207,30 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
     if (req.method === 'GET' && path === '/health') {
       return json(res, 200, { service: 'ryoko-github-app', status: 'ok', configured: Boolean(client.configured) });
     }
-    if (req.method === 'POST' && path === '/api/bug-report') {
-      if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) throw bad('JSON content type required', 415);
-      const body = await jsonBody(req);
-      const result = await submitBugReport(req, body);
-      return json(res, 201, result);
+    if (path === '/api/bug-report') {
+      const origin = String(req.headers.origin || '');
+      const allowed = settings.bugReportAllowedOrigins.includes(origin);
+      if (req.method === 'OPTIONS') {
+        if (!allowed) throw bad('origin not allowed', 403);
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': origin,
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Max-Age': '600',
+          'Vary': 'Origin',
+        });
+        return res.end();
+      }
+      if (req.method === 'POST') {
+        if (origin && allowed) {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Vary', 'Origin');
+        }
+        if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) throw bad('JSON content type required', 415);
+        const body = await jsonBody(req);
+        const result = await submitBugReport(req, body);
+        return json(res, 201, result);
+      }
     }
     if (req.method === 'POST' && path === '/webhooks/github') {
       if (!settings.webhookSecret) throw bad('webhook secret not configured', 503);
