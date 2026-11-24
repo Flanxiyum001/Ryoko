@@ -43,6 +43,9 @@ The chat prompt accepts `@file:path`, `@symbol:name`, `@docs:query`, `@docs`,
 tokens for display; the native `context_mentions` module is the trust boundary.
 It rejects paths outside the workspace, sensitive filenames, malformed symbol or
 docs queries, more than eight pins and more than 128 KiB of combined context.
+The workspace root and candidate paths are canonicalized before containment
+checks, so macOS temporary-directory aliases and Windows short paths cannot
+produce false escapes.
 File bodies are capped at 32 KiB, docs sections at 4 KiB, and the working-tree
 diff at 64 KiB after sensitive tracked paths are removed. Symbols are read from the existing SQLite index; docs come from
 `.ryoko/memory/*.md` and a bounded `docs/**/*.md` walk. Project text is wrapped
