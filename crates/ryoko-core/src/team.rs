@@ -84,6 +84,161 @@ pub fn standard_team() -> Vec<TeamMember> {
     ]
 }
 
+/// Task complexity classification for adaptive team sizing.
+///
+/// This determines whether a goal should use the fast single-agent path
+/// or the full multi-agent DAG. The classifier is conservative: it defaults
+/// to the full team unless the goal is clearly a small, localized change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskComplexity {
+    /// Single developer, single worktree, no review gates.
+    #[default]
+    Simple,
+    /// Full multi-agent DAG with independent reviews and integration.
+    Complex,
+}
+
+impl TaskComplexity {
+    /// Classifies a goal by heuristic signals. Anything unrecognised defaults
+    /// to Complex so the full review pipeline is used for safety.
+    pub fn from_goal(goal: &str) -> Self {
+        let lower = goal.to_ascii_lowercase();
+
+        // Strong signals for simple changes: localized, single-file, mechanical.
+        let simple_keywords = [
+            "rename",
+            "typo",
+            "fix typo",
+            "spelling",
+            "format",
+            "reformat",
+            "lint",
+            "clippy",
+            "whitespace",
+            "trailing",
+            "import",
+            "unused",
+            "dead code",
+            "comment",
+            "doc",
+            "readme",
+            "changelog",
+            "version",
+            "bump",
+            "update dependency",
+            "update a dependency",
+            "upgrade",
+            "downgrade",
+            "pin",
+            "unpin",
+            "add test",
+            "extend test",
+            "test case",
+            "assert",
+            "expect",
+            "mock",
+            "fixture",
+            "constant",
+            "magic number",
+            "hardcoded",
+            "inline",
+            "extract",
+            "move",
+            "delete",
+            "remove",
+            "cleanup",
+            "refactor",
+            "simplify",
+            "local variable",
+            "function name",
+            "variable name",
+            "field name",
+            "enum variant",
+            "struct field",
+        ];
+
+        // Strong signals for complex changes: cross-cutting, architectural, new features.
+        let complex_keywords = [
+            "architecture",
+            "architect",
+            "design",
+            "system",
+            "infrastructure",
+            "platform",
+            "framework",
+            "migration",
+            "refactor",
+            "rewrite",
+            "redesign",
+            "new feature",
+            "add feature",
+            "implement",
+            "build",
+            "create",
+            "develop",
+            "integrate",
+            "integration",
+            "api",
+            "endpoint",
+            "service",
+            "database",
+            "schema",
+            "auth",
+            "authentication",
+            "authorization",
+            "security",
+            "permission",
+            "role",
+            "deploy",
+            "deployment",
+            "ci",
+            "cd",
+            "pipeline",
+            "monitoring",
+            "observability",
+            "logging",
+            "tracing",
+            "metrics",
+            "dashboard",
+            "ui",
+            "ux",
+            "interface",
+            "component",
+            "screen",
+            "page",
+            "layout",
+            "responsive",
+            "accessibility",
+            "performance",
+            "optimize",
+            "scale",
+            "scalability",
+            "concurrency",
+            "async",
+            "parallel",
+            "distributed",
+            "microservice",
+            "module",
+            "package",
+            "crate",
+            "library",
+            "plugin",
+            "extension",
+        ];
+
+        let is_simple = simple_keywords.iter().any(|kw| lower.contains(kw));
+        let is_complex = complex_keywords.iter().any(|kw| lower.contains(kw));
+
+        // If both match, or neither matches, default to Complex for safety.
+        // Only classify as Simple when there's a clear simple signal and no complex signal.
+        if is_simple && !is_complex {
+            TaskComplexity::Simple
+        } else {
+            TaskComplexity::Complex
+        }
+    }
+}
+
 /// Deterministic project decomposition. The caller still validates this DAG
 /// before executing anything and requires independent approval for mutations.
 pub fn application_plan(goal: &str) -> Vec<Task> {
@@ -731,6 +886,70 @@ mod tests {
                 .unwrap()
                 .assigned_to;
             assert!(matches!(role, AgentRole::QaEngineer | AgentRole::Custom(_)));
+        }
+    }
+
+    #[test]
+    fn task_complexity_classifies_simple_changes() {
+        let simple_goals = [
+            "fix a typo in the readme",
+            "rename a local variable",
+            "remove dead code",
+            "add a test case",
+            "update a dependency",
+            "format the code",
+            "fix clippy warning",
+            "clean up whitespace",
+            "update version number",
+            "add a constant",
+        ];
+        for goal in simple_goals {
+            assert_eq!(
+                TaskComplexity::from_goal(goal),
+                TaskComplexity::Simple,
+                "expected simple for: {goal}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_complexity_classifies_complex_changes() {
+        let complex_goals = [
+            "build a new authentication system",
+            "design the architecture for a dashboard",
+            "implement a new API endpoint",
+            "add a database migration",
+            "refactor the entire codebase",
+            "deploy to kubernetes",
+            "create a new microservice",
+            "integrate with a payment provider",
+            "optimize database performance",
+            "add monitoring and observability",
+        ];
+        for goal in complex_goals {
+            assert_eq!(
+                TaskComplexity::from_goal(goal),
+                TaskComplexity::Complex,
+                "expected complex for: {goal}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_complexity_defaults_to_complex_when_ambiguous() {
+        // Goals with both simple and complex signals, or neither, default to Complex
+        let ambiguous_goals = [
+            "refactor the parser",   // "refactor" is in both lists
+            "implement a small fix", // "implement" is complex, "fix" is simple
+            "do something",          // no clear signal
+            "change the code",       // vague
+        ];
+        for goal in ambiguous_goals {
+            assert_eq!(
+                TaskComplexity::from_goal(goal),
+                TaskComplexity::Complex,
+                "expected complex (default) for: {goal}"
+            );
         }
     }
 }

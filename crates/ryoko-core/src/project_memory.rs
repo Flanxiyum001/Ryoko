@@ -14,6 +14,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{CoreError, CoreResult};
+use serde::Serialize;
 
 const MAX_MEMORY_BYTES: usize = 256 * 1024;
 const MAX_ENTRY_BYTES: usize = 8 * 1024;
@@ -21,7 +22,7 @@ const MAX_ENTRIES: usize = 100;
 const MAX_TITLE_CHARS: usize = 120;
 
 /// A category of persistent project memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum MemoryKind {
     Decision,
     Convention,
@@ -47,14 +48,14 @@ impl MemoryKind {
 }
 
 /// One `## ` section from a memory file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoryEntry {
     pub title: String,
     pub body: String,
 }
 
 /// Loaded project memory. Missing files are an empty section, not an error.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ProjectMemory {
     pub decisions: Vec<MemoryEntry>,
     pub conventions: Vec<MemoryEntry>,
@@ -122,7 +123,7 @@ impl ProjectMemory {
     }
 
     /// Records a human review rejection at the top of `rejections.md`.
-    /// Writes are private on Unix and keep the newest entries when the file
+    /// Writes are private on Unix and keeps the newest entries when the file
     /// reaches its size cap.
     pub fn append_rejection(root: &Path, title: &str, body: &str) -> CoreResult<()> {
         let root = canonical_root(root)?;
@@ -142,6 +143,62 @@ impl ProjectMemory {
         let body = truncate(body.trim(), MAX_ENTRY_BYTES);
         let mut content = format!("## {title}\n{body}\n\n");
         content.push_str(&existing);
+        write_private(&path, &truncate(&content, MAX_MEMORY_BYTES))
+    }
+
+    /// Records an architectural decision at the end of `decisions.md`.
+    /// Decisions are stored chronologically (oldest first) to preserve context.
+    /// Writes are private on Unix and keeps the newest entries when the file
+    /// reaches its size cap.
+    pub fn append_decision(root: &Path, title: &str, body: &str) -> CoreResult<()> {
+        let root = canonical_root(root)?;
+        let directory = ensure_memory_dir(&root)?;
+        let path = directory.join(MemoryKind::Decision.file());
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(memory_error(format!(
+                "{} must not be a symlink",
+                path.display()
+            )));
+        }
+        let existing = read_memory_file(&path)?.unwrap_or_default();
+        let title = clean_title(title);
+        let body = truncate(body.trim(), MAX_ENTRY_BYTES);
+        let mut content = existing;
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&format!("\n## {title}\n{body}\n"));
+        write_private(&path, &truncate(&content, MAX_MEMORY_BYTES))
+    }
+
+    /// Records a codebase convention at the end of `conventions.md`.
+    /// Conventions are stored chronologically (oldest first) to preserve context.
+    /// Writes are private on Unix and keeps the newest entries when the file
+    /// reaches its size cap.
+    pub fn append_convention(root: &Path, title: &str, body: &str) -> CoreResult<()> {
+        let root = canonical_root(root)?;
+        let directory = ensure_memory_dir(&root)?;
+        let path = directory.join(MemoryKind::Convention.file());
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(memory_error(format!(
+                "{} must not be a symlink",
+                path.display()
+            )));
+        }
+        let existing = read_memory_file(&path)?.unwrap_or_default();
+        let title = clean_title(title);
+        let body = truncate(body.trim(), MAX_ENTRY_BYTES);
+        let mut content = existing;
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&format!("\n## {title}\n{body}\n"));
         write_private(&path, &truncate(&content, MAX_MEMORY_BYTES))
     }
 }
@@ -418,5 +475,77 @@ mod tests {
         assert_eq!(memory.rejections.len(), 1);
         assert!(memory.rejections[0].title.chars().count() <= MAX_TITLE_CHARS);
         assert!(memory.rejections[0].body.len() <= MAX_ENTRY_BYTES);
+    }
+
+    #[test]
+    fn append_decision_appends_chronologically_and_writes_private_file() {
+        let dir = TempDir::new().unwrap();
+        ProjectMemory::append_decision(
+            dir.path(),
+            "First decision",
+            "Use SQLite for local storage.",
+        )
+        .unwrap();
+        ProjectMemory::append_decision(dir.path(), "Second decision", "Adopt Rust 2024 edition.")
+            .unwrap();
+        let memory = ProjectMemory::load(dir.path()).unwrap();
+        assert_eq!(memory.decisions.len(), 2);
+        assert_eq!(memory.decisions[0].title, "First decision");
+        assert!(memory.decisions[0].body.contains("Use SQLite"));
+        assert_eq!(memory.decisions[1].title, "Second decision");
+        assert!(memory.decisions[1].body.contains("Rust 2024"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join(".ryoko/memory/decisions.md"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn append_convention_appends_chronologically_and_writes_private_file() {
+        let dir = TempDir::new().unwrap();
+        ProjectMemory::append_convention(dir.path(), "Formatting", "Run cargo fmt before commit.")
+            .unwrap();
+        ProjectMemory::append_convention(dir.path(), "Testing", "All new code must have tests.")
+            .unwrap();
+        let memory = ProjectMemory::load(dir.path()).unwrap();
+        assert_eq!(memory.conventions.len(), 2);
+        assert_eq!(memory.conventions[0].title, "Formatting");
+        assert!(memory.conventions[0].body.contains("cargo fmt"));
+        assert_eq!(memory.conventions[1].title, "Testing");
+        assert!(memory.conventions[1].body.contains("must have tests"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join(".ryoko/memory/conventions.md"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn append_decision_and_convention_reject_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".ryoko/memory")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            dir.path().join(".ryoko/memory/decisions.md"),
+        )
+        .unwrap();
+        assert!(ProjectMemory::append_decision(dir.path(), "title", "body").is_err());
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".ryoko")).unwrap();
+        assert!(ProjectMemory::append_convention(dir.path(), "title", "body").is_err());
     }
 }

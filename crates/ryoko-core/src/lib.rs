@@ -83,7 +83,8 @@ pub use summary::{
 };
 pub use symbol_edit::{SymbolEdit, materialize_symbol_edits};
 pub use team::{
-    DynamicPlan, GoalSignals, VERIFICATION_METADATA, dynamic_plan, dynamic_plan_with_reviews,
+    DynamicPlan, GoalSignals, TaskComplexity, VERIFICATION_METADATA, dynamic_plan,
+    dynamic_plan_with_reviews,
 };
 pub use validation::{AllowAllValidator, ChangeValidator, StagedChanges, ValidationReport};
 pub use workspace::{InMemoryWorkspaceProvider, PullRequest, WorkspaceLease, WorkspaceProvider};
