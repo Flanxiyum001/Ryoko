@@ -206,6 +206,7 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       return json(res, 200, { service: 'ryoko-github-app', status: 'ok', configured: Boolean(client.configured) });
     }
     if (req.method === 'POST' && path === '/api/bug-report') {
+      if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) throw bad('JSON content type required', 415);
       const body = await jsonBody(req);
       const result = await submitBugReport(req, body);
       return json(res, 201, result);
