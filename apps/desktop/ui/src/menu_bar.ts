@@ -78,6 +78,7 @@ export const MENUS: readonly MenuDefinition[] = [
     label: 'Help',
     entries: [
       { command: 'help.welcome' },
+      { command: 'help.reportBug' },
       { command: 'help.keyboardShortcuts' },
       { separator: true },
       { command: 'help.checkForUpdates' },
