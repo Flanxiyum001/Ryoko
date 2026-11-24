@@ -29,8 +29,8 @@ mod terminal;
 mod terminal_decode;
 mod updater;
 mod workbench;
-mod worktree_ops;
 mod workspace;
+mod worktree_ops;
 
 use tauri::Manager;
 

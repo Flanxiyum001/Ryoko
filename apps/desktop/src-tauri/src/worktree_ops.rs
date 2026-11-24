@@ -53,8 +53,14 @@ struct PublishedSession {
 
 pub(crate) fn valid_task_id(task_id: &str) -> bool {
     task_id.len() == 36
-        && task_id.chars().all(|character| character.is_ascii_hexdigit() || character == '-')
-        && task_id.chars().filter(|character| *character == '-').count() == 4
+        && task_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == '-')
+        && task_id
+            .chars()
+            .filter(|character| *character == '-')
+            .count()
+            == 4
 }
 
 pub(crate) fn valid_target_branch(branch: &str) -> bool {
@@ -90,8 +96,8 @@ fn published_session(root: &Path, task_id: &str) -> Result<PublishedSession, Str
     if !valid_task_id(task_id) {
         return Err("invalid agent session identifier".to_owned());
     }
-    let database =
-        session_state_path(root)?.ok_or_else(|| "no agent session store is available".to_owned())?;
+    let database = session_state_path(root)?
+        .ok_or_else(|| "no agent session store is available".to_owned())?;
     let connection = Connection::open_with_flags(
         database,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -108,9 +114,7 @@ fn published_session(root: &Path, task_id: &str) -> Result<PublishedSession, Str
         return Err("only published agent sessions can be reviewed or merged".to_owned());
     }
     if !valid_target_branch(&branch)
-        || (!base_branch.is_empty()
-            && base_branch != "HEAD"
-            && !valid_target_branch(&base_branch))
+        || (!base_branch.is_empty() && base_branch != "HEAD" && !valid_target_branch(&base_branch))
     {
         return Err("agent session has an invalid branch name".to_owned());
     }
@@ -250,8 +254,7 @@ pub async fn list_agent_session_changes(
         let mut changes = parse_numstat(&text)?;
         for change in &mut changes {
             safe_join(&root, &change.path)?;
-            let original =
-                blob_exists(&root, &format!("{base}:{}", change.path)).unwrap_or(false);
+            let original = blob_exists(&root, &format!("{base}:{}", change.path)).unwrap_or(false);
             let modified =
                 blob_exists(&root, &format!("{}:{}", session.branch, change.path)).unwrap_or(false);
             change.status = if change.status == "binary" {

@@ -61,13 +61,20 @@ fn read_manifest(path: &Path, root: &Path) -> Option<InstalledExtension> {
     }
     let text = fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let field = |name: &str| value.get(name).and_then(|entry| entry.as_str()).unwrap_or("");
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(|entry| entry.as_str())
+            .unwrap_or("")
+    };
     let id = field("id");
     let kind = field("kind");
     if id.is_empty()
         || id.len() > 64
         || !id.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || "._-".contains(character)
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || "._-".contains(character)
         })
         || !matches!(kind, "linter" | "context" | "agent")
     {
@@ -100,8 +107,7 @@ fn read_manifest(path: &Path, root: &Path) -> Option<InstalledExtension> {
 
 pub(crate) fn installed_extensions(root: &Path) -> Vec<InstalledExtension> {
     let directory = extension_root(root);
-    if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
+    if fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Vec::new();
     }
     let Ok(entries) = fs::read_dir(&directory) else {
@@ -133,11 +139,7 @@ pub fn list_installed_extensions(
     Ok(installed_extensions(&root))
 }
 
-fn run_install(
-    root: &Path,
-    source: &Path,
-    sha256: Option<&str>,
-) -> Result<String, String> {
+fn run_install(root: &Path, source: &Path, sha256: Option<&str>) -> Result<String, String> {
     let cli = resolve_cli(root)?;
     let mut command = Command::new(cli);
     command
@@ -210,11 +212,9 @@ pub async fn install_wasi_extension(
     if current_root(&state)? != root {
         return Err("workspace changed while awaiting permission".to_owned());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        run_install(&root, &source, sha256.as_deref())
-    })
-    .await
-    .map_err(|_| "extension installation worker failed".to_owned())?
+    tauri::async_runtime::spawn_blocking(move || run_install(&root, &source, sha256.as_deref()))
+        .await
+        .map_err(|_| "extension installation worker failed".to_owned())?
 }
 
 #[cfg(test)]
