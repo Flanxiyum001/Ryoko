@@ -1289,6 +1289,65 @@ interface MergeOptions {
   checkCommand: string;
 }
 
+function promptFolderPath(): Promise<string | null> {
+  // Fallback for Linux desktops where the native GTK/portal folder picker
+  // never appears (for example some Wayland or tiling window managers).
+  return new Promise((resolve) => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'merge-dialog';
+    dialog.setAttribute('aria-label', 'Open folder by path');
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    form.className = 'merge-form';
+    const heading = document.createElement('h2');
+    heading.textContent = 'Open folder by path';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.placeholder = '/home/you/projects/my-app';
+    input.setAttribute('aria-label', 'Absolute folder path');
+    const actions = document.createElement('div');
+    actions.className = 'merge-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button ghost compact';
+    cancel.textContent = 'Cancel';
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.className = 'button primary compact';
+    submit.textContent = 'Open';
+    actions.append(cancel, submit);
+    form.append(heading, input, actions);
+    dialog.append(form);
+    let done = false;
+    const finish = (value: string | null) => {
+      if (done) return;
+      done = true;
+      dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = input.value.trim();
+      finish(value ? value : null);
+    });
+    cancel.addEventListener('click', () => finish(null));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      finish(null);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+  });
+}
+
+async function openFolderByPath(): Promise<void> {
+  const path = await promptFolderPath();
+  if (path) await openFolder(path);
+}
+
 function promptMergeOptions(session: AgentSession): Promise<MergeOptions | null> {
   return new Promise((resolve) => {
     const dialog = document.createElement('dialog');
@@ -2761,6 +2820,9 @@ editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyO, () => {
 openFolderButton.addEventListener('click', () => {
   void openFolder();
 });
+element<HTMLButtonElement>('welcomeOpenPath').addEventListener('click', () => {
+  void openFolderByPath();
+});
 saveButton.addEventListener('click', () => {
   void saveCurrent();
 });
@@ -3386,6 +3448,7 @@ const definitions: WorkbenchCommand[] = [
   { id: 'workbench.commandPalette', category: 'View', title: 'Command Palette…', run: () => palette.open() },
   { id: 'workbench.quickOpen', category: 'File', title: 'Go to File…', run: () => quickOpen.open() },
   { id: 'workspace.openFolder', category: 'File', title: 'Open Folder…', run: () => openFolderButton.click() },
+  { id: 'workspace.openFolderByPath', category: 'File', title: 'Open Folder by Path…', run: () => { void openFolderByPath(); } },
   { id: 'editor.save', category: 'File', title: 'Save', run: () => saveButton.click(), enabled: () => !saveButton.disabled },
   { id: 'editor.close', category: 'File', title: 'Close Editor', run: () => { if (state.current) closeOpenFile(state.current.path); }, enabled: () => !!state.current },
   { id: 'workbench.settings', category: 'Preferences', title: 'Open Settings', run: () => openSettings.click() },
