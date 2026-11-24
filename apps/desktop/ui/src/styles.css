@@ -1280,6 +1280,8 @@ img.empty-mark { width: 112px; height: 112px; border-radius: 22px; object-fit: c
 /* Onboarding, rich welcome and transient notification polish. */
 .brand-mark { overflow: hidden; background: #111827; }
 .brand-mark img { width: 100%; height: 100%; display: block; border-radius: inherit; }
+.empty-mark { overflow: hidden; border-radius: 16px; }
+.empty-mark img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .empty-mark { width: 70px; height: 70px; flex: 0 0 70px; }
 .empty-mark img { display: block; width: 100%; height: 100%; border-radius: 17px; }
 .welcome-content { width: min(860px, 100%); }

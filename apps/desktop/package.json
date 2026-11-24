@@ -12,7 +12,7 @@
     "test": "vitest run",
     "bench:quick-open": "vitest run --config vitest.bench.config.ts",
     "tauri": "tauri",
-    "icons": "tauri icon ui/public/ryoko-mark.svg",
+    "icons": "tauri icon ui/public/ryoko-logo.png",
     "test:ui": "playwright test"
   },
   "dependencies": {
