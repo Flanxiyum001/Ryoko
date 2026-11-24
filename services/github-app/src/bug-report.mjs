@@ -6,7 +6,7 @@ const MAX_REPORTS_PER_WINDOW = 5;
 const WINDOW_MS = 60 * 60 * 1000;
 
 function validRepository(value) {
-  if (typeof value !== 'string' || !/^[-\\w.]+\/[-\\w.]+$/.test(value)) return false;
+  if (typeof value !== 'string' || !/^[-\w.]+\/[-\w.]+$/.test(value)) return false;
   const [owner, name] = value.split('/');
   return owner !== '.' && owner !== '..' && name !== '.' && name !== '..';
 }
