@@ -47,6 +47,32 @@ Open http://127.0.0.1:4173, choose Connect GitHub, install the App on selected r
 
 The broker disables OAuth login unless RYOKO_ALLOWED_USERS is populated. For public hosting use HTTPS and restrict access at the reverse proxy. This service does not terminate TLS itself. The in-memory sessions, proposals and webhook events are not durable across restarts; production requires a persistent encrypted session store, background delivery processing, token rotation and rate limiting.
 
+## In-app bug report endpoint (experimental)
+
+The broker also exposes `POST /api/bug-report` for the native client's future
+reporting UI. This endpoint does not require a GitHub sign-in. It creates an
+issue in the configured repository using a server-only GitHub token and adds the
+`bug` label. It accepts JSON fields `title`, `description`, optional
+`expected`, `actual`, `steps`, `severity`, `version`, `os`, and
+`diagnostics`. The endpoint enforces bounded field sizes and an in-memory
+limit of five reports per socket IP per hour.
+
+Configure the backend with a dedicated fine-grained token scoped only to the
+target repository with Issues: write permission:
+
+    export RYOKO_BUG_REPORT_GITHUB_TOKEN="<server-only-token>"
+    export RYOKO_BUG_REPORT_REPOSITORY="Flanxiyum001/Ryoko"
+    export RYOKO_BUG_REPORT_ALLOWED_ORIGINS="tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost:1420"
+
+Do not put the token in desktop code, frontend bundles, or logs. The endpoint
+currently has an in-memory rate limiter; public production deployment should
+add a trusted-proxy configuration, distributed rate limiting and abuse controls
+before exposing it broadly. The desktop Help menu now includes Report a Bug;
+users paste the deployed endpoint URL into the dialog once, and it is stored
+locally for subsequent reports. The UI sends only form fields and version/OS
+metadata; it does not attach logs or project files. Configure allowed origins
+for the deployed endpoint to match your Tauri target and development origin.
+
 ## 3. Connect the Rust CLI for real Mission Control worktree status
 
 When the broker runs on the same trusted machine:

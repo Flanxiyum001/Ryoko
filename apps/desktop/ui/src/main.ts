@@ -13,6 +13,7 @@ import { registerMonacoCapabilities } from './lsp_bridge';
 import { CommandRegistry, formatChord, type WorkbenchCommand } from './commands';
 import { mountCommandPalette } from './command_palette';
 import { mountUpdates } from './update_view';
+import { mountBugReporter } from './bug_report';
 import { mountMenuBar } from './menu_bar';
 import { DEFAULT_LAYOUT, loadLayout, resizeBy, saveLayout } from './layout_state';
 import { fileIconElement } from './file_icons';
@@ -280,6 +281,7 @@ const lspPills = element('lspPills');
 const changesSummary = element('changesSummary');
 const changesList = element('changesList');
 const notify = createNotifier();
+const bugReporter = mountBugReporter({ setStatus: (message: string) => notify(message) });
 const usageMeter = element('usageMeter');
 const reviewInboxList = element('reviewInboxList');
 const reviewInboxCount = element('reviewInboxCount');
@@ -3415,6 +3417,7 @@ const definitions: WorkbenchCommand[] = [
   { id: 'workbench.debug', category: 'Run', title: 'Toggle Debug Panel', run: () => showBottom('debug') },
   { id: 'terminal.show', category: 'Terminal', title: 'Show Terminal', run: () => showBottom('terminal') },
   { id: 'help.welcome', category: 'Help', title: 'Welcome', run: showWelcome },
+  { id: 'help.reportBug', category: 'Help', title: 'Report a Bug…', run: () => bugReporter.open() },
   {
     id: 'help.keyboardShortcuts',
     category: 'Help',
