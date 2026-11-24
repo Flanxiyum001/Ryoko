@@ -45,21 +45,9 @@ jobs:
 
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo timeout 180 apt-get \
-            -o Acquire::ForceIPv4=true \
-            -o Acquire::http::Timeout=20 \
-            -o Acquire::https::Timeout=20 \
-            -o Acquire::Retries=2 \
-            update || echo "apt update did not finish; using cached indexes"
-          sudo timeout 900 apt-get \
-            -o Acquire::ForceIPv4=true \
-            -o Acquire::http::Timeout=20 \
-            -o Acquire::https::Timeout=20 \
-            -o Acquire::Retries=2 \
-            install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
             librsvg2-dev patchelf libssl-dev build-essential
 
       - name: Record native toolchain
