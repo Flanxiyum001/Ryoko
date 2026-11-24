@@ -53,6 +53,7 @@ test('bug reports are rate limited per client address', async () => {
   let calls = 0;
   const submit = createBugReportHandler({
     token: 'test-token',
+    repository: 'owner/repo',
     fetchImpl: async () => {
       calls++;
       return new Response(JSON.stringify({ number: calls, title: valid.title, html_url: 'https://github.com/owner/repo/issues/' + calls }), { status: 201 });
