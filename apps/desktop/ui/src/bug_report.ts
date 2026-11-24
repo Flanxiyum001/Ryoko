@@ -46,7 +46,7 @@ export function mountBugReporter({ setStatus }) {
   form.method = 'dialog';
   const header = element('header', 'bug-report-header');
   const heading = element('div');
-  heading.append(element('h2', '', 'Report a bug'), element('p', 'hint', 'Tell us what went wrong. Review your report before sending.'));
+  const reportHeading = element('h2', '', 'Report a bug');\n  reportHeading.id = 'bug-report-title';\n  heading.append(reportHeading, element('p', 'hint', 'Tell us what went wrong. Review your report before sending.'));
   const close = element('button', 'button ghost compact', 'Close') as HTMLButtonElement;
   close.type = 'button';
   close.addEventListener('click', () => dialog.close());
