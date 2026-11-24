@@ -456,7 +456,7 @@ const editor = monaco.editor.create(editorHost, {
 let keymapPreset: KeymapPreset = loadKeymap(localStorage);
 let keymapHandle: { dispose(): void } | null = null;
 let keymapTicket = 0;
-async function applyKeymap(preset: KeymapPreset): Promise<void> {
+async function applyKeymap(preset: KeymapPreset, announce = true): Promise<void> {
   const ticket = ++keymapTicket;
   keymapHandle?.dispose();
   keymapHandle = null;
@@ -510,9 +510,10 @@ async function applyKeymap(preset: KeymapPreset): Promise<void> {
       return;
     }
   }
-  setStatus('Editor keymap: ' + keymapById(preset).label);
+  if (announce) setStatus('Editor keymap: ' + keymapById(preset).label);
 }
-void applyKeymap(keymapPreset);
+// Restoring the saved keymap at startup is silent; only user changes announce.
+void applyKeymap(keymapPreset, false);
 
 // Ghost text is a content widget rather than Monaco's inline-completions API:
 // the provider API resolves once, while local FIM tokens arrive incrementally.
@@ -1186,6 +1187,8 @@ async function openFolder(selectedPath?: string): Promise<void> {
     void refreshMissionLogs();
     void refreshHunks();
     void refreshRunStatus();
+    connectors.reload();
+    syncWorkspaceButtons();
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
@@ -2833,6 +2836,22 @@ element('quickOpenButton').addEventListener('click', () => quickOpen.open());
 element('welcomeQuickOpen').addEventListener('click', () => quickOpen.open());
 element('welcomeSettings').addEventListener('click', () => openSettings.click());
 element('welcomeMission').addEventListener('click', () => activateView('mission'));
+
+// Actions that only make sense inside an open workspace are disabled until one
+// is open, so they never look clickable while silently doing nothing.
+const workspaceOnlyButtons = ['refreshFiles', 'agentSessionRefresh', 'missionRefresh', 'hunkRefresh', 'changesRefresh']
+  .map((id) => element<HTMLButtonElement>(id));
+function syncWorkspaceButtons(): void {
+  const open = Boolean(state.root);
+  for (const button of workspaceOnlyButtons) {
+    if (!open) button.disabled = true;
+    else if (button.dataset.workspaceGated === 'off') button.disabled = false;
+    button.dataset.workspaceGated = open ? 'on' : 'off';
+    button.title = open ? '' : 'Open a folder first';
+  }
+}
+syncWorkspaceButtons();
+
 element('refreshFiles').addEventListener('click', () => {
   if (state.root) void loadFiles().catch((error) => setStatus(String(error)));
 });
@@ -3081,7 +3100,7 @@ window.addEventListener('beforeunload', () => {
 setLspState('offline');
 renderMissionOptions();
 mountGithubQueue(setStatus);
-mountConnectors(setStatus);
+const connectors = mountConnectors(setStatus);
 mountMarketplaceBrowser(setStatus);
 mountSearchPanel({ openFile, setStatus });
 mountSettingsDialog({ setStatus });

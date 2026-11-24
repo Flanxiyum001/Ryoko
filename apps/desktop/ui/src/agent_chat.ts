@@ -284,7 +284,10 @@ export function mountAgentChat(deps: AgentChatDeps): { focus: () => void; reset:
   async function submit(): Promise<void> {
     if (activeRequest) return;
     const message = input.value.trim();
-    if (!message) return;
+    if (!message) {
+      input.focus();
+      return;
+    }
     if (Array.from(message).length > 8000) {
       note.textContent = 'The prompt exceeds 8000 characters; remove some text before sending.';
       return;
