@@ -116,7 +116,7 @@ pub fn list_mission_logs(state: State<'_, WorkspaceState>) -> Result<Vec<Mission
             modified_ms,
         });
     }
-    logs.sort_by(|left, right| right.modified_ms.cmp(&left.modified_ms));
+    logs.sort_by_key(|left| std::cmp::Reverse(left.modified_ms));
     Ok(logs)
 }
 

@@ -193,7 +193,7 @@ pub fn dap_start(
         let mut truncated = false;
         loop {
             let (take, complete, empty) = match reader.fill_buf() {
-                Ok(buffer) if buffer.is_empty() => (0, false, true),
+                Ok([]) => (0, false, true),
                 Ok(buffer) => {
                     let complete = buffer.iter().position(|byte| *byte == b'\n');
                     let take = complete.map_or(buffer.len(), |position| position + 1);

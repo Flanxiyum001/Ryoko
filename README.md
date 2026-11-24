@@ -146,13 +146,25 @@ In `ryoko review`, choose **[H]unks** to inspect numbered Git text hunks and ent
 
 Limits: only ordinary unified text hunks are selectable; binary, renames, deletions and mode changes are excluded. Newly created files can be selected only in full. Diff patches are capped at 1 MiB/128 hunks. This is Git staging, **not** an editor privilege to execute arbitrary commands or merge without approval.
 
+For automation and the desktop UI, the same command accepts explicit,
+mutually exclusive actions: `ryoko review --task <id> --release` detaches the
+worktree but keeps the branch, `--discard` deletes both, and `--accept` runs the
+sandboxed pre-flight check and merges only when it passes. Add `--json` for one
+machine-readable result object on stdout. `--accept` never skips validation and
+still requires `--sandbox-image`.
+
 ## Desktop Mission Control
 
-The desktop sidebar also shows **Agent Sessions**: a read-only list of the
-active and published worktree leases recorded by `ryoko run` (agent, branch,
-base, changed files, state and last update). It reads only
-`.ryoko/state/worktrees.sqlite3`, performs no Git or agent action, and offers no
-merge or resume control. Press **Refresh** to reload it.
+The desktop sidebar also shows **Agent Sessions** recorded by `ryoko run`
+(agent, branch, base, changed files, state and last update). Published sessions
+can be inspected without the CLI: **Files & diffs** lists the branch's changed
+files and opens a read-only Monaco diff with previous/next navigation. **Detach**
+removes the isolated worktree but keeps its branch, **Discard** deletes the
+worktree and branch after a native confirmation, and **Merge…** uses the OCI
+sandbox image configured in Mission Control, asks for a target branch, then runs
+the same `ryoko review --accept` validation. Merge fails closed when the check fails;
+nothing is merged from the UI without a passing sandboxed check. The sidebar
+still never executes model output as a command.
 
 Mission Control shows each task's live phase (Waiting, Thinking, Coding or
 Testing), a timestamped agent activity timeline, per-task and run token totals
@@ -166,6 +178,20 @@ renders streamed ghost text in Monaco; set `RYOKO_FIM_BASE_URL` and
 `qwen2.5-coder:1.5b`). Cloud DAG work stays on the configured model router. The
 bottom panel hosts an explicitly started PTY shell and a user-supplied DAP
 adapter over stdio; it does not emulate a debugger.
+
+The agent chat prompt accepts explicit context pins: `@file:path`,
+`@symbol:name`, `@docs:query` (or `@docs` for project memory), `@git-diff` and
+`@selection`. The webview parses the tokens for display and the native shell
+re-validates every pin, rejects sensitive paths, omits those paths from
+`@git-diff`, bounds each file/section and wraps project text as untrusted
+context. A symbol pin reads the existing
+`.ryoko/state/symbols.sqlite3` index; a docs pin searches `.ryoko/memory` and
+`docs/**/*.md`. An unknown pin blocks the send instead of silently dropping it.
+The desktop Settings dialog can switch the Monaco editor to Vim or Emacs
+keybindings, import a VS Code color theme or `settings.json` (validated hex
+colors and a bounded settings subset), and install a local WASI extension
+directory through the existing `ryoko plugin install` workflow. Remote extension
+installation and automatic plugin-policy changes remain disabled.
 
 `ryoko run` refreshes `.ryoko/state/symbols.sqlite3` and injects compact
 definitions and callers derived from goal terms into task context. Run

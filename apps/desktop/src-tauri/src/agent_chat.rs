@@ -2,7 +2,6 @@
 //! File context is loaded by the native shell with bounded, symlink-safe paths.
 //! This command has no tools and no filesystem write capability.
 
-use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,12 +10,11 @@ use ryoko_models::{ChatRequest, Message, StreamEvent};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::paths::safe_join;
+use crate::context_mentions::{self, ContextMention, MAX_MENTIONS};
 use crate::workspace::{WorkspaceState, current_root};
 
 const MAX_MESSAGE: usize = 8_000;
-const MAX_CONTEXT_FILE: u64 = 32 * 1024;
-const MAX_CONTEXT_FILES: usize = 4;
+const MAX_LEGACY_FILES: usize = 4;
 const MAX_HISTORY: usize = 12;
 const MAX_RESPONSE: usize = 256 * 1024;
 
@@ -39,6 +37,8 @@ pub struct AgentChatArgs {
     message: String,
     #[serde(default)]
     files: Vec<String>,
+    #[serde(default)]
+    mentions: Vec<ContextMention>,
     #[serde(default)]
     selection: Option<String>,
     #[serde(default)]
@@ -66,62 +66,6 @@ struct ChatDone {
     estimated_cost_usd: f64,
 }
 
-fn allowed_context_path(path: &str) -> bool {
-    !path.split('/').any(|part| {
-        let name = part.to_ascii_lowercase();
-        name == ".env"
-            || name.starts_with(".env.")
-            || name == "credentials"
-            || name == ".ssh"
-            || name == ".npmrc"
-            || name == ".pypirc"
-            || name.ends_with(".pem")
-            || name.ends_with(".key")
-            || name == "id_rsa"
-            || name == "id_ed25519"
-    })
-}
-
-fn load_context(root: &std::path::Path, files: &[String]) -> Result<String, String> {
-    if files.len() > MAX_CONTEXT_FILES {
-        return Err("at most four @file attachments are allowed".into());
-    }
-    let mut context = String::new();
-    let mut seen = std::collections::HashSet::new();
-    for path in files {
-        if !seen.insert(path) {
-            continue;
-        }
-        if !allowed_context_path(path) {
-            return Err(format!("sensitive file cannot be attached: {path}"));
-        }
-        let candidate = safe_join(root, path)?;
-        let canonical = candidate
-            .canonicalize()
-            .map_err(|error| format!("cannot attach {path}: {error}"))?;
-        if !canonical.starts_with(root) || !canonical.is_file() {
-            return Err(format!(
-                "attachment escapes the workspace or is not a file: {path}"
-            ));
-        }
-        if fs::metadata(&canonical)
-            .map_err(|error| error.to_string())?
-            .len()
-            > MAX_CONTEXT_FILE
-        {
-            return Err(format!("attachment exceeds 32 KiB: {path}"));
-        }
-        let content = fs::read_to_string(&canonical)
-            .map_err(|error| format!("cannot attach {path} as UTF-8: {error}"))?;
-        context.push_str("\n<workspace-file path=\"");
-        context.push_str(&path.replace('<', "_").replace('>', "_").replace('"', "_"));
-        context.push_str("\">\n");
-        context.push_str(&content);
-        context.push_str("\n</workspace-file>\n");
-    }
-    Ok(context)
-}
-
 fn validate(args: &AgentChatArgs) -> Result<(), String> {
     if args.request_id.is_empty()
         || args.request_id.len() > 80
@@ -131,6 +75,14 @@ fn validate(args: &AgentChatArgs) -> Result<(), String> {
     }
     if args.message.trim().is_empty() || args.message.chars().count() > MAX_MESSAGE {
         return Err("chat message must contain 1–8000 characters".into());
+    }
+    if args.files.len() > MAX_LEGACY_FILES {
+        return Err(format!(
+            "at most {MAX_LEGACY_FILES} @file attachments are allowed"
+        ));
+    }
+    if args.files.len().saturating_add(args.mentions.len()) > MAX_MENTIONS {
+        return Err(format!("at most {MAX_MENTIONS} context pins are allowed"));
     }
     if args.history.len() > MAX_HISTORY
         || args.history.iter().any(|turn| {
@@ -159,7 +111,16 @@ pub async fn agent_chat(
 ) -> Result<(), String> {
     validate(&args)?;
     let root = current_root(&state)?;
-    let attachments = load_context(&root, &args.files)?;
+    let mut mentions = args
+        .files
+        .iter()
+        .map(|path| ContextMention {
+            kind: "file".to_owned(),
+            value: path.clone(),
+        })
+        .collect::<Vec<_>>();
+    mentions.extend(args.mentions.iter().cloned());
+    let attachments = context_mentions::resolve(&root, &mentions)?;
     let (model, router) = crate::model_runtime::load_router(&root, args.model.as_deref())?;
     let mut prompt = args.message.clone();
     if let Some(selection) = args.selection.as_deref() {
@@ -171,14 +132,12 @@ pub async fn agent_chat(
                     .chars()
                     .take(240)
                     .collect::<String>()
-                    .replace('<', "_")
-                    .replace('>', "_")
-                    .replace('"', "_"),
+                    .replace(['<', '>', '"'], "_"),
             );
             prompt.push('\"');
         }
         prompt.push_str(">\n");
-        prompt.push_str(selection);
+        prompt.push_str(&context_mentions::escape_context_body(selection));
         prompt.push_str("\n</editor-selection>");
     }
     prompt.push_str(&attachments);
@@ -279,32 +238,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refuses_sensitive_attachments_and_too_many_files() {
-        for path in [
-            ".env",
-            "config/.env.local",
-            ".ssh/id_rsa",
-            "cert.pem",
-            "secrets.key",
-        ] {
-            assert!(!allowed_context_path(path), "{path}");
-        }
-        assert!(allowed_context_path("src/assistant.rs"));
-        assert!(load_context(std::path::Path::new("."), &vec!["a".into(); 5]).is_err());
-    }
-
-    #[test]
-    fn blocks_traversal_before_reading_context() {
-        let root = std::env::temp_dir();
-        assert!(load_context(&root, &["../escape".into()]).is_err());
-    }
-
-    #[test]
     fn rejects_invalid_history_and_selection() {
         let mut args = AgentChatArgs {
             request_id: "chat1".into(),
             message: "Explain this".into(),
             files: vec![],
+            mentions: vec![],
             selection: None,
             active_path: None,
             history: vec![],
@@ -318,6 +257,29 @@ mod tests {
         assert!(validate(&args).is_err());
         args.history.clear();
         args.selection = Some("x".repeat(MAX_MESSAGE + 1));
+        assert!(validate(&args).is_err());
+    }
+
+    #[test]
+    fn caps_legacy_files_and_context_pins() {
+        let mut args = AgentChatArgs {
+            request_id: "chat1".into(),
+            message: "Explain this".into(),
+            files: vec!["a.rs".into(); MAX_LEGACY_FILES + 1],
+            mentions: vec![],
+            selection: None,
+            active_path: None,
+            history: vec![],
+            model: None,
+        };
+        assert!(validate(&args).is_err());
+        args.files = vec!["a.rs".into()];
+        args.mentions = (0..MAX_MENTIONS)
+            .map(|index| ContextMention {
+                kind: "symbol".into(),
+                value: format!("s{index}"),
+            })
+            .collect();
         assert!(validate(&args).is_err());
     }
 }

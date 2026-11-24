@@ -90,6 +90,7 @@ pub struct FileReview {
 /// atomic unit; [`HunkPatch::select_groups`] refuses partial groups and hunks
 /// shared between groups.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // desktop embeds this file privately and stages per hunk
 pub struct HunkGroup {
     pub id: usize,
     pub label: String,
@@ -329,6 +330,7 @@ impl HunkPatch {
 
     /// One atomic group per file, in patch order. Callers that need a group
     /// spanning several files build their own [`HunkGroup`] list instead.
+    #[allow(dead_code)]
     pub fn file_groups(&self) -> Vec<HunkGroup> {
         let mut groups: Vec<HunkGroup> = Vec::new();
         let mut index = 0;
@@ -466,6 +468,7 @@ impl HunkPatch {
     /// base it was reviewed against. Any stale hunk fails the whole selection
     /// with a per-file conflict message; nothing is applied partially, and the
     /// caller must refresh the review instead of overwriting.
+    #[allow(dead_code)]
     pub fn select_verified(&self, chosen: &[usize], current: &HunkPatch) -> Result<String, String> {
         let audit = self.verify_selection(chosen, current)?;
         if audit.stale.is_empty() {
@@ -488,6 +491,7 @@ impl HunkPatch {
     /// to stage. A plan is rejected when a group is empty, when two groups
     /// share a hunk, or when a group references an unknown hunk, so a partial
     /// or ambiguous cross-file selection can never reach Git.
+    #[allow(dead_code)]
     pub fn select_groups(
         &self,
         groups: &[HunkGroup],
@@ -499,6 +503,7 @@ impl HunkPatch {
 
     /// Resolve chosen group IDs into a deduplicated, ordered hunk ID list after
     /// validating that the group plan is a partition of the hunks it covers.
+    #[allow(dead_code)]
     fn flatten_groups(
         &self,
         groups: &[HunkGroup],

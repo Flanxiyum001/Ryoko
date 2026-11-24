@@ -283,31 +283,38 @@ impl GitWorktreeManager {
         tokio::fs::create_dir_all(&self.worktrees_root).await?;
 
         let path = git_path_argument(&worktree_path);
-        let output = self
-            .git(
-                &self.base_project_path,
-                &[
-                    "worktree",
-                    "add",
-                    "--no-track",
-                    "-b",
-                    &branch_name,
-                    &path,
-                    &base_commit,
-                ],
-            )
-            .await?;
-
-        if !output.status.success() {
-            // Roll back a partially-created branch/worktree. Both operations are
-            // best-effort and never mask the original error.
+        let mut attempt = 1;
+        loop {
+            let output = self
+                .git_once(
+                    &self.base_project_path,
+                    &[
+                        "worktree",
+                        "add",
+                        "--no-track",
+                        "-b",
+                        &branch_name,
+                        &path,
+                        &base_commit,
+                    ],
+                )
+                .await?;
+            if output.status.success() {
+                break;
+            }
+            // A retry of `worktree add -b` can see the branch left behind by the
+            // previous attempt, so roll back before trying again.
             if worktree_path.starts_with(&self.worktrees_root) && worktree_path.exists() {
                 let _ = tokio::fs::remove_dir_all(&worktree_path).await;
             }
             let _ = self
                 .git(&self.base_project_path, &["branch", "-D", &branch_name])
                 .await;
-            return Err(self.git_error("create worktree", output));
+            if attempt == ADMIN_RACE_ATTEMPTS || !is_worktree_admin_race(&output) {
+                return Err(self.git_error("create worktree", output));
+            }
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(20 * attempt as u64)).await;
         }
 
         let session = WorktreeSession {
@@ -1420,22 +1427,7 @@ impl GitWorktreeManager {
         // `.git/worktrees` sibling from the other process. That failure happens
         // before the command does its work and succeeds on retry.
         for attempt in 1..=ADMIN_RACE_ATTEMPTS {
-            let output = Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("LC_ALL", "C")
-                .env("GIT_AUTHOR_NAME", "Ryoko Agent")
-                .env("GIT_AUTHOR_EMAIL", "agent@ryoko.local")
-                .env("GIT_COMMITTER_NAME", "Ryoko Agent")
-                .env("GIT_COMMITTER_EMAIL", "agent@ryoko.local")
-                .kill_on_drop(true)
-                .output()
-                .await
-                .map_err(WorktreeError::Io)?;
+            let output = self.git_once(cwd, args).await?;
             if output.status.success()
                 || attempt == ADMIN_RACE_ATTEMPTS
                 || !is_worktree_admin_race(&output)
@@ -1445,6 +1437,25 @@ impl GitWorktreeManager {
             tokio::time::sleep(Duration::from_millis(20 * attempt as u64)).await;
         }
         unreachable!("the retry loop always returns")
+    }
+
+    async fn git_once(&self, cwd: &Path, args: &[&str]) -> Result<Output, WorktreeError> {
+        Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("LC_ALL", "C")
+            .env("GIT_AUTHOR_NAME", "Ryoko Agent")
+            .env("GIT_AUTHOR_EMAIL", "agent@ryoko.local")
+            .env("GIT_COMMITTER_NAME", "Ryoko Agent")
+            .env("GIT_COMMITTER_EMAIL", "agent@ryoko.local")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(WorktreeError::Io)
     }
 
     fn git_error(&self, action: &str, output: Output) -> WorktreeError {
