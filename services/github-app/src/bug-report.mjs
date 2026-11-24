@@ -5,6 +5,12 @@ const MAX_TEXT = 8_000;
 const MAX_REPORTS_PER_WINDOW = 5;
 const WINDOW_MS = 60 * 60 * 1000;
 
+function validRepository(value) {
+  if (typeof value !== 'string' || !/^[-\\w.]+\/[-\\w.]+$/.test(value)) return false;
+  const [owner, name] = value.split('/');
+  return owner !== '.' && owner !== '..' && name !== '.' && name !== '..';
+}
+
 function cleanText(value, field, limit = MAX_TEXT, required = false) {
   if (typeof value !== 'string') {
     if (required) throw bad('invalid ' + field);
@@ -26,7 +32,7 @@ export function createBugReportHandler({ token = '', repository = 'Flanxiyum001/
   const buckets = new Map();
 
   return async function submitBugReport(req, body) {
-    if (!token || !/^[-\w.]+\/[-\w.]+$/.test(repository)) throw bad('bug reporting is not configured', 503);
+    if (!token || !validRepository(repository)) throw bad('bug reporting is not configured', 503);
     const now = Date.now();
     const ip = safeIp(req);
     let bucket = buckets.get(ip);
@@ -59,7 +65,7 @@ export function createBugReportHandler({ token = '', repository = 'Flanxiyum001/
       diagnostics ? '## Diagnostics (user-provided)\n\n```text\n' + diagnostics + '\n```' : '',
       '\n---\nSubmitted through Ryoko’s in-app bug reporter.',
     ].filter(Boolean);
-    const response = await fetchImpl('https://api.github.com/repos/' + repository + '/issues', {
+    const response = await fetchImpl('https://api.github.com/repos/' + repository.split('/').map(encodeURIComponent).join('/') + '/issues', {
       method: 'POST',
       redirect: 'error',
       signal: AbortSignal.timeout(15_000),
