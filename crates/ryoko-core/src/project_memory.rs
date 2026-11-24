@@ -531,6 +531,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn append_decision_and_convention_reject_symlinks() {
         let dir = TempDir::new().unwrap();
