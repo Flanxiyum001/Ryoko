@@ -67,8 +67,11 @@ target repository with Issues: write permission:
 Do not put the token in desktop code, frontend bundles, or logs. The endpoint
 currently has an in-memory rate limiter; public production deployment should
 add a trusted-proxy configuration, distributed rate limiting and abuse controls
-before exposing it broadly. This endpoint is backend-only in this change and
-is not yet connected to the native desktop report dialog.
+before exposing it broadly. The desktop Help menu now includes Report a Bug;
+users paste the deployed endpoint URL into the dialog once, and it is stored
+locally for subsequent reports. The UI sends only form fields and version/OS
+metadata; it does not attach logs or project files. Configure allowed origins
+for the deployed endpoint to match your Tauri target and development origin.
 
 ## 3. Connect the Rust CLI for real Mission Control worktree status
 
