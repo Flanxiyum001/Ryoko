@@ -1,22 +1,22 @@
 import { getVersion } from '@tauri-apps/api/app';
 
 const STORAGE_KEY = 'ryoko-bug-report-endpoint';
-const REPORT_FIELDS = [
+const REPORT_FIELDS: Array<[string, string, string, boolean]> = [
   ['description', 'What happened?', 'Describe the problem you encountered.', true],
   ['expected', 'What did you expect to happen?', 'Expected behavior', false],
   ['actual', 'What happened instead?', 'Actual behavior', false],
   ['steps', 'Steps to reproduce', '1.\n2.\n3.', false],
 ];
 
-function element(tag, className, text) {
+function element(tag: string, className?: string, text?: string): HTMLElement {
   const item = document.createElement(tag);
   if (className) item.className = className;
   if (text !== undefined) item.textContent = text;
   return item;
 }
 
-function field(id, labelText, placeholder, required = false) {
-  const wrapper = element('div', 'bug-report-field');
+function field(id: string, labelText: string, placeholder: string, required = false): { wrapper: HTMLDivElement; input: HTMLTextAreaElement } {
+  const wrapper = element('div', 'bug-report-field') as HTMLDivElement;
   const label = element('label', '', labelText) as HTMLLabelElement;
   label.htmlFor = id;
   const input = element('textarea', 'bug-report-input') as HTMLTextAreaElement;
@@ -29,7 +29,7 @@ function field(id, labelText, placeholder, required = false) {
   return { wrapper, input };
 }
 
-function safeEndpoint(value) {
+function safeEndpoint(value: string): string | null {
   try {
     const url = new URL(value.trim());
     if (url.protocol !== 'https:' || url.username || url.password || url.hash) return null;
@@ -39,7 +39,11 @@ function safeEndpoint(value) {
   }
 }
 
-export function mountBugReporter({ setStatus }) {
+interface MountBugReporterOptions {
+  setStatus: (message: string) => void;
+}
+
+export function mountBugReporter({ setStatus }: MountBugReporterOptions): { open: () => void } {
   const dialog = element('dialog', 'bug-report-dialog') as HTMLDialogElement;
   dialog.setAttribute('aria-labelledby', 'bug-report-title');
   const form = element('form', 'bug-report-form') as HTMLFormElement;
@@ -47,7 +51,8 @@ export function mountBugReporter({ setStatus }) {
   const header = element('header', 'bug-report-header');
   const heading = element('div');
   const reportHeading = element('h2', '', 'Report a bug');
-  reportHeading.id = 'bug-report-title';\n  heading.append(reportHeading, element('p', 'hint', 'Tell us what went wrong. Review your report before sending.'));
+  reportHeading.id = 'bug-report-title';
+  heading.append(reportHeading, element('p', 'hint', 'Tell us what went wrong. Review your report before sending.'));
   const close = element('button', 'button ghost compact', 'Close') as HTMLButtonElement;
   close.type = 'button';
   close.addEventListener('click', () => dialog.close());
@@ -108,7 +113,7 @@ export function mountBugReporter({ setStatus }) {
   dialog.append(form);
   document.body.append(dialog);
 
-  form.addEventListener('submit', async (event) => {
+  form.addEventListener('submit', async (event: Event) => {
     event.preventDefault();
     if (submit.disabled) return;
     const target = safeEndpoint(endpoint.value);
