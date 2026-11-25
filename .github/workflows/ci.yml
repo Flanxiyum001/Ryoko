@@ -40,7 +40,8 @@ jobs:
       - name: Verify container filesystem and network isolation
         run: |
           docker pull alpine:3.21
-          RYOKO_CONTAINER_TEST_IMAGE=alpine:3.21 cargo test -p ryoko-sandbox --locked --test container_isolation -- --nocapture
+          docker pull rust:1.85-bookworm
+          RYOKO_CONTAINER_TEST_IMAGE=alpine:3.21 RYOKO_CONTAINER_TEST_RUST_IMAGE=rust:1.85-bookworm cargo test -p ryoko-sandbox --locked --test container_isolation -- --nocapture
 
   desktop:
     name: Desktop UI / Tauri shell
