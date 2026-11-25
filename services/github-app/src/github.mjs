@@ -188,6 +188,45 @@ export class GitHubBroker {
           html_url: item.html_url, head: item.head?.ref, state: item.state,
         }));
       }
+      case 'pull_detail': {
+        const number = positiveId(options.number, 'pull request');
+        const pr = await this.request(root + '/pulls/' + number, token);
+        const sha = pr.head?.sha;
+        if (!/^[a-f0-9]{40}$/i.test(sha || '')) throw bad('invalid pull request head', 502);
+        const [files, checks, reviews] = await Promise.allSettled([
+          this.request(root + '/pulls/' + number + '/files?per_page=30', token),
+          this.request(root + '/commits/' + sha + '/check-runs?per_page=100&filter=latest', token),
+          this.request(root + '/pulls/' + number + '/reviews?per_page=100', token),
+        ]);
+        const latestReviews = new Map();
+        if (reviews.status === 'fulfilled' && Array.isArray(reviews.value) && reviews.value.length < 100) {
+          for (const review of reviews.value) {
+            const login = review.user?.login;
+            if (login && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state)) {
+              latestReviews.set(login, review.state);
+            }
+          }
+        }
+        return {
+          number: pr.number, title: pr.title, draft: Boolean(pr.draft),
+          html_url: pr.html_url, state: pr.state,
+          detail: {
+            author: pr.user?.login || '', agent: pr.user?.type === 'Bot',
+            created_at: pr.created_at || '', head: pr.head?.ref || '', base: pr.base?.ref || '',
+            changed_files: pr.changed_files ?? null, additions: pr.additions ?? null, deletions: pr.deletions ?? null,
+            mergeable: pr.mergeable ?? null, mergeable_state: pr.mergeable_state || 'unknown',
+            merged: Boolean(pr.merged),
+            files: files.status === 'fulfilled' && Array.isArray(files.value)
+              ? files.value.slice(0, 30).map(file => ({ name: String(file.filename || '').slice(0, 500), additions: file.additions, deletions: file.deletions })) : null,
+            checks: checks.status === 'fulfilled' && Array.isArray(checks.value.check_runs)
+              ? checks.value.check_runs.slice(0, 100).map(check => ({ name: String(check.name || '').slice(0, 160), status: check.status, conclusion: check.conclusion })) : null,
+            checks_complete: checks.status === 'fulfilled' && Array.isArray(checks.value.check_runs)
+              && checks.value.total_count <= checks.value.check_runs.length,
+            reviews: reviews.status === 'fulfilled' && Array.isArray(reviews.value) && reviews.value.length < 100
+              ? [...latestReviews].map(([name, state]) => ({ name, state })) : null,
+          },
+        };
+      }
       case 'checks': {
         const data = await this.request(root + '/actions/runs?per_page=15', token);
         return (data.workflow_runs || []).map((item) => ({

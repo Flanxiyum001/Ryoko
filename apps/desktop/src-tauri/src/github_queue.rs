@@ -33,6 +33,47 @@ pub struct GitHubQueueItem {
     draft: bool,
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    detail: Option<GitHubPullDetail>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GitHubPullDetail {
+    author: String,
+    agent: bool,
+    created_at: String,
+    head: String,
+    base: String,
+    changed_files: Option<u64>,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    mergeable: Option<bool>,
+    mergeable_state: String,
+    merged: bool,
+    files: Option<Vec<GitHubPullFile>>,
+    checks: Option<Vec<GitHubPullCheck>>,
+    checks_complete: bool,
+    reviews: Option<Vec<GitHubPullReview>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GitHubPullFile {
+    name: String,
+    additions: u64,
+    deletions: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GitHubPullCheck {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GitHubPullReview {
+    name: String,
+    state: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -162,15 +203,22 @@ pub async fn list_github_repositories(
 pub async fn get_github_queue(
     installation_id: u64,
     repo_id: u64,
+    pull_number: Option<u64>,
     state: State<'_, GitHubQueueState>,
 ) -> Result<GitHubQueue, String> {
     if installation_id == 0 || repo_id == 0 {
         return Err("choose an authorized GitHub repository".into());
     }
+    let mut url =
+        format!("{BROKER}/api/desktop/queue?installationId={installation_id}&repoId={repo_id}");
+    if let Some(number) = pull_number {
+        if number == 0 {
+            return Err("invalid pull request number".into());
+        }
+        url.push_str(&format!("&pullNumber={number}"));
+    }
     let response = client()?
-        .get(format!(
-            "{BROKER}/api/desktop/queue?installationId={installation_id}&repoId={repo_id}"
-        ))
+        .get(url)
         .bearer_auth(token(&state)?)
         .send()
         .await
