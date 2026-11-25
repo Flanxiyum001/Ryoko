@@ -7,6 +7,25 @@ transport. The agent loop remains deliberately narrow: it is bounded by tool
 rounds, per-round calls, a run-wide call budget, the shared model ledger and a
 fresh human approval for every call.
 
+## Mission Control tool stream
+
+Model-agent calls emit an additive `task_tool_activity` JSONL event before entering
+the existing host gate and after it returns. Only the task ID, bounded tool name
+and pending flag are recorded; no arguments, result, credentials or approval
+decision are included. Pending means a request may be awaiting approval or a
+server response, not that execution has been authorized. Mission Control displays
+a compact Stream Search-inspired activity shader only while these events remain
+pending. Terminal task/run events clear it; a managed paused/stopped run hides
+it. External interrupted logs without a terminal event can retain a last recorded
+pending request, which is not a liveness guarantee.
+
+The original 21st.dev Stream Search listing by Louis Studios
+(https://21st.dev/@louisstudios/components/stream-search, listed MIT) inspired
+the design; the desktop effect is an independent GLSL/CSS implementation,
+not a copy of the sign-in-gated source. It adds no React or shader dependencies,
+uses one canvas, and falls back to static CSS with reduced motion or unavailable
+WebGL. Desktop read-only chat does not execute MCP calls and is unchanged.
+
 ## List tools from a trusted server
 
 ```sh

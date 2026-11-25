@@ -3,6 +3,8 @@
 export interface MissionEvent {
   type: string;
   task_id?: string;
+  tool?: string;
+  pending?: boolean;
   role?: unknown;
   description?: string;
   dependencies?: string[];
@@ -49,7 +51,7 @@ export type MissionPhase = 'thinking' | 'coding' | 'testing' | 'waiting';
 export interface MissionActivity {
   atMs: number;
   attempt?: number;
-  kind: 'phase' | 'progress' | 'validation' | 'pull-request' | 'result';
+  kind: 'phase' | 'progress' | 'validation' | 'pull-request' | 'result' | 'tool';
   label: string;
   detail?: string;
 }
@@ -82,6 +84,8 @@ export interface MissionTask {
   failureStage?: string;
   progress?: string;
   history?: MissionAttempt[];
+  /** Pending host-gated MCP request, not proof of approval or execution. */
+  pendingTool?: string;
   activity?: MissionActivity[];
   usage?: {
     requests: number;
@@ -128,6 +132,13 @@ export function liveStatus(task: MissionTask): LiveStatus {
   if (task.phase === 'coding') return 'Coding';
   if (task.phase === 'waiting') return 'Waiting';
   return 'Thinking';
+}
+
+export function activeMissionTools(snapshot: MissionSnapshot | null): { taskId: string; role: string; tool: string }[] {
+  if (!snapshot || snapshot.finished) return [];
+  return snapshot.tasks.flatMap((task) => task.status === 'running' && task.pendingTool
+    ? [{ taskId: task.id, role: task.role, tool: task.pendingTool }]
+    : []);
 }
 
 export function formatTokens(value: number): string {
@@ -242,6 +253,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         const task = upsert(tasks, event);
         if (task) {
           task.status = 'running';
+          delete task.pendingTool;
           task.agent = event.agent;
           task.attempt = event.attempt;
           const attempt = recordAttempt(task, event.attempt);
@@ -271,6 +283,16 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         }
         break;
       }
+      case 'task_tool_activity': {
+        const task = tasks.get(event.task_id ?? '');
+        if (task?.status === 'running' && typeof event.tool === 'string' && event.tool.length > 0
+          && event.tool.length <= 128 && typeof event.pending === 'boolean') {
+          if (event.pending) task.pendingTool = event.tool;
+          else if (task.pendingTool === event.tool) delete task.pendingTool;
+          recordActivity(task, event, 'tool', event.pending ? 'Tool request pending' : 'Tool request ended', event.tool);
+        }
+        break;
+      }
       case 'task_usage': {
         const task = tasks.get(event.task_id ?? '');
         if (task) {
@@ -287,6 +309,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         const task = tasks.get(event.task_id ?? '');
         if (task) {
           task.status = 'validating';
+          delete task.pendingTool;
           task.phase = 'testing';
           recordAttempt(task).status = 'validating';
           recordActivity(task, event, 'phase', 'Testing');
@@ -331,6 +354,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         const task = upsert(tasks, event);
         if (task) {
           task.status = 'succeeded';
+          delete task.pendingTool;
           task.output = event.output;
           task.attempts = event.attempts;
           const attempt = recordAttempt(task);
@@ -344,6 +368,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         const task = upsert(tasks, event);
         if (task) {
           task.status = event.retrying ? 'retrying' : 'failed';
+          delete task.pendingTool;
           task.error = event.error;
           task.attempts = event.attempts;
           task.failureStage = event.stage;
@@ -358,6 +383,7 @@ export function reduceMissionEvents(events: MissionEvent[]): MissionSnapshot {
         const task = upsert(tasks, event);
         if (task) {
           task.status = 'skipped';
+          delete task.pendingTool;
           task.error = event.reason;
           recordActivity(task, event, 'result', 'Skipped', event.reason);
           // No attempt was dispatched when an upstream dependency skipped this task.

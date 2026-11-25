@@ -12,6 +12,7 @@ use std::path::Path;
 
 use crate::agent::{AgentRuntime, TaskContext};
 use crate::error::CoreResult;
+use crate::event::OrchestratorEvent;
 use crate::model::{AgentIdentity, ProposedChange, Task, TaskResult};
 use crate::review::{
     INDEPENDENT_REVIEW_METADATA, REVIEW_SYSTEM_PROMPT, REVIEW_TARGET_METADATA, ReviewRecord,
@@ -423,10 +424,20 @@ impl AgentRuntime for ModelAgent {
                 } else {
                     call.id.clone()
                 };
-                match mcp
+                ctx.events.emit(OrchestratorEvent::TaskToolActivity {
+                    task_id: task.id,
+                    tool: call.name.clone(),
+                    pending: true,
+                });
+                let result = mcp
                     .call(&call.name, call.arguments.clone(), Some(&task_scope))
-                    .await
-                {
+                    .await;
+                ctx.events.emit(OrchestratorEvent::TaskToolActivity {
+                    task_id: task.id,
+                    tool: call.name.clone(),
+                    pending: false,
+                });
+                match result {
                     Ok(result) => {
                         let content = serde_json::to_string(&result)
                             .unwrap_or_else(|_| "<unserializable tool result>".to_owned());
@@ -873,8 +884,24 @@ mod tests {
             mcp: Some(Arc::new(FakeTools)),
             events: EventSink::default(),
         };
+        let mut events = context.events.subscribe();
         let task = Task::new("add health", AgentRole::SeniorDeveloper);
+        let task_id = task.id;
         let result = agent.execute_task(context, task).await.unwrap();
+        let mut tool_activity = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let OrchestratorEvent::TaskToolActivity {
+                task_id: observed,
+                tool,
+                pending,
+            } = event
+            {
+                assert_eq!(observed, task_id);
+                assert_eq!(tool, "read_issue");
+                tool_activity.push(pending);
+            }
+        }
+        assert_eq!(tool_activity, vec![true, false]);
         assert!(result.success, "{:?}", result.error);
         assert_eq!(result.changes.len(), 2);
 

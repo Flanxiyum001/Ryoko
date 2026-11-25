@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  activeMissionTools,
   focusMissionTasks,
   formatLedgerCost,
   formatTokens,
@@ -43,6 +44,26 @@ describe('mission event log', () => {
     expect(developer.output).toBe('done');
     expect(developer.validation?.passed).toBe(true);
     expect(snapshot.finished?.succeeded).toBe(2);
+  });
+
+  it('tracks only real pending tool requests and clears them on terminal or retry events', () => {
+    const start = { type: 'task_started', task_id: 'a', attempt: 1 };
+    const pending = { type: 'task_tool_activity', task_id: 'a', tool: 'read_issue', pending: true };
+    const other = { ...pending, task_id: 'b', tool: 'search' };
+    const records = [start, { ...start, task_id: 'b' }, pending, other];
+    const snapshot = reduceMissionEvents(records);
+    expect(activeMissionTools(snapshot).map((item) => item.tool)).toEqual(['read_issue', 'search']);
+    expect(snapshot.tasks[0].activity?.at(-1)?.label).toBe('Tool request pending');
+    expect(activeMissionTools(reduceMissionEvents([...records, { ...pending, pending: false }])).map((item) => item.tool))
+      .toEqual(['search']);
+    for (const type of ['task_succeeded', 'task_failed', 'task_skipped', 'validation_started', 'task_started']) {
+      expect(activeMissionTools(reduceMissionEvents([...records, { type, task_id: 'a' }])).map((item) => item.tool))
+        .toEqual(['search']);
+    }
+    expect(activeMissionTools(reduceMissionEvents([...records, { type: 'run_finished' }]))).toEqual([]);
+    expect(activeMissionTools(reduceMissionEvents([start, { ...pending, pending: undefined }]))).toEqual([]);
+    expect(activeMissionTools(reduceMissionEvents([start]))).toEqual([]);
+    expect(activeMissionTools(null)).toEqual([]);
   });
 
   it('tracks per-task token usage and run totals', () => {
