@@ -50,21 +50,33 @@ export function joinWorkspacePath(root: string, relative: string): string {
   return normalizedRoot + '/' + normalizedRelative;
 }
 
-/** Builds an LSP-compatible `file://` URI from an absolute filesystem path. */
-export function fileUri(path: string): string {
+/** Normalizes filesystem paths for editor/LSP identity, not native filesystem I/O. */
+export function normalizeFilePath(path: string): string {
   const normalized = path.replace(/\\/g, '/');
+  // Rust canonicalize() returns extended-length paths on Windows.
+  if (/^\/\/\?\/UNC\//i.test(normalized)) return '//' + normalized.slice(8);
+  if (/^\/\/\?\/[A-Za-z]:\//.test(normalized)) return normalized.slice(4);
+  return normalized;
+}
+
+/** Builds an LSP-compatible file URI from an absolute filesystem path. */
+export function fileUri(path: string): string {
+  const normalized = normalizeFilePath(path);
   const encoded = normalized
     .split('/')
     .map((segment) => (/^[A-Za-z]:$/.test(segment) ? segment : encodeURIComponent(segment)))
     .join('/');
-  return 'file://' + (encoded.startsWith('/') ? encoded : '/' + encoded);
+  // A UNC server belongs in the authority, not in a double-slash URI path.
+  if (/^\/\/[^/]+\//.test(normalized)) return 'file:' + encoded;
+  return 'file:///' + encoded.replace(/^\/+/, '');
 }
 
-/** Inverts `fileUri`; returns null for non-file or undecodable URIs. */
+/** Inverts fileUri; returns null for non-file or undecodable URIs. */
 export function pathFromFileUri(uri: string): string | null {
   if (!uri.startsWith('file://')) return null;
   try {
     const decoded = decodeURIComponent(uri.slice('file://'.length));
+    if (!decoded.startsWith('/')) return '//' + decoded;
     return /^\/[A-Za-z]:\//.test(decoded) ? decoded.slice(1) : decoded;
   } catch {
     return null;

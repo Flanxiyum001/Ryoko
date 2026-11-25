@@ -88,6 +88,7 @@ import {
   joinWorkspacePath,
   languageForPath,
   markerSeverityFor,
+  normalizeFilePath,
   pathFromFileUri,
   type LspDiagnostic,
   type PublishDiagnosticsParams,
@@ -926,8 +927,8 @@ async function stopTerminal(): Promise<void> {
 }
 
 async function openFileAtLine(path: string, line: number, column?: number): Promise<void> {
-  const root = state.root.replace(/\\/g, '/').replace(/\/+$/, '');
-  const candidate = path.replace(/\\/g, '/');
+  const root = normalizeFilePath(state.root).replace(/\/+$/, '');
+  const candidate = normalizeFilePath(path);
   const relative = candidate.startsWith(root + '/') ? candidate.slice(root.length + 1) : candidate;
   await openFile(relative);
   if (line > 0) {
@@ -2798,8 +2799,8 @@ function renderProblems(): void {
 async function revealProblem(problem: FlatProblem): Promise<void> {
   const absolute = pathFromFileUri(problem.uri);
   if (!absolute || !state.root) return;
-  const root = state.root.replace(/\\/g, '/').replace(/\/+$/, '');
-  const candidate = absolute.replace(/\\/g, '/');
+  const root = normalizeFilePath(state.root).replace(/\/+$/, '');
+  const candidate = normalizeFilePath(absolute);
   if (!candidate.startsWith(root + '/')) return;
   const relative = candidate.slice(root.length + 1);
   await openFile(relative);

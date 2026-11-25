@@ -4,6 +4,7 @@ import {
   isPublishDiagnostics,
   languageForPath,
   markerSeverityFor,
+  normalizeFilePath,
   parseJsonRpc,
   joinWorkspacePath,
   pathFromFileUri,
@@ -28,6 +29,30 @@ describe('file URIs', () => {
 
   it('normalises Windows paths to file:///C:/...', () => {
     expect(fileUri('C:\\work\\ryoko\\main.rs')).toBe('file:///C:/work/ryoko/main.rs');
+  });
+
+  it('opens files under Rust-canonicalized Windows drive roots', () => {
+    const root = '\\\\?\\C:\\work\\My Project';
+    const uri = fileUri(joinWorkspacePath(root, 'src/main #1%.rs'));
+    expect(uri).toBe('file:///C:/work/My%20Project/src/main%20%231%25.rs');
+    expect(pathFromFileUri(uri)).toBe('C:/work/My Project/src/main #1%.rs');
+    expect(normalizeFilePath(root)).toBe('C:/work/My Project');
+  });
+
+  it('uses the server as authority for ordinary and extended UNC roots', () => {
+    const ordinary = '\\\\server\\share\\project';
+    const extended = '\\\\?\\UNC\\server\\share\\project';
+    const expected = 'file://server/share/project/src/main.rs';
+    for (const root of [ordinary, extended]) {
+      const uri = fileUri(joinWorkspacePath(root, 'src/main.rs'));
+      expect(uri).toBe(expected);
+      expect(pathFromFileUri(uri)).toBe('//server/share/project/src/main.rs');
+      expect(normalizeFilePath(root)).toBe('//server/share/project');
+    }
+  });
+
+  it('does not produce an empty authority with a double-slash path', () => {
+    expect(fileUri('///home/me/main.rs')).toBe('file:///home/me/main.rs');
   });
 
   it('round-trips absolute paths and rejects non-file URIs', () => {
