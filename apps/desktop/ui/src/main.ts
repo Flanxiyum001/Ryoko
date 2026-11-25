@@ -1085,7 +1085,17 @@ async function loadFiles(): Promise<void> {
 
 let onboarding: ReturnType<typeof mountOnboarding> | null = null;
 
+// Local filesystem access is only available through the native Tauri shell.
+// A Vite browser preview (or an incomplete webview bridge) must fail closed.
+function requireNativeWorkspace(): boolean {
+  const bridge = (window as Window & { __TAURI_INTERNALS__?: { invoke?: unknown } }).__TAURI_INTERNALS__;
+  if (typeof bridge?.invoke === 'function') return true;
+  setStatus('Cannot access local files: the Ryoko desktop connection is missing. Open the installed Ryoko app or run npm run tauri dev from apps/desktop, not npm run dev in a browser.');
+  return false;
+}
+
 async function openFolder(selectedPath?: string): Promise<void> {
+  if (!requireNativeWorkspace()) return;
   if (workspaceSwitching || savingFiles.size) {
     setStatus('Wait for the current workspace operation to finish.');
     return;
@@ -1356,6 +1366,7 @@ function promptFolderPath(): Promise<string | null> {
 }
 
 async function openFolderByPath(): Promise<void> {
+  if (!requireNativeWorkspace()) return;
   const path = await promptFolderPath();
   if (path) await openFolder(path);
 }
@@ -2665,6 +2676,7 @@ async function openFile(path: string): Promise<void> {
   // Switching an existing tab is a buffer operation, not a disk reload.
   // This also keeps a dirty buffer accessible after its disk file is removed.
   if (openFiles.has(uri)) { selectOpenFile(path); return; }
+  if (!requireNativeWorkspace()) return;
   const ticket = ++fileOpenGeneration;
   try {
     setStatus(`Opening ${path}…`);
