@@ -2174,7 +2174,10 @@ function showRunStatus(status: RunStatus): void {
   runSnapshot = status;
   runStart.disabled = status.running;
   runPause.disabled = !status.running;
-  runPause.textContent = status.paused ? 'Resume' : 'Pause';
+  const pauseLabel = status.paused ? 'Resume' : 'Pause';
+  if (runPause.textContent !== pauseLabel) {
+    runPause.replaceChildren(workbenchIcon(status.paused ? 'play' : 'pause', 'control-icon'), pauseLabel);
+  }
   runCancel.disabled = !status.running;
   if (status.running) {
     runState.textContent = status.paused ? 'Run paused.' : 'Run active. Mission Control follows its event log.';

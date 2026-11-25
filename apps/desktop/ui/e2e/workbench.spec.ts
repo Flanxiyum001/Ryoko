@@ -260,3 +260,24 @@ test('workbench uses distinct accessible local SVG icons', async ({ page }) => {
   await expect(page.locator('.file-link').filter({ hasText: 'notes.unknown' }).locator('svg')).toHaveAttribute('data-icon', 'file');
   await expect(page.locator('.file-link').filter({ hasText: 'main.ts' }).locator('.file-icon')).toHaveText('TS');
 });
+
+
+test('action icons retain labels and editor tab close behavior', async ({ page }) => {
+  for (const [id, name] of Object.entries({
+    openFolder: 'folder-open', saveFile: 'save', runActiveFile: 'play',
+    toggleTerminal: 'terminal', toggleDebug: 'bug', chatSend: 'send',
+    debugNext: 'step-forward', debugStepIn: 'arrow-down-to-line',
+    debugStepOut: 'arrow-up-from-line', runPause: 'pause',
+    proposalApply: 'check', settingsClose: 'x',
+  })) {
+    await expect(page.locator('#' + id + ' > svg')).toHaveAttribute('data-icon', name);
+    await expect(page.locator('#' + id + ' > svg')).toHaveAttribute('aria-hidden', 'true');
+    expect((await page.locator('#' + id).textContent())?.trim()).not.toBe('');
+  }
+  await openProject(page);
+  await openFile(page, 'main.ts');
+  const close = page.getByRole('button', { name: 'Close main.ts', exact: true });
+  await expect(close.locator('svg')).toHaveAttribute('data-icon', 'x');
+  await close.click();
+  await expect(page.getByRole('tab')).toHaveCount(0);
+});

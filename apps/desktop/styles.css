@@ -158,3 +158,9 @@ select{max-width:100%}
 @media(max-width:850px){.body-grid{grid-template-columns:52px minmax(0,1fr)}.sidebar{display:none}.project-pill{max-width:235px}.main-content{padding:20px}.github-grid,.settings-grid,.approvals-grid{grid-template-columns:1fr}.topbar{gap:9px;padding:0 11px}.brand{min-width:auto}.brand-sub,.quiet-label{display:none}.rail{padding:12px 3px}.rail-button{width:43px}.workspace-header h1{font-size:23px}}
 @media(max-width:540px){.topbar{height:53px;min-height:53px}.brand>span:not(.brand-mark){display:none}.project-pill{flex:1}.top-actions{gap:5px}.top-actions .button{padding:7px 8px;font-size:10px}.metric-grid{grid-template-columns:1fr}.agents-grid{grid-template-columns:1fr 1fr}.agent-card{min-height:145px;padding:11px}.statusbar>div:last-child{display:none}.workspace-header{display:block}.workspace-header .status-tag{display:inline-flex;margin-top:12px}.main-content{padding:16px}.rail-button small{font-size:8px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Local Lucide icons; preserve labels and the existing responsive rail. */
+.control-icon,.rail-icon{display:inline-block;flex:none;vertical-align:middle;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;width:16px;height:16px}
+.rail-icon{width:22px;height:22px}
+.icon-button>.control-icon{width:19px;height:19px}
+.tiny-button>.control-icon{width:12px;height:12px;margin-right:4px}
