@@ -59,6 +59,20 @@ export function normalizeFilePath(path: string): string {
   return normalized;
 }
 
+/** Resolves a user-picked path to a workspace-relative path; native reads recheck containment. */
+export function workspaceRelativeFile(root: string, selected: string): string | null {
+  const base = normalizeFilePath(root).replace(/\/+$/, '');
+  const candidate = normalizeFilePath(selected);
+  const absolute = /^(?:\/|[A-Za-z]:)/.test(candidate);
+  if (!absolute) return candidate || null;
+  const windows = /^[A-Za-z]:\/|^\/\//.test(base + '/');
+  const prefix = base + '/';
+  const matches = windows
+    ? candidate.toLowerCase().startsWith(prefix.toLowerCase())
+    : candidate.startsWith(prefix);
+  return matches && candidate.length > prefix.length ? candidate.slice(prefix.length) : null;
+}
+
 /** Builds an LSP-compatible file URI from an absolute filesystem path. */
 export function fileUri(path: string): string {
   const normalized = normalizeFilePath(path);

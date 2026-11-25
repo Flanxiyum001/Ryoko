@@ -45,6 +45,8 @@ pub const MENUS: &[(&str, &[Entry])] = &[
         "File",
         &[
             Command("workspace.openFolder", "Open Folder…", Some("CmdOrCtrl+O")),
+            Command("workspace.openFile", "Open File…", None),
+            Command("workspace.openFileByPath", "Open File by Path…", None),
             Command("workbench.quickOpen", "Go to File…", Some("CmdOrCtrl+P")),
             Separator,
             Command("editor.save", "Save", Some("CmdOrCtrl+S")),

@@ -8,6 +8,7 @@ import {
   parseJsonRpc,
   joinWorkspacePath,
   pathFromFileUri,
+  workspaceRelativeFile,
 } from './protocol';
 
 describe('language detection', () => {
@@ -61,6 +62,15 @@ describe('file URIs', () => {
     );
     expect(pathFromFileUri('file:///C:/work/main.rs')).toBe('C:/work/main.rs');
     expect(pathFromFileUri('untitled:Untitled-1')).toBeNull();
+  });
+
+  it('resolves direct file picks without depending on the file index', () => {
+    expect(workspaceRelativeFile('/repo', '/repo/ignored/file.xyz')).toBe('ignored/file.xyz');
+    expect(workspaceRelativeFile('/repo', 'ignored/file.xyz')).toBe('ignored/file.xyz');
+    expect(workspaceRelativeFile('/repo', '/repository/file.xyz')).toBeNull();
+    expect(workspaceRelativeFile('/repo', '/other/file.xyz')).toBeNull();
+    expect(workspaceRelativeFile('\\\\?\\C:\\Repo', 'c:\\repo\\file.xyz')).toBe('file.xyz');
+    expect(workspaceRelativeFile('\\\\?\\UNC\\server\\share', '\\\\server\\share\\file.xyz')).toBe('file.xyz');
   });
 
   it('joins workspace roots without doubling or dropping separators', () => {

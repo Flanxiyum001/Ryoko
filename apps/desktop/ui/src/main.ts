@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { open as pickFile } from '@tauri-apps/plugin-dialog';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
@@ -21,7 +22,7 @@ import { THEMES, applyThemeToDocument, loadTheme, saveTheme, themeById, type The
 import {
   breadcrumbItems, fromLspDocumentSymbols, symbolChain, type OutlineSymbol,
 } from './breadcrumbs';
-import { LANGUAGE_IDS, defaultRunProfile, parseTaskArgs } from './languages';
+import { LANGUAGE_IDS, defaultRunProfile, detectEditorLanguage, parseTaskArgs } from './languages';
 import { buildTree, changeKind, filterTreePaths } from './tree';
 import { mountQuickOpen } from './quick_open_view';
 import { mountSearchPanel } from './search_view';
@@ -86,10 +87,10 @@ import {
 import {
   fileUri,
   joinWorkspacePath,
-  languageForPath,
   markerSeverityFor,
   normalizeFilePath,
   pathFromFileUri,
+  workspaceRelativeFile,
   type LspDiagnostic,
   type PublishDiagnosticsParams,
 } from './protocol';
@@ -1312,23 +1313,23 @@ interface MergeOptions {
   checkCommand: string;
 }
 
-function promptFolderPath(): Promise<string | null> {
+function promptFolderPath(file = false): Promise<string | null> {
   // Fallback for Linux desktops where the native GTK/portal folder picker
   // never appears (for example some Wayland or tiling window managers).
   return new Promise((resolve) => {
     const dialog = document.createElement('dialog');
     dialog.className = 'merge-dialog';
-    dialog.setAttribute('aria-label', 'Open folder by path');
+    dialog.setAttribute('aria-label', file ? 'Open file by path' : 'Open folder by path');
     const form = document.createElement('form');
     form.method = 'dialog';
     form.className = 'merge-form';
     const heading = document.createElement('h2');
-    heading.textContent = 'Open folder by path';
+    heading.textContent = file ? 'Open file by path' : 'Open folder by path';
     const input = document.createElement('input');
     input.type = 'text';
     input.spellcheck = false;
-    input.placeholder = '/home/you/projects/my-app';
-    input.setAttribute('aria-label', 'Absolute folder path');
+    input.placeholder = file ? 'src/main.rs or absolute file path' : '/home/you/projects/my-app';
+    input.setAttribute('aria-label', file ? 'File path' : 'Absolute folder path');
     const actions = document.createElement('div');
     actions.className = 'merge-actions';
     const cancel = document.createElement('button');
@@ -1370,6 +1371,30 @@ async function openFolderByPath(): Promise<void> {
   if (!requireNativeWorkspace()) return;
   const path = await promptFolderPath();
   if (path) await openFolder(path);
+}
+
+async function openWorkspaceFile(byPath = false): Promise<void> {
+  if (!requireNativeWorkspace()) return;
+  if (!state.root || workspaceSwitching) {
+    setStatus('Open a project folder before opening a file.');
+    return;
+  }
+  const root = state.root;
+  try {
+    const selected = byPath
+      ? await promptFolderPath(true)
+      : await pickFile({ title: 'Open File', directory: false, multiple: false,
+          defaultPath: normalizeFilePath(root) });
+    if (typeof selected !== 'string' || root !== state.root || workspaceSwitching) return;
+    const relative = workspaceRelativeFile(root, selected);
+    if (!relative) {
+      setStatus('Choose a file inside the current project, or open its project folder first.');
+      return;
+    }
+    await openFile(relative);
+  } catch (error) {
+    setStatus('Could not open file: ' + String(error) + '. Try File: Open File by Path.');
+  }
 }
 
 function promptMergeOptions(session: AgentSession): Promise<MergeOptions | null> {
@@ -1929,7 +1954,7 @@ async function openPathDiff(path: string): Promise<void> {
   try {
     const review = await invoke<ReviewFileContent>('read_review_file', { path });
     clearDiffEditor();
-    const languageId = languageForPath(path);
+    const languageId = detectEditorLanguage(path, review.modified, monaco.languages.getLanguages());
     const suffix = encodeURIComponent(path).replaceAll('%', '_');
     diffOriginalModel = monaco.editor.createModel(
       review.original,
@@ -1987,7 +2012,7 @@ async function openSessionDiff(
     if (openedRoot !== state.root || ticket !== sessionDiffTicket) return;
     clearDiffEditor();
     sessionDiffContext = { taskId: session.id, branch: session.branch, changes, index };
-    const languageId = languageForPath(change.path);
+    const languageId = detectEditorLanguage(change.path, review.modified, monaco.languages.getLanguages());
     const suffix = encodeURIComponent(`${session.id}/${change.path}`).replaceAll('%', '_');
     diffOriginalModel = monaco.editor.createModel(
       review.original,
@@ -2070,7 +2095,7 @@ async function openHunkDiff(hunk: GitHunk): Promise<void> {
   try {
     const review = await invoke<ReviewFileContent>('read_review_file', { path: hunk.path });
     clearDiffEditor();
-    const languageId = languageForPath(hunk.path);
+    const languageId = detectEditorLanguage(hunk.path, review.modified, monaco.languages.getLanguages());
     const suffix = encodeURIComponent(hunk.path).replaceAll('%', '_');
     diffOriginalModel = monaco.editor.createModel(
       review.original,
@@ -2683,7 +2708,7 @@ async function openFile(path: string): Promise<void> {
     setStatus(`Opening ${path}…`);
     const content = await invoke<string>('read_file', { path });
     if (ticket !== fileOpenGeneration || state.root !== root || workspaceSwitching) return;
-    const languageId = languageForPath(path, content);
+    const languageId = detectEditorLanguage(path, content, monaco.languages.getLanguages());
     const model = monaco.editor.createModel(content, languageId, monaco.Uri.parse(uri));
     const file: OpenFile = { path, uri, languageId, model, version: 1, savedText: content, dirty: false };
     openFiles.set(uri, file);
@@ -3504,6 +3529,8 @@ const definitions: WorkbenchCommand[] = [
   { id: 'workbench.commandPalette', category: 'View', title: 'Command Palette…', run: () => palette.open() },
   { id: 'workbench.quickOpen', category: 'File', title: 'Go to File…', run: () => quickOpen.open() },
   { id: 'workspace.openFolder', category: 'File', title: 'Open Folder…', run: () => openFolderButton.click() },
+  { id: 'workspace.openFile', category: 'File', title: 'Open File…', run: () => openWorkspaceFile() },
+  { id: 'workspace.openFileByPath', category: 'File', title: 'Open File by Path…', run: () => openWorkspaceFile(true) },
   { id: 'workspace.openFolderByPath', category: 'File', title: 'Open Folder by Path…', run: () => { void openFolderByPath(); } },
   { id: 'editor.save', category: 'File', title: 'Save', run: () => saveButton.click(), enabled: () => !saveButton.disabled },
   { id: 'editor.close', category: 'File', title: 'Close Editor', run: () => { if (state.current) closeOpenFile(state.current.path); }, enabled: () => !!state.current },

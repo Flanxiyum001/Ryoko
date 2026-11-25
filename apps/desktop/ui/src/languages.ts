@@ -1,6 +1,10 @@
 /** Editor-only language metadata; never grants permission to execute files. */
 const extensions: Record<string, string> = {
   ada:'ada', adb:'ada', ads:'ada', asm:'asm',
+  apex:'apex', bicep:'bicep', cue:'cue', d:'d', dockerfile:'dockerfile',
+  hbs:'handlebars', hcl:'hcl', kdl:'kdl', lisp:'lisp', liquid:'liquid',
+  mjs:'javascript', mts:'typescript', cts:'typescript', mmd:'mermaid',
+  psd1:'powershell', psql:'sql', svelte:'svelte', typ:'typst', wasm:'wasm', wat:'wasm',
   astro:'html', bat:'bat', bash:'shell', c:'c', cc:'cpp',
   cjs:'javascript', clj:'clojure', cljs:'clojure', cmake:'cmake',
   cob:'cobol', coffee:'coffeescript', cpp:'cpp', cxx:'cpp',
@@ -13,7 +17,7 @@ const extensions: Record<string, string> = {
   java:'java', jl:'julia', js:'javascript', jsx:'javascript',
   json:'json', json5:'json', jsonc:'json', kt:'kotlin', kts:'kotlin',
   less:'less', lhs:'haskell', lua:'lua', m:'objective-c', mm:'objective-c',
-  markdown:'markdown', md:'markdown', mdx:'markdown', mjs:'javascript',
+  markdown:'markdown', md:'markdown', mdx:'markdown',
   ml:'ocaml', mli:'ocaml', nim:'nim', nix:'nix', php:'php',
   pl:'perl', pm:'perl', prisma:'prisma', proto:'protobuf',
   ps1:'powershell', psm1:'powershell', py:'python', pyi:'python', pyw:'python',
@@ -31,7 +35,10 @@ const filenames: Record<string, string> = {
   'cmakelists.txt':'cmake', 'containerfile':'dockerfile',
   'dockerfile':'dockerfile', 'gemfile':'ruby', 'jenkinsfile':'groovy',
   'justfile':'makefile', 'makefile':'makefile', 'rakefile':'ruby',
-  'readme':'markdown', 'procfile':'shell',
+  'readme':'markdown', 'procfile':'shell', 'gnumakefile':'makefile',
+  'vagrantfile':'ruby', 'podfile':'ruby', 'brewfile':'ruby', 'fastfile':'ruby',
+  '.vimrc':'vim', '.zprofile':'shell', '.profile':'shell', '.env':'ini',
+  '.dockerignore':'ini', '.prettierignore':'ini', '.eslintignore':'ini',
 };
 const shebangs: ReadonlyArray<[RegExp, string]> = [
   [/\bpython(?:\d+(?:\.\d+)?)?\b/, 'python'],
@@ -45,14 +52,52 @@ const shebangs: ReadonlyArray<[RegExp, string]> = [
 export function detectLanguage(path: string, contents = ''): string {
   const filename = path.split(/[\\/]/).pop()?.toLowerCase() ?? '';
   if (Object.hasOwn(filenames, filename)) return filenames[filename];
-  if (filename.startsWith('dockerfile.')) return 'dockerfile';
+  if (filename.startsWith('dockerfile.') || filename.startsWith('containerfile.')) return 'dockerfile';
+  if (filename.startsWith('.env.')) return 'ini';
   const ext = filename.includes('.') ? filename.split('.').pop() ?? '' : '';
   if (Object.hasOwn(extensions, ext)) return extensions[ext];
-  const firstLine = contents.slice(0, 256).split(/\r?\n/, 1)[0];
+  const firstLine = contents.slice(0, 256).replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0];
   if (firstLine.startsWith('#!')) {
     for (const [pattern, language] of shebangs) {
       if (pattern.test(firstLine)) return language;
     }
+  }
+  return 'plaintext';
+}
+
+/** Monaco's installed language metadata extends detection without a hardcoded whitelist. */
+export interface EditorLanguageMetadata {
+  id: string;
+  extensions?: readonly string[];
+  filenames?: readonly string[];
+}
+
+export function detectEditorLanguage(
+  path: string, contents: string, registered: readonly EditorLanguageMetadata[],
+): string {
+  const detected = detectLanguage(path, contents);
+  if (detected !== 'plaintext') return detected;
+  const name = path.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+  if (name.endsWith('.txt')) return 'plaintext';
+  const exact = registered.find((mode) =>
+    mode.filenames?.some((filename) => filename.toLowerCase() === name));
+  if (exact) return exact.id;
+  let best: { id: string; length: number } | undefined;
+  for (const mode of registered) {
+    for (const extension of mode.extensions ?? []) {
+      if (name.endsWith(extension.toLowerCase()) && extension.length > (best?.length ?? 0)) {
+        best = { id: mode.id, length: extension.length };
+      }
+    }
+  }
+  if (best) return best.id;
+  // Only strong content signals; never execute code or install a language server.
+  const start = contents.trimStart().slice(0, 512);
+  if (/^<\?xml\b/i.test(start)) return 'xml';
+  if (/^<!doctype\s+html\b/i.test(start)) return 'html';
+  if (/^<\?php\b/i.test(start)) return 'php';
+  if (/^[{[]/.test(start) && contents.length <= 2 * 1024 * 1024) {
+    try { JSON.parse(contents.replace(/^\uFEFF/, '')); return 'json'; } catch { /* ambiguous text */ }
   }
   return 'plaintext';
 }

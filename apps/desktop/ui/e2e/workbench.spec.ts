@@ -9,6 +9,7 @@ test.beforeEach(async ({ page }) => {
       'main.ts': 'const greeting = "Hello Ryoko";\nconsole.log(greeting);\n',
       'other.ts': 'export const value = 42;\n',
       'src/notes.unknown': 'example',
+      'ignored/config.data': '{"enabled": true}',
     };
     let reads = 0;
     Object.assign(window, {
@@ -19,7 +20,7 @@ test.beforeEach(async ({ page }) => {
         async invoke(command: string, args: Record<string, string> = {}) {
           if (command === 'pick_workspace_folder') return '/demo/workspace';
           if (command === 'open_workspace') return { root: '/demo/workspace', name: 'workspace' };
-          if (command === 'list_files') return Object.keys(files);
+          if (command === 'list_files') return Object.keys(files).filter((path) => !path.startsWith('ignored/'));
           if (command === 'read_file') { reads++; document.body.dataset.reads = String(reads); return files[args.path]; }
           if (command === 'write_file') {
             if (files[args.path] !== args.expectedContent) throw new Error('File changed on disk');
@@ -27,7 +28,7 @@ test.beforeEach(async ({ page }) => {
             document.body.dataset.saved = args.content;
             return;
           }
-          if (command === 'git_changes') return { isRepository: true, entries: [] };
+          if (command === 'git_changes') return { isRepository: false, entries: [] };
           if (command === 'run_status') return { running: false, paused: false, exitCode: null, eventLog: null, startedMs: null, logTail: '' };
           if (command === 'lsp_registry') return { registry: { servers: [] } };
           if (command === 'lsp_start') throw new Error('Language servers are outside renderer testing');
@@ -56,6 +57,17 @@ async function edit(page: Page) {
   await page.keyboard.type('// Unsaved edit\n');
   await expect(page.getByRole('tab', { name: 'main.ts, unsaved changes' })).toBeVisible();
 }
+
+test('opens an unindexed file in a non-Git workspace and detects its content', async ({ page }) => {
+  await openProject(page);
+  await page.locator('#menu-file').click();
+  await page.getByRole('menuitem', { name: /Open File by Path/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Open file by path' });
+  await dialog.getByRole('textbox', { name: 'File path' }).fill('ignored/config.data');
+  await dialog.getByRole('button', { name: 'Open', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'config.data', exact: true })).toBeVisible();
+  await expect(page.locator('#languageMode')).toHaveValue('json');
+});
 
 test('opening folders without native IPC gives actionable guidance', async ({ page }) => {
   await page.evaluate(() => {

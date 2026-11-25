@@ -19,6 +19,8 @@ export const MENUS: readonly MenuDefinition[] = [
     label: 'File',
     entries: [
       { command: 'workspace.openFolder' },
+      { command: 'workspace.openFile' },
+      { command: 'workspace.openFileByPath' },
       { command: 'workbench.quickOpen' },
       { separator: true },
       { command: 'editor.save' },
