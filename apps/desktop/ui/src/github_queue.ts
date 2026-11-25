@@ -1,5 +1,6 @@
 /** Native Tauri read-only GitHub queue. OAuth and bearer tokens never enter this UI. */
 import { invoke } from '@tauri-apps/api/core';
+import { renderPullCard, type PullDetail } from './github_pull_card';
 
 interface GitHubRepository {
   installationId: number;
@@ -12,6 +13,7 @@ interface GitHubQueueItem {
   html_url: string;
   draft?: boolean;
   state?: string;
+  detail?: PullDetail | null;
 }
 interface GitHubQueue {
   repository: string;
@@ -22,7 +24,7 @@ interface GitHubQueue {
 export function safeGithubUrl(value: string): string | null {
   try {
     const url = new URL(value);
-    if (url.protocol !== 'https:' || url.hostname !== 'github.com'
+    if (url.protocol !== 'https:' || url.host !== 'github.com' || url.username || url.password
       || !/^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(pull|issues)\/[1-9][0-9]*\/?$/.test(url.pathname)) {
       return null;
     }
@@ -48,6 +50,45 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
   const list = byId<HTMLElement>('githubQueueList');
   let repositories: GitHubRepository[] = [];
   let paired = false;
+  let requestVersion = 0;
+  let activeDialog: HTMLDialogElement | null = null;
+
+  function closePull() {
+    activeDialog?.close();
+    activeDialog?.remove();
+    activeDialog = null;
+  }
+
+  async function openPull(item: GitHubQueueItem, repository: string) {
+    const selected = repositories.find(entry => String(entry.installationId) + ':' + String(entry.repoId) === repo.value);
+    if (!paired || !selected) return;
+    closePull();
+    const dialog = document.createElement('dialog');
+    dialog.className = 'github-pr-dialog';
+    dialog.setAttribute('aria-label', 'Pull request #' + item.number);
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'github-pr-dismiss';
+    dismiss.textContent = 'Close';
+    dismiss.addEventListener('click', () => dialog.close());
+    const content = document.createElement('div');
+    content.setAttribute('aria-live', 'polite');
+    content.append(renderPullCard(item, repository, safeGithubUrl(item.html_url), 'Loading pull request details…'));
+    dialog.append(dismiss, content);
+    activeDialog = dialog;
+    dialog.addEventListener('close', () => { dialog.remove(); if (activeDialog === dialog) activeDialog = null; });
+    document.body.append(dialog);
+    dialog.showModal();
+    try {
+      const result = await invoke<GitHubQueue>('get_github_queue', { installationId: selected.installationId, repoId: selected.repoId, pullNumber: item.number });
+      if (activeDialog !== dialog || !dialog.open) return;
+      const pull = result.pulls.find(entry => entry.number === item.number);
+      if (!pull?.detail) throw new Error('Pull request details unavailable');
+      content.replaceChildren(renderPullCard(pull, result.repository, safeGithubUrl(pull.html_url)));
+    } catch {
+      if (activeDialog === dialog && dialog.open) content.replaceChildren(renderPullCard(item, repository, safeGithubUrl(item.html_url), 'Details unavailable. Open GitHub to verify.'));
+    }
+  }
 
   function showNotice(text: string) {
     const p = document.createElement('p');
@@ -77,7 +118,14 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
         row.className = 'github-queue-item';
         const label = '#' + item.number + ' ' + item.title + (item.draft ? ' · draft' : '');
         const url = safeGithubUrl(item.html_url);
-        if (url) {
+        if (title === 'Pull requests') {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'github-pr-launch';
+          button.textContent = label;
+          button.addEventListener('click', () => { void openPull(item, queue.repository); });
+          row.append(button);
+        } else if (url) {
           const link = document.createElement('a');
           link.textContent = label;
           link.href = url;
@@ -115,14 +163,18 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
       (item) => String(item.installationId) + ':' + String(item.repoId) === repo.value,
     );
     if (!selected) return;
+    closePull();
+    const version = ++requestVersion;
     count.textContent = 'loading';
     try {
       const queue = await invoke<GitHubQueue>('get_github_queue', {
         installationId: selected.installationId,
         repoId: selected.repoId,
+        pullNumber: null,
       });
-      renderQueue(queue);
+      if (version === requestVersion && paired) renderQueue(queue);
     } catch (error) {
+      if (version !== requestVersion || !paired) return;
       count.textContent = 'unavailable';
       showNotice('GitHub queue unavailable: ' + String(error));
     }
@@ -171,6 +223,8 @@ export function mountGithubQueue(setStatus: (value: string) => void): void {
   unpair.addEventListener('click', () => {
     void invoke('disconnect_github_queue').then(() => {
       paired = false;
+      ++requestVersion;
+      closePull();
       repositories = [];
       repo.replaceChildren();
       count.textContent = 'not connected';

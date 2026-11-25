@@ -396,6 +396,11 @@ export function createRyokoServer({ broker, config, frontendPath, fetchImpl } = 
       const installationId = url.searchParams.get('installationId');
       const repoId = url.searchParams.get('repoId');
       const authorized = await client.authorizedRepo(session.token, installationId, repoId);
+      const pullNumber = url.searchParams.get('pullNumber');
+      if (pullNumber !== null) {
+        const pull = await client.view(session.token, installationId, repoId, 'pull_detail', { number: pullNumber });
+        return json(res, 200, { repository: String(authorized.full_name || '').slice(0, 180), pulls: [pull], issues: [] });
+      }
       const [pulls, issues] = await Promise.all([
         client.view(session.token, installationId, repoId, 'pulls'),
         client.view(session.token, installationId, repoId, 'issues'),
