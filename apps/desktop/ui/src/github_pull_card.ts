@@ -1,3 +1,5 @@
+import { workbenchIcon, type WorkbenchIcon } from './workbench_icons';
+
 /** Read-only, reference-matched GitHub PR detail. No merge permission is implied. */
 export interface PullDetail {
   author: string;
@@ -24,16 +26,16 @@ interface Pull {
   detail?: PullDetail | null;
 }
 const paths = {
-  pull: '<circle cx="6" cy="4" r="2"/><circle cx="18" cy="20" r="2"/><path d="M6 6v14M18 18V9a5 5 0 0 0-5-5h-2"/>',
-  branch: '<circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 17V5m0 9c0-5 5-9 10-9"/>',
-  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M10 12l-3 3 3 3m4-6 3 3-3 3"/>',
-  good: '<circle cx="12" cy="12" r="10"/><path d="m8 12 3 3 5-6"/>',
-  unknown: '<circle cx="12" cy="12" r="10"/><path d="M12 7v5m0 4h.01"/>',
-  bad: '<circle cx="12" cy="12" r="10"/><path d="m8 8 8 8m0-8-8 8"/>',
-  copy: '<rect x="8" y="8" width="13" height="13" rx="3"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
-  external: '<path d="M13 4h7v7m0-7L10 14M9 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
-  chevron: '<path d="m5 9 7 7 7-7"/>',
-};
+  pull: 'git-pull-request',
+  branch: 'git-branch',
+  file: 'file-code',
+  good: 'circle-check',
+  unknown: 'circle-alert',
+  bad: 'circle-x',
+  copy: 'copy',
+  external: 'external-link',
+  chevron: 'chevron-down',
+} as const satisfies Record<string, WorkbenchIcon>;
 function node(tag: string, className = '', value = '') {
   const el = document.createElement(tag);
   el.className = className;
@@ -43,8 +45,7 @@ function node(tag: string, className = '', value = '') {
 function icon(name: keyof typeof paths) {
   const el = node('span', 'github-pr-icon github-pr-icon-' + name);
   el.setAttribute('aria-hidden', 'true');
-  // Only static, locally-authored SVG paths; GitHub strings always use textContent.
-  el.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">' + paths[name] + '</svg>';
+  el.append(workbenchIcon(paths[name], 'control-icon'));
   return el;
 }
 export function mergePresentation(pull: Pull): { label: string; note: string; tone: 'good' | 'unknown' | 'bad' } {

@@ -275,6 +275,10 @@ body.native-menu .menu-bar { display: none; }
   width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.5;
   stroke-linecap: round; stroke-linejoin: round;
 }
+.control-icon {
+  display: inline-block; flex: none; width: 16px; height: 16px; vertical-align: middle;
+  fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
+}
 .rail-button .rail-label {
   position: absolute; top: 50%; left: 52px; z-index: 20; transform: translateY(-50%);
   padding: var(--sp-1) var(--sp-3); color: var(--text); background: var(--menu-bg);
@@ -343,9 +347,11 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
   border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg);
 }
 .tree-chevron.open { transform: rotate(90deg); }
-.folder-icon { position: relative; flex: none; width: 15px; height: 11px; border-radius: 2px; background: var(--folder); opacity: .85; }
-.folder-icon::before { content: ''; position: absolute; top: -2px; left: 0; width: 6px; height: 3px; border-radius: 1px 1px 0 0; background: inherit; }
-.folder-icon.open { opacity: 1; }
+.folder-icon, .file-icon > svg {
+  flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round;
+}
+.folder-icon { color: var(--folder); }
 .file-icon {
   display: inline-grid; place-items: center; flex: none; width: 16px; height: 16px;
   font: 700 8.5px/1 var(--font-mono); letter-spacing: -.04em;
@@ -459,9 +465,12 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
   display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 7px 0;
   border: 0; background: none; text-align: left; cursor: pointer;
 }
-.welcome-action span:first-child { color: var(--accent); font-size: var(--fs-base); }
-.welcome-action span:last-child { color: var(--muted); font-size: var(--fs-sm); }
-.welcome-action:hover span:first-child { text-decoration: underline; }
+.welcome-action { flex-direction: row; align-items: flex-start; gap: var(--sp-3); }
+.welcome-action > .control-icon { margin-top: 2px; color: var(--accent); }
+.welcome-action-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.welcome-action-copy > span:first-child { color: var(--accent); font-size: var(--fs-base); }
+.welcome-action-copy > span:last-child { color: var(--muted); font-size: var(--fs-sm); }
+.welcome-action:hover .welcome-action-copy > span:first-child { text-decoration: underline; }
 .welcome-guide p { margin: 0 0 var(--sp-4); font-size: var(--fs-md); }
 .welcome-guide-copy { margin-top: var(--sp-5) !important; }
 .welcome-recent { display: flex; flex-direction: column; gap: var(--sp-2); max-height: 190px; overflow: auto; }
@@ -1155,4 +1164,11 @@ pre.mission-detail-value { max-height: 150px; }
   .github-pr-diff-blocks { display: none; }
   .github-pr-footer { padding: 10px 14px; }
   .github-pr-expanded-body { padding: 0 14px 12px; }
+}
+
+/* Keep compact toolbars readable; glyphs supplement rather than replace labels. */
+.button.compact > .control-icon, .bottom-tab > .control-icon, .tab-close > .control-icon { width: 14px; height: 14px; }
+.bottom-tab > .control-icon { margin-right: 4px; }
+@media (max-width: 720px) {
+  .top-actions .button > .control-icon, .tabbar .button > .control-icon, .bottom-tab > .control-icon { display: none; }
 }

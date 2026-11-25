@@ -13,31 +13,31 @@
     <header class="topbar">
       <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/ryoko-logo.png" alt=""></span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
       <div id="menuBar" class="menu-bar"></div>
-      <button id="quickOpenButton" class="command-center" type="button" title="Quick open file (Ctrl+P / Cmd+P)"><span aria-hidden="true">⌕</span><span id="workspaceName">Search files in workspace</span><kbd>Ctrl / ⌘ P</kbd></button>
+      <button id="quickOpenButton" class="command-center" type="button" title="Quick open file (Ctrl+P / Cmd+P)"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="search"><circle cx="11" cy="11" r="8" /> <path d="m21 21-4.3-4.3" /></svg><span id="workspaceName">Search files in workspace</span><kbd>Ctrl / ⌘ P</kbd></button>
       <div class="top-actions">
-        <button id="openFolder" class="button primary" type="button">Open folder…</button>
-        <button id="saveFile" class="button ghost" type="button" disabled>Save</button>
-        <button id="openMarketplace" class="button ghost" type="button">Extensions</button>
-        <button id="openSettings" class="button ghost" type="button">Settings</button>
+        <button id="openFolder" class="button primary" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="folder-open"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></svg>Open folder…</button>
+        <button id="saveFile" class="button ghost" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" /> <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" /> <path d="M7 3v4a1 1 0 0 0 1 1h7" /></svg>Save</button>
+        <button id="openMarketplace" class="button ghost" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="blocks"><rect width="7" height="7" x="14" y="3" rx="1" /> <path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3" /></svg>Extensions</button>
+        <button id="openSettings" class="button ghost" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="settings"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /> <circle cx="12" cy="12" r="3" /></svg>Settings</button>
         <span class="shortcut-hint">⌘S / Ctrl+S</span>
       </div>
     </header>
 
     <div class="layout hide-inspector" data-active-view="explorer">
       <nav class="activity-rail" aria-label="Workbench views">
-        <button class="rail-button active" type="button" data-view="explorer" aria-label="Show explorer" aria-pressed="true" title="Explorer"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg><span class="rail-label">Files</span></button>
-        <button id="railSearch" class="rail-button" type="button" aria-label="Search workspace" title="Search workspace"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5.5 5.5"/></svg><span class="rail-label">Search</span></button>
-        <button class="rail-button" type="button" data-view="editor" aria-label="Show editor" aria-pressed="false" title="Editor"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m8 7-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16"/></svg><span class="rail-label">Editor</span></button>
-        <button class="rail-button" type="button" data-view="chat" aria-label="Show agent chat" aria-pressed="false" title="Agent chat"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2l2.6 7.4L22 12l-7.4 2.6L12 22l-2.6-7.4L2 12l7.4-2.6z"/></svg><span class="rail-label">Chat</span></button>
-        <button class="rail-button" type="button" data-view="mission" aria-label="Show Mission Control" aria-pressed="false" title="Mission Control"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z"/></svg><span class="rail-label">Mission</span></button>
-        <button class="rail-button" type="button" data-view="changes" aria-label="Show changes" aria-pressed="false" title="Changes"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-6 4-11.5 8.5"/></svg><span class="rail-label">Changes</span></button>
-        <button class="rail-button" type="button" data-view="problems" aria-label="Show problems" aria-pressed="false" title="Problems"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.2v.3"/></svg><span class="rail-label">Issues</span></button>
-        <button id="railExtensions" class="rail-button" type="button" aria-label="Browse extensions" title="Extensions"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="11" width="7" height="7" rx="1"/><rect x="10" y="11" width="7" height="7" rx="1"/><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="2.5" width="7" height="7" rx="1" transform="rotate(10 17.5 6)"/></svg><span class="rail-label">Extensions</span></button>
-        <button class="rail-button rail-bottom" type="button" data-view="settings" aria-label="Open settings" title="Settings"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg><span class="rail-label">Setup</span></button>
+        <button class="rail-button active" type="button" data-view="explorer" aria-label="Show explorer" aria-pressed="true" title="Explorer"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="files"><path d="M20 7h-3a2 2 0 0 1-2-2V2" /> <path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z" /> <path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8" /></svg><span class="rail-label">Files</span></button>
+        <button id="railSearch" class="rail-button" type="button" aria-label="Search workspace" title="Search workspace"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="search"><circle cx="11" cy="11" r="8" /> <path d="m21 21-4.3-4.3" /></svg><span class="rail-label">Search</span></button>
+        <button class="rail-button" type="button" data-view="editor" aria-label="Show editor" aria-pressed="false" title="Editor"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="code-xml"><path d="m18 16 4-4-4-4" /> <path d="m6 8-4 4 4 4" /> <path d="m14.5 4-5 16" /></svg><span class="rail-label">Editor</span></button>
+        <button class="rail-button" type="button" data-view="chat" aria-label="Show agent chat" aria-pressed="false" title="Agent chat"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="message-circle"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" /></svg><span class="rail-label">Chat</span></button>
+        <button class="rail-button" type="button" data-view="mission" aria-label="Show Mission Control" aria-pressed="false" title="Mission Control"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="workflow"><rect width="8" height="8" x="3" y="3" rx="2" /> <path d="M7 11v4a2 2 0 0 0 2 2h4" /> <rect width="8" height="8" x="13" y="13" rx="2" /></svg><span class="rail-label">Mission</span></button>
+        <button class="rail-button" type="button" data-view="changes" aria-label="Show changes" aria-pressed="false" title="Changes"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="git-branch"><line x1="6" x2="6" y1="3" y2="15" /> <circle cx="18" cy="6" r="3" /> <circle cx="6" cy="18" r="3" /> <path d="M18 9a9 9 0 0 1-9 9" /></svg><span class="rail-label">Changes</span></button>
+        <button class="rail-button" type="button" data-view="problems" aria-label="Show problems" aria-pressed="false" title="Problems"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="circle-alert"><circle cx="12" cy="12" r="10" /> <line x1="12" x2="12" y1="8" y2="12" /> <line x1="12" x2="12.01" y1="16" y2="16" /></svg><span class="rail-label">Issues</span></button>
+        <button id="railExtensions" class="rail-button" type="button" aria-label="Browse extensions" title="Extensions"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="blocks"><rect width="7" height="7" x="14" y="3" rx="1" /> <path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3" /></svg><span class="rail-label">Extensions</span></button>
+        <button class="rail-button rail-bottom" type="button" data-view="settings" aria-label="Open settings" title="Settings"><svg class="rail-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="settings"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /> <circle cx="12" cy="12" r="3" /></svg><span class="rail-label">Setup</span></button>
       </nav>
       <aside class="explorer" id="explorerPane" aria-label="Workspace explorer">
         <div id="sidebarSash" class="sash sash-vertical sash-right" role="separator" aria-orientation="vertical" aria-label="Resize side bar" tabindex="0" title="Drag to resize. Double-click to reset."></div>
-        <div class="panel-head"><span>EXPLORER</span><button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files">↻</button></div>
+        <div class="panel-head"><span>EXPLORER</span><button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg></button></div>
         <div class="explorer-summary"><span id="fileCount" class="counter">0 files</span><span>WORKSPACE</span></div>
         <label class="sr-only" for="fileFilter">Filter files</label>
         <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
@@ -53,9 +53,9 @@
           <nav id="breadcrumbs" class="breadcrumbs" aria-label="Breadcrumbs"></nav>
           <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
           <span class="status-spacer"></span>
-          <button id="runActiveFile" class="button primary compact" type="button" disabled>Run file</button>
-          <button id="toggleTerminal" class="button ghost compact" type="button">Terminal</button>
-          <button id="toggleDebug" class="button ghost compact" type="button">Debug</button>
+          <button id="runActiveFile" class="button primary compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="play"><polygon points="6 3 20 12 6 21 6 3" /></svg>Run file</button>
+          <button id="toggleTerminal" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="terminal"><polyline points="4 17 10 11 4 5" /> <line x1="12" x2="20" y1="19" y2="19" /></svg>Terminal</button>
+          <button id="toggleDebug" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="bug"><path d="m8 2 1.88 1.88" /> <path d="M14.12 3.88 16 2" /> <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1" /> <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6" /> <path d="M12 20v-9" /> <path d="M6.53 9C4.6 8.8 3 7.1 3 5" /> <path d="M6 13H2" /> <path d="M3 21c0-2.1 1.7-3.9 3.8-4" /> <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4" /> <path d="M22 13h-4" /> <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4" /></svg>Debug</button>
         </div>
         <div id="editor" class="editor hidden" role="tabpanel" aria-label="Active file editor"></div>
         <div id="vimStatus" class="vim-status hidden" aria-live="polite"></div>
@@ -65,12 +65,12 @@
             <span class="hint">Inline hunk actions update the working tree or start a revision run.</span>
             <button id="diffPrevFile" class="button ghost compact" type="button" hidden>← Previous file</button>
             <button id="diffNextFile" class="button ghost compact" type="button" hidden>Next file →</button>
-            <button id="diffReviewClose" class="button ghost compact" type="button">Close diff</button>
+            <button id="diffReviewClose" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="x"><path d="M18 6 6 18" /> <path d="m6 6 12 12" /></svg>Close diff</button>
           </div>
           <div id="proposalToolbar" class="proposal-toolbar hidden" aria-label="Review model proposal">
             <div class="proposal-actions"><strong>Proposed code · review each change</strong><span class="status-spacer"></span>
-              <button id="proposalApply" class="button primary compact" type="button" disabled>Apply approved hunks to editor</button>
-              <button id="proposalDiscard" class="button ghost compact" type="button">Discard proposal</button>
+              <button id="proposalApply" class="button primary compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="check"><path d="M20 6 9 17l-5-5" /></svg>Apply approved hunks to editor</button>
+              <button id="proposalDiscard" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="x"><path d="M18 6 6 18" /> <path d="m6 6 12 12" /></svg>Discard proposal</button>
             </div>
             <div id="proposalHunks" class="proposal-hunks"></div>
           </div>
@@ -82,13 +82,13 @@
             <div class="welcome-columns">
               <section class="welcome-start" aria-label="Get started">
                 <h2>Start</h2>
-                <button id="emptyOpenFolder" class="welcome-action" type="button"><span>Open folder…</span><span>Choose a local project</span></button>
-                <button id="welcomeOpenPath" class="welcome-action" type="button"><span>Open folder by path…</span><span>Type a path if the folder picker does not appear</span></button>
-                <button id="welcomeClone" class="welcome-action" type="button"><span>Clone a repository…</span><span>Bring a Git repository onto your machine</span></button>
-                <button id="welcomeOnboarding" class="welcome-action" type="button"><span>Configure your AI provider</span><span>Secure keychain setup and a guided first task</span></button>
-                <button id="welcomeQuickOpen" class="welcome-action" type="button"><span>Go to file…</span><span>Find a file in your workspace</span></button>
-                <button id="welcomeMission" class="welcome-action" type="button"><span>Open Mission Control</span><span>Give your agents a task</span></button>
-                <button id="welcomeSettings" class="welcome-action" type="button"><span>Configure Ryoko</span><span>Providers, languages and shortcuts</span></button>
+                <button id="emptyOpenFolder" class="welcome-action" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="folder-open"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></svg><span class="welcome-action-copy"><span>Open folder…</span><span>Choose a local project</span></span></button>
+                <button id="welcomeOpenPath" class="welcome-action" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="folder"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg><span class="welcome-action-copy"><span>Open folder by path…</span><span>Type a path if the folder picker does not appear</span></span></button>
+                <button id="welcomeClone" class="welcome-action" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="git-branch"><line x1="6" x2="6" y1="3" y2="15" /> <circle cx="18" cy="6" r="3" /> <circle cx="6" cy="18" r="3" /> <path d="M18 9a9 9 0 0 1-9 9" /></svg><span class="welcome-action-copy"><span>Clone a repository…</span><span>Bring a Git repository onto your machine</span></span></button>
+                <button id="welcomeOnboarding" class="welcome-action" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="settings"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /> <circle cx="12" cy="12" r="3" /></svg><span class="welcome-action-copy"><span>Configure your AI provider</span><span>Secure keychain setup and a guided first task</span></span></button>
+                <button id="welcomeQuickOpen" class="welcome-action" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="search"><circle cx="11" cy="11" r="8" /> <path d="m21 21-4.3-4.3" /></svg><span class="welcome-action-copy"><span>Go to file…</span><span>Find a file in your workspace</span></span></button>
+                <button id="welcomeMission" class="welcome-action" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="workflow"><rect width="8" height="8" x="3" y="3" rx="2" /> <path d="M7 11v4a2 2 0 0 0 2 2h4" /> <rect width="8" height="8" x="13" y="13" rx="2" /></svg><span class="welcome-action-copy"><span>Open Mission Control</span><span>Give your agents a task</span></span></button>
+                <button id="welcomeSettings" class="welcome-action" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="settings"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /> <circle cx="12" cy="12" r="3" /></svg><span class="welcome-action-copy"><span>Configure Ryoko</span><span>Providers, languages and shortcuts</span></span></button>
               </section>
               <section class="welcome-guide" aria-label="Workbench guide">
                 <h2>Recent folders</h2>
@@ -110,10 +110,10 @@
         <section id="bottomPanel" class="bottom-panel hidden" aria-label="Terminal and debugger">
           <div id="panelSash" class="sash sash-horizontal" role="separator" aria-orientation="horizontal" aria-label="Resize panel" tabindex="0" title="Drag to resize. Double-click to reset."></div>
           <div class="bottom-tabs">
-            <button id="terminalTab" class="bottom-tab active" type="button">TERMINAL</button>
-            <button id="taskTab" class="bottom-tab" type="button">OUTPUT</button>
-            <button id="searchTab" class="bottom-tab" type="button">SEARCH</button>
-            <button id="debugTab" class="bottom-tab" type="button">DEBUG</button>
+            <button id="terminalTab" class="bottom-tab active" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="terminal"><polyline points="4 17 10 11 4 5" /> <line x1="12" x2="20" y1="19" y2="19" /></svg>TERMINAL</button>
+            <button id="taskTab" class="bottom-tab" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="code-xml"><path d="m18 16 4-4-4-4" /> <path d="m6 8-4 4 4 4" /> <path d="m14.5 4-5 16" /></svg>OUTPUT</button>
+            <button id="searchTab" class="bottom-tab" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="search"><circle cx="11" cy="11" r="8" /> <path d="m21 21-4.3-4.3" /></svg>SEARCH</button>
+            <button id="debugTab" class="bottom-tab" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="bug"><path d="m8 2 1.88 1.88" /> <path d="M14.12 3.88 16 2" /> <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1" /> <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6" /> <path d="M12 20v-9" /> <path d="M6.53 9C4.6 8.8 3 7.1 3 5" /> <path d="M6 13H2" /> <path d="M3 21c0-2.1 1.7-3.9 3.8-4" /> <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4" /> <path d="M22 13h-4" /> <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4" /></svg>DEBUG</button>
             <span id="bottomStatus" class="hint"></span>
             <span class="status-spacer"></span>
             <button id="bottomClose" class="button ghost compact" type="button">Hide</button>
@@ -124,16 +124,16 @@
               <input id="taskProgram" spellcheck="false" autocomplete="off" placeholder="python3">
               <label for="taskArgs">Arguments</label>
               <input id="taskArgs" spellcheck="false" autocomplete="off" placeholder="-u {file}">
-              <button id="taskRun" type="button" class="button primary compact">Run task…</button>
-              <button id="taskStop" type="button" class="button ghost compact" disabled>Stop</button>
+              <button id="taskRun" type="button" class="button primary compact"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="play"><polygon points="6 3 20 12 6 21 6 3" /></svg>Run task…</button>
+              <button id="taskStop" type="button" class="button ghost compact" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="square"><rect width="18" height="18" x="3" y="3" rx="2" /></svg>Stop</button>
             </div>
             <p class="hint" id="taskLabel">Choose a source file. Tasks run locally after your approval. Use {file} or {workspace} as an argument.</p>
             <pre id="taskOutput" class="task-output" role="log" aria-live="polite"></pre>
           </div>
           <div id="terminalPanel" class="bottom-content terminal-panel">
             <div class="terminal-toolbar">
-              <button id="terminalStart" class="button primary compact" type="button">Start shell</button>
-              <button id="terminalStop" class="button ghost compact" type="button" disabled>Stop</button>
+              <button id="terminalStart" class="button primary compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="play"><polygon points="6 3 20 12 6 21 6 3" /></svg>Start shell</button>
+              <button id="terminalStop" class="button ghost compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="square"><rect width="18" height="18" x="3" y="3" rx="2" /></svg>Stop</button>
               <span class="hint">Local PTY in the open workspace. The shell starts only when you ask.</span>
             </div>
             <div id="terminalHost" class="terminal-host"></div>
@@ -142,7 +142,7 @@
             <div class="search-controls">
               <input id="searchInput" type="search" placeholder="Search workspace (regex…)" autocomplete="off" spellcheck="false">
               <label class="run-check"><input id="searchCaseSensitive" type="checkbox"> Aa</label>
-              <button id="searchRun" class="button primary compact" type="button">Search</button>
+              <button id="searchRun" class="button primary compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="search"><circle cx="11" cy="11" r="8" /> <path d="m21 21-4.3-4.3" /></svg>Search</button>
               <input id="searchReplace" type="text" placeholder="Replace with… ($1 groups)" autocomplete="off" spellcheck="false">
               <button id="searchReplaceRun" class="button compact" type="button" disabled>Preview, then apply</button>
             </div>
@@ -158,16 +158,16 @@
               <input id="debugArgs" type="text" spellcheck="false" placeholder="dap">
               <label for="debugProgram">Program</label>
               <input id="debugProgram" type="text" spellcheck="false" placeholder="path/to/program">
-              <button id="debugStart" class="button primary compact" type="button">Start</button>
-              <button id="debugStop" class="button ghost compact" type="button" disabled>Stop</button>
-              <button id="debugRestart" class="button ghost compact" type="button" disabled title="Restart debug session (Mod+Shift+F5)">Restart</button>
+              <button id="debugStart" class="button primary compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="play"><polygon points="6 3 20 12 6 21 6 3" /></svg>Start</button>
+              <button id="debugStop" class="button ghost compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="square"><rect width="18" height="18" x="3" y="3" rx="2" /></svg>Stop</button>
+              <button id="debugRestart" class="button ghost compact" type="button" disabled title="Restart debug session (Mod+Shift+F5)"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="rotate-cw"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /></svg>Restart</button>
             </div>
             <div class="debug-toolbar">
-              <button id="debugContinue" class="button ghost compact" type="button" disabled title="Continue (F5)">Continue</button>
-              <button id="debugNext" class="button ghost compact" type="button" disabled title="Step over (F10)">Step over</button>
-              <button id="debugStepIn" class="button ghost compact" type="button" disabled title="Step in (F11)">Step in</button>
-              <button id="debugStepOut" class="button ghost compact" type="button" disabled title="Step out (Shift+F11)">Step out</button>
-              <button id="debugBreakpoint" class="button ghost compact" type="button" disabled title="Toggle breakpoint (F9)">Toggle breakpoint</button>
+              <button id="debugContinue" class="button ghost compact" type="button" disabled title="Continue (F5)"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="play"><polygon points="6 3 20 12 6 21 6 3" /></svg>Continue</button>
+              <button id="debugNext" class="button ghost compact" type="button" disabled title="Step over (F10)"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="step-forward"><line x1="6" x2="6" y1="4" y2="20" /> <polygon points="10,4 20,12 10,20" /></svg>Step over</button>
+              <button id="debugStepIn" class="button ghost compact" type="button" disabled title="Step in (F11)"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="arrow-down-to-line"><path d="M12 17V3" /> <path d="m6 11 6 6 6-6" /> <path d="M19 21H5" /></svg>Step in</button>
+              <button id="debugStepOut" class="button ghost compact" type="button" disabled title="Step out (Shift+F11)"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="arrow-up-from-line"><path d="m18 9-6-6-6 6" /> <path d="M12 3v14" /> <path d="M5 21h14" /></svg>Step out</button>
+              <button id="debugBreakpoint" class="button ghost compact" type="button" disabled title="Toggle breakpoint (F9)"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="circle-dot"><circle cx="12" cy="12" r="10" /> <circle cx="12" cy="12" r="1" /></svg>Toggle breakpoint</button>
               <span id="debugStatus" class="hint">Start a DAP adapter over stdio. No debugger is emulated.</span>
             </div>
             <div class="debug-workbench" id="debugWorkbench">
@@ -229,14 +229,14 @@
               <label class="sr-only" for="chatMentionValue">Context pin value</label>
               <input id="chatMentionValue" list="chatMentionChoices" placeholder="File path, symbol or docs query…" autocomplete="off">
               <datalist id="chatMentionChoices"></datalist>
-              <button id="chatPinMention" class="button ghost compact" type="button">Pin</button>
+              <button id="chatPinMention" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="pin"><path d="M12 17v5" /> <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg>Pin</button>
               <button id="chatPinDiff" class="button ghost compact" type="button">@git-diff</button>
               <button id="chatAttachSelection" class="button ghost compact" type="button">@selection</button>
             </div>
             <div class="chat-compose-actions">
               <span id="chatNote" class="hint">No changes are applied without your approval.</span>
-              <button id="chatStop" class="button ghost compact" type="button" disabled>Stop</button>
-              <button id="chatSend" class="button primary compact" type="button">Send</button>
+              <button id="chatStop" class="button ghost compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="square"><rect width="18" height="18" x="3" y="3" rx="2" /></svg>Stop</button>
+              <button id="chatSend" class="button primary compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="send"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" /> <path d="m21.854 2.147-10.94 10.939" /></svg>Send</button>
             </div>
           </div>
         </section>
@@ -250,7 +250,7 @@
         <section class="agent-sessions" aria-label="Agent sessions">
           <div class="panel-head"><span>AGENT SESSIONS</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
           <div class="agent-session-toolbar">
-            <button id="agentSessionRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="agentSessionRefresh" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg>Refresh</button>
           </div>
           <div id="agentSessionList" class="agent-session-list" aria-live="polite">
             <p class="hint">Open a workspace to see active and published agent worktrees.</p>
@@ -274,9 +274,9 @@
             </div>
             <div class="run-actions">
               <label class="run-check"><input id="runTeam" type="checkbox" checked> Team DAG</label>
-              <button id="runStart" class="button primary compact" type="submit">Run</button>
-              <button id="runPause" class="button ghost compact" type="button" disabled>Pause</button>
-              <button id="runCancel" class="button ghost compact" type="button" disabled>Cancel</button>
+              <button id="runStart" class="button primary compact" type="submit"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="play"><polygon points="6 3 20 12 6 21 6 3" /></svg>Run</button>
+              <button id="runPause" class="button ghost compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="pause"><rect x="14" y="4" width="4" height="16" rx="1" /> <rect x="6" y="4" width="4" height="16" rx="1" /></svg>Pause</button>
+              <button id="runCancel" class="button ghost compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="square"><rect width="18" height="18" x="3" y="3" rx="2" /></svg>Cancel</button>
             </div>
             <span id="runState" class="hint" role="status" aria-live="polite">No run started.</span>
             <pre id="runLog" class="run-log hidden" aria-label="Agent run output"></pre>
@@ -284,7 +284,7 @@
           <div class="mission-toolbar">
             <label class="sr-only" for="missionLog">Mission Control event log</label>
             <select id="missionLog" class="mission-select"></select>
-            <button id="missionRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="missionRefresh" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg>Refresh</button>
             <button id="missionFocus" class="button ghost compact" type="button" disabled>Focus</button>
           </div>
           <div id="missionGraph" class="mission-graph">
@@ -298,7 +298,7 @@
           <summary>CONNECTORS <span id="connectorCount" class="counter">not loaded</span></summary>
           <div class="connectors-toolbar">
             <span id="connectorPath" class="connector-path">Open a folder to configure connectors.</span>
-            <button id="connectorRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="connectorRefresh" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg>Refresh</button>
           </div>
           <p id="connectorNotice" class="connector-notice hidden" role="alert"></p>
           <div id="connectorList" class="connector-list" aria-live="polite">
@@ -317,7 +317,7 @@
           <div class="github-queue-toolbar">
             <label class="sr-only" for="githubRepo">Authorized GitHub repository</label>
             <select id="githubRepo" aria-label="Authorized GitHub repository"></select>
-            <button id="githubRefresh" class="button ghost compact" type="button">Refresh</button>
+            <button id="githubRefresh" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg>Refresh</button>
             <button id="githubUnpair" class="button ghost compact" type="button">Disconnect</button>
           </div>
           <div id="githubQueueList" class="github-queue-list">
@@ -327,7 +327,7 @@
         <details class="hunk-review">
           <summary>GIT HUNK REVIEW <span id="hunkCount" class="counter">0</span></summary>
           <div class="hunk-toolbar">
-            <button id="hunkRefresh" class="button ghost compact" type="button">Scan</button>
+            <button id="hunkRefresh" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg>Scan</button>
             <button id="hunkStage" class="button primary compact" type="button" disabled>Stage selected…</button>
           </div>
           <div id="hunkList" class="hunk-list" aria-label="Selectable Git hunks">
@@ -338,7 +338,7 @@
         <details class="changes" id="changesDetails">
           <summary>CHANGES <span id="changesSummary" class="counter">no folder</span></summary>
           <div class="hunk-toolbar">
-            <button id="changesRefresh" class="button ghost compact" type="button">Scan</button>
+            <button id="changesRefresh" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg>Scan</button>
           </div>
           <div id="changesList" class="change-list" aria-label="Working tree changes">
             <p class="hint">Open a Git repository to review every modified file.</p>
@@ -367,14 +367,14 @@
       <span class="settings-title">Settings</span>
       <span id="settingsPath" class="hint"></span>
       <span class="status-spacer"></span>
-      <button id="settingsClose" class="button ghost compact" type="button">Close</button>
+      <button id="settingsClose" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="x"><path d="M18 6 6 18" /> <path d="m6 6 12 12" /></svg>Close</button>
     </div>
     <div class="settings-body">
       <section class="settings-section">
         <h2>Provider catalog</h2>
         <p class="hint">A validated <code>ryoko.providers</code>-style catalog. API keys stay in environment variables referenced by <code>api_key_env</code>.</p>
         <textarea id="settingsProviders" rows="10" spellcheck="false" placeholder="{}"></textarea>
-        <button id="settingsSaveProviders" class="button primary compact" type="button">Validate &amp; save</button>
+        <button id="settingsSaveProviders" class="button primary compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="check"><path d="M20 6 9 17l-5-5" /></svg>Validate &amp; save</button>
       </section>
       <section class="settings-section">
         <h2>Language servers</h2>
@@ -382,7 +382,7 @@
         <div id="settingsServerRows" class="settings-server-rows"></div>
         <div class="settings-actions">
           <button id="settingsAddServer" class="button ghost compact" type="button">Add server</button>
-          <button id="settingsSaveServers" class="button primary compact" type="button">Validate &amp; save</button>
+          <button id="settingsSaveServers" class="button primary compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="check"><path d="M20 6 9 17l-5-5" /></svg>Validate &amp; save</button>
         </div>
       </section>
       <section class="settings-section">
@@ -425,8 +425,8 @@
     <input id="inlineEditInput" type="text" placeholder="Edit the selection with the agent… (Enter to run)" autocomplete="off" spellcheck="false">
     <div class="inline-edit-actions">
       <button id="inlineEditRun" class="button primary compact" type="button">Edit</button>
-      <button id="inlineEditAccept" class="button compact hidden" type="button">Accept</button>
-      <button id="inlineEditCancel" class="button ghost compact" type="button">Cancel</button>
+      <button id="inlineEditAccept" class="button compact hidden" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="check"><path d="M20 6 9 17l-5-5" /></svg>Accept</button>
+      <button id="inlineEditCancel" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="x"><path d="M18 6 6 18" /> <path d="m6 6 12 12" /></svg>Cancel</button>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

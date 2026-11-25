@@ -8,6 +8,7 @@ test.beforeEach(async ({ page }) => {
       'README.md': '# Demo workspace\n',
       'main.ts': 'const greeting = "Hello Ryoko";\nconsole.log(greeting);\n',
       'other.ts': 'export const value = 42;\n',
+      'src/notes.unknown': 'example',
     };
     let reads = 0;
     Object.assign(window, {
@@ -236,4 +237,47 @@ test('an available update is announced and installs only when the user asks', as
   await expect(page.locator('body')).not.toHaveAttribute('data-installed', 'yes');
   await notice.getByRole('button', { name: 'Download and install' }).click();
   await expect(page.locator('body')).toHaveAttribute('data-installed', 'yes');
+});
+
+
+test('workbench uses distinct accessible local SVG icons', async ({ page }) => {
+  const rail = page.getByRole('navigation', { name: 'Workbench views' });
+  const icons = rail.locator('button > svg.rail-icon');
+  await expect(icons).toHaveCount(9);
+  const names = await icons.evaluateAll(nodes => nodes.map(node => node.getAttribute('data-icon')));
+  expect(new Set(names).size).toBe(9);
+  for (const icon of await icons.all()) {
+    await expect(icon).toHaveAttribute('aria-hidden', 'true');
+    await expect(icon).toHaveAttribute('focusable', 'false');
+  }
+  await expect(page.locator('#quickOpenButton svg')).toHaveAttribute('data-icon', 'search');
+  await expect(page.locator('#refreshFiles svg')).toHaveAttribute('data-icon', 'refresh-cw');
+  await openProject(page);
+  const folder = page.locator('.tree-dir').filter({ hasText: 'src' });
+  await expect(folder.locator('svg')).toHaveAttribute('data-icon', 'folder');
+  await folder.click();
+  await expect(folder.locator('svg')).toHaveAttribute('data-icon', 'folder-open');
+  await expect(page.locator('.file-link').filter({ hasText: 'notes.unknown' }).locator('svg')).toHaveAttribute('data-icon', 'file');
+  await expect(page.locator('.file-link').filter({ hasText: 'main.ts' }).locator('.file-icon')).toHaveText('TS');
+});
+
+
+test('action icons retain labels and editor tab close behavior', async ({ page }) => {
+  for (const [id, name] of Object.entries({
+    openFolder: 'folder-open', saveFile: 'save', runActiveFile: 'play',
+    toggleTerminal: 'terminal', toggleDebug: 'bug', chatSend: 'send',
+    debugNext: 'step-forward', debugStepIn: 'arrow-down-to-line',
+    debugStepOut: 'arrow-up-from-line', runPause: 'pause',
+    proposalApply: 'check', settingsClose: 'x',
+  })) {
+    await expect(page.locator('#' + id + ' > svg')).toHaveAttribute('data-icon', name);
+    await expect(page.locator('#' + id + ' > svg')).toHaveAttribute('aria-hidden', 'true');
+    expect((await page.locator('#' + id).textContent())?.trim()).not.toBe('');
+  }
+  await openProject(page);
+  await openFile(page, 'main.ts');
+  const close = page.getByRole('button', { name: 'Close main.ts', exact: true });
+  await expect(close.locator('svg')).toHaveAttribute('data-icon', 'x');
+  await close.click();
+  await expect(page.getByRole('tab')).toHaveCount(0);
 });
