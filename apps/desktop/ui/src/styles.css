@@ -465,9 +465,12 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
   display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 7px 0;
   border: 0; background: none; text-align: left; cursor: pointer;
 }
-.welcome-action span:first-child { color: var(--accent); font-size: var(--fs-base); }
-.welcome-action span:last-child { color: var(--muted); font-size: var(--fs-sm); }
-.welcome-action:hover span:first-child { text-decoration: underline; }
+.welcome-action { flex-direction: row; align-items: flex-start; gap: var(--sp-3); }
+.welcome-action > .control-icon { margin-top: 2px; color: var(--accent); }
+.welcome-action-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.welcome-action-copy > span:first-child { color: var(--accent); font-size: var(--fs-base); }
+.welcome-action-copy > span:last-child { color: var(--muted); font-size: var(--fs-sm); }
+.welcome-action:hover .welcome-action-copy > span:first-child { text-decoration: underline; }
 .welcome-guide p { margin: 0 0 var(--sp-4); font-size: var(--fs-md); }
 .welcome-guide-copy { margin-top: var(--sp-5) !important; }
 .welcome-recent { display: flex; flex-direction: column; gap: var(--sp-2); max-height: 190px; overflow: auto; }
@@ -1133,4 +1136,11 @@ pre.mission-detail-value { max-height: 150px; }
   .github-pr-diff-blocks { display: none; }
   .github-pr-footer { padding: 10px 14px; }
   .github-pr-expanded-body { padding: 0 14px 12px; }
+}
+
+/* Keep compact toolbars readable; glyphs supplement rather than replace labels. */
+.button.compact > .control-icon, .bottom-tab > .control-icon, .tab-close > .control-icon { width: 14px; height: 14px; }
+.bottom-tab > .control-icon { margin-right: 4px; }
+@media (max-width: 720px) {
+  .top-actions .button > .control-icon, .tabbar .button > .control-icon, .bottom-tab > .control-icon { display: none; }
 }

@@ -1,4 +1,5 @@
 import { fileIconElement } from './file_icons';
+import { workbenchIcon } from './workbench_icons';
 /** Tab ordering is independent of Monaco models and never discards buffers. */
 export function selectionAfterClose(
   paths: readonly string[], active: string | null, closing: string,
@@ -66,7 +67,8 @@ export function mountEditorTabs(
       dismiss.className = 'tab-close';
       dismiss.dataset.path = file.path;
       dismiss.dataset.action = 'close';
-      dismiss.textContent = file.dirty ? '●' : '×';
+      if (file.dirty) dismiss.textContent = '●';
+      else dismiss.append(workbenchIcon('x', 'control-icon'));
       dismiss.title = file.dirty ? 'Close file (unsaved changes)' : 'Close file';
       dismiss.setAttribute('aria-label', `Close ${file.path}`);
       dismiss.addEventListener('click', () => close(file.path));
