@@ -232,7 +232,12 @@ fn decode_editor_preview(bytes: &[u8], path: &str) -> Result<EncodedFilePreview,
     } else if bytes.len() >= 8 && bytes.len() & 1 == 0 {
         let pairs = bytes.len() / 2;
         let even_zero = bytes.iter().step_by(2).filter(|&&byte| byte == 0).count();
-        let odd_zero = bytes.iter().skip(1).step_by(2).filter(|&&byte| byte == 0).count();
+        let odd_zero = bytes
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .filter(|&&byte| byte == 0)
+            .count();
         if odd_zero * 4 >= pairs * 3 && even_zero * 8 <= pairs {
             Some((true, bytes))
         } else if even_zero * 4 >= pairs * 3 && odd_zero * 8 <= pairs {
@@ -259,7 +264,11 @@ fn decode_editor_preview(bytes: &[u8], path: &str) -> Result<EncodedFilePreview,
             .collect();
         (
             String::from_utf16(&units).map_err(|_| unsupported())?,
-            if little_endian { "UTF-16 LE" } else { "UTF-16 BE" },
+            if little_endian {
+                "UTF-16 LE"
+            } else {
+                "UTF-16 BE"
+            },
         )
     } else {
         // For text-like logs with mixed or legacy bytes, display a best-effort
@@ -452,7 +461,11 @@ mod permission_tests {
                 assert_eq!(preview.content, text);
                 assert_eq!(
                     preview.encoding,
-                    if little_endian { "UTF-16 LE" } else { "UTF-16 BE" }
+                    if little_endian {
+                        "UTF-16 LE"
+                    } else {
+                        "UTF-16 BE"
+                    }
                 );
             }
         }
