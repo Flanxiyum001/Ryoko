@@ -600,6 +600,34 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
   background: radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0) 0 0 / 18px 18px, var(--editor-bg);
   border: 1px solid var(--border); border-radius: var(--radius);
 }
+.tool-stream {
+  position: relative; flex: none; isolation: isolate; overflow: hidden;
+  display: grid; place-items: center; min-height: 56px; margin: 0 10px var(--sp-3);
+  padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--editor-bg);
+}
+.tool-stream[hidden] { display: none; }
+.tool-stream::before {
+  content: ''; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: radial-gradient(ellipse at 18% 42%, #5978df55, transparent 48%),
+    radial-gradient(ellipse at 40% 60%, #8a53dc44, transparent 45%),
+    linear-gradient(90deg, transparent 55%, #5acbd444 78%, transparent);
+}
+.tool-stream canvas { position: absolute; width: 100%; height: 100%; inset: 0; z-index: -1; pointer-events: none; }
+.tool-stream[data-shader="ready"]::before { opacity: 0; }
+.tool-stream-label {
+  display: grid; gap: 2px; min-width: 0; max-width: 100%; padding: 5px 12px;
+  color: var(--text); background: var(--menu-bg); border: 1px solid var(--input-border);
+  border-radius: var(--radius); box-shadow: 0 0 12px #7196e52b; text-align: center;
+}
+@supports (backdrop-filter: blur(8px)) {
+  .tool-stream-label { background: color-mix(in srgb, var(--menu-bg) 84%, transparent); backdrop-filter: blur(8px); }
+}
+.tool-stream-label strong { font-size: var(--fs-xs); }
+.tool-stream-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--fs-xs) var(--font-mono); }
+@media (prefers-reduced-motion: reduce) { .tool-stream canvas { display: none; } }
+[data-theme="high-contrast"] .tool-stream::before, [data-theme="high-contrast"] .tool-stream canvas { display: none; }
+[data-theme="high-contrast"] .tool-stream-label { box-shadow: none; backdrop-filter: none; background: var(--menu-bg); }
 .mission-canvas { position: relative; }
 .mission-edges { position: absolute; inset: 0; pointer-events: none; }
 .mission-edge { fill: none; stroke: var(--input-border); stroke-width: 1.3; }

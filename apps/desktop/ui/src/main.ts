@@ -66,9 +66,11 @@ import {
   resolveKeybindings,
 } from './keybindings';
 import { mountConnectors } from './connectors_panel';
+import { mountToolStream } from './tool_stream';
 import { mountMarketplaceBrowser } from './marketplace_browser';
 import { mountGithubQueue } from './github_queue';
 import {
+  activeMissionTools,
   focusMissionTasks,
   formatLedgerCost,
   formatTokens,
@@ -245,6 +247,7 @@ const missionLogSelect = element<HTMLSelectElement>('missionLog');
 const missionRefresh = element<HTMLButtonElement>('missionRefresh');
 const missionFocus = element<HTMLButtonElement>('missionFocus');
 const missionGraph = element('missionGraph');
+const toolStream = mountToolStream(missionGraph);
 const missionDetail = element('missionDetail');
 const missionSummary = element('missionSummary');
 const agentSessionRefresh = element<HTMLButtonElement>('agentSessionRefresh');
@@ -1142,6 +1145,7 @@ async function openFolder(selectedPath?: string): Promise<void> {
     emptyEditor.classList.remove('hidden');
     missionLogs = [];
     missionSnapshot = null;
+    toolStream.show([]);
     missionSelection = null;
     missionPreferredLog = null;
     missionFocusEnabled = false;
@@ -2173,6 +2177,9 @@ function updateRunLabels(): void {
 
 function showRunStatus(status: RunStatus): void {
   runSnapshot = status;
+  if (status.eventLog === missionLogSelect.value && (!status.running || status.paused)) {
+    toolStream.show([]);
+  }
   runStart.disabled = status.running;
   runPause.disabled = !status.running;
   runPause.textContent = status.paused ? 'Resume' : 'Pause';
@@ -2329,6 +2336,7 @@ async function refreshMissionLogs(): Promise<void> {
     missionLogs = logs;
     if (namesChanged) renderMissionOptions();
     if (!missionLogSelect.value) {
+      toolStream.show([]);
       missionSummary.textContent = 'no events';
       missionGraph.replaceChildren();
       const hint = document.createElement('p');
@@ -2343,6 +2351,7 @@ async function refreshMissionLogs(): Promise<void> {
     updateUsageMeter();
     renderMission();
   } catch (error) {
+    toolStream.show([]);
     missionSummary.textContent = 'unavailable';
     const hint = document.createElement('p');
     hint.className = 'hint';
@@ -2355,6 +2364,9 @@ async function refreshMissionLogs(): Promise<void> {
 
 function renderMission(): void {
   const snapshot = missionSnapshot;
+  const inactive = runSnapshot?.eventLog === missionLogSelect.value
+    && (!runSnapshot.running || runSnapshot.paused);
+  toolStream.show(inactive ? [] : activeMissionTools(snapshot));
   missionGraph.replaceChildren();
   if (!snapshot || snapshot.tasks.length === 0) {
     missionSummary.textContent = 'no tasks';
@@ -2483,6 +2495,9 @@ function renderMissionDetail(): void {
   missionDetail.append(heading);
 
   addDetailRow(missionDetail, 'Live status', liveStatus(task));
+  if (task.pendingTool && activeMissionTools(missionSnapshot).some((entry) => entry.taskId === task.id)) {
+    addDetailRow(missionDetail, 'Last recorded pending tool request', task.pendingTool);
+  }
   const dependencies = task.dependencies.length > 0
     ? `\nDepends on: ${task.dependencies.join(', ')}`
     : '\nDepends on: no upstream task';
@@ -2907,6 +2922,7 @@ missionRefresh.addEventListener('click', () => {
   void refreshMissionLogs();
 });
 missionLogSelect.addEventListener('change', () => {
+  toolStream.show([]);
   missionSelection = null;
   void refreshMissionLogs();
 });

@@ -37,6 +37,13 @@ pub enum OrchestratorEvent {
         task_id: Uuid,
         message: String,
     },
+    /// A request entered or left the MCP host gate. Pending includes approval;
+    /// it does not assert that the server executed anything. No arguments/results.
+    TaskToolActivity {
+        task_id: Uuid,
+        tool: String,
+        pending: bool,
+    },
     /// Cumulative usage for this task. Unconfigured model pricing can make
     /// ledger_cost_usd incomplete: never label it verified billed cost.
     TaskUsage {
@@ -160,6 +167,16 @@ mod tests {
         .unwrap();
         assert_eq!(phase["type"], "task_phase");
         assert_eq!(phase["phase"], "coding");
+        let tool = serde_json::to_value(OrchestratorEvent::TaskToolActivity {
+            task_id: Uuid::nil(),
+            tool: "read_issue".into(),
+            pending: true,
+        })
+        .unwrap();
+        assert_eq!(tool["type"], "task_tool_activity");
+        assert_eq!(tool["tool"], "read_issue");
+        assert_eq!(tool["pending"], true);
+        assert_eq!(tool.as_object().unwrap().len(), 4);
         assert_eq!(
             serde_json::to_string(&TaskFailureStage::Validation).unwrap(),
             "\"validation\""
