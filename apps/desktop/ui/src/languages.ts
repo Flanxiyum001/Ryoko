@@ -4,7 +4,7 @@ const extensions: Record<string, string> = {
   apex:'apex', bicep:'bicep', cue:'cue', d:'d', dockerfile:'dockerfile',
   hbs:'handlebars', hcl:'hcl', kdl:'kdl', lisp:'lisp', liquid:'liquid',
   mjs:'javascript', mts:'typescript', cts:'typescript', mmd:'mermaid',
-  psd1:'powershell', psql:'sql', svelte:'svelte', typ:'typst', wasm:'wasm', wat:'wasm',
+  psd1:'powershell', psql:'sql', svelte:'svelte', typ:'typst', wat:'wasm',
   astro:'html', bat:'bat', bash:'shell', c:'c', cc:'cpp',
   cjs:'javascript', clj:'clojure', cljs:'clojure', cmake:'cmake',
   cob:'cobol', coffee:'coffeescript', cpp:'cpp', cxx:'cpp',
@@ -96,7 +96,7 @@ export function detectEditorLanguage(
   if (/^<\?xml\b/i.test(start)) return 'xml';
   if (/^<!doctype\s+html\b/i.test(start)) return 'html';
   if (/^<\?php\b/i.test(start)) return 'php';
-  if (/^[{[]/.test(start) && contents.length <= 2 * 1024 * 1024) {
+  if (/^(?:\{|\[)/.test(start) && contents.length <= 2 * 1024 * 1024) {
     try { JSON.parse(contents.replace(/^\uFEFF/, '')); return 'json'; } catch { /* ambiguous text */ }
   }
   return 'plaintext';

@@ -186,7 +186,17 @@ pub fn read_file(path: String, state: State<'_, WorkspaceState>) -> Result<Strin
     if metadata.len() > MAX_FILE_BYTES {
         return Err(format!("file is larger than 2 MiB: {path}"));
     }
-    fs::read_to_string(&real).map_err(|error| format!("cannot read {path} as UTF-8: {error}"))
+    let content = fs::read_to_string(&real)
+        .map_err(|error| format!("cannot read {path} as UTF-8: {error}"))?;
+    validate_editor_text(&content, &path)?;
+    Ok(content)
+}
+
+fn validate_editor_text(content: &str, path: &str) -> Result<(), String> {
+    if content.contains('\0') {
+        return Err(format!("binary or unsupported text encoding: {path}"));
+    }
+    Ok(())
 }
 
 fn requires_sensitive_write_approval(path: &str) -> bool {
@@ -313,7 +323,13 @@ pub async fn write_file(
 
 #[cfg(test)]
 mod permission_tests {
-    use super::requires_sensitive_write_approval;
+    use super::{requires_sensitive_write_approval, validate_editor_text};
+
+    #[test]
+    fn rejects_binary_content_without_rejecting_unknown_text_files() {
+        assert!(validate_editor_text("example\n", "file.unknown").is_ok());
+        assert!(validate_editor_text("\0binary", "image.bin").is_err());
+    }
 
     #[test]
     fn prompts_for_environment_and_ci_files() {

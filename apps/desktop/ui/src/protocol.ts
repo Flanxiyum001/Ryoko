@@ -64,13 +64,16 @@ export function workspaceRelativeFile(root: string, selected: string): string | 
   const base = normalizeFilePath(root).replace(/\/+$/, '');
   const candidate = normalizeFilePath(selected);
   const absolute = /^(?:\/|[A-Za-z]:)/.test(candidate);
-  if (!absolute) return candidate || null;
+  const relative = absolute ? null : candidate;
   const windows = /^[A-Za-z]:\/|^\/\//.test(base + '/');
   const prefix = base + '/';
   const matches = windows
     ? candidate.toLowerCase().startsWith(prefix.toLowerCase())
     : candidate.startsWith(prefix);
-  return matches && candidate.length > prefix.length ? candidate.slice(prefix.length) : null;
+  const path = relative ?? (matches ? candidate.slice(prefix.length) : '');
+  const segments = path.split('/').filter((segment) => segment && segment !== '.');
+  if (!segments.length || segments.includes('..')) return null;
+  return segments.join('/');
 }
 
 /** Builds an LSP-compatible file URI from an absolute filesystem path. */

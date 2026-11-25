@@ -67,6 +67,8 @@ describe('file URIs', () => {
   it('resolves direct file picks without depending on the file index', () => {
     expect(workspaceRelativeFile('/repo', '/repo/ignored/file.xyz')).toBe('ignored/file.xyz');
     expect(workspaceRelativeFile('/repo', 'ignored/file.xyz')).toBe('ignored/file.xyz');
+    expect(workspaceRelativeFile('/repo', './ignored//file.xyz')).toBe('ignored/file.xyz');
+    expect(workspaceRelativeFile('/repo', '../other/file.xyz')).toBeNull();
     expect(workspaceRelativeFile('/repo', '/repository/file.xyz')).toBeNull();
     expect(workspaceRelativeFile('/repo', '/other/file.xyz')).toBeNull();
     expect(workspaceRelativeFile('\\\\?\\C:\\Repo', 'c:\\repo\\file.xyz')).toBe('file.xyz');
