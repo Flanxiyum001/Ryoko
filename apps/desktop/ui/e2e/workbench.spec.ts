@@ -65,7 +65,10 @@ test('opens an unindexed file in a non-Git workspace and detects its content', a
   const dialog = page.getByRole('dialog', { name: 'Open file by path' });
   await dialog.getByRole('textbox', { name: 'File path' }).fill('ignored/config.data');
   await dialog.getByRole('button', { name: 'Open', exact: true }).click();
-  await expect(page.getByRole('tab', { name: 'config.data', exact: true })).toBeVisible();
+  // Tabs expose the full workspace-relative path as their accessible name.
+  await expect(page.getByRole('tab', { name: 'ignored/config.data', exact: true }))
+    .toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#editor')).toContainText('enabled');
   await expect(page.locator('#languageMode')).toHaveValue('json');
 });
 
