@@ -117,6 +117,7 @@ interface OpenFile {
   model: monaco.editor.ITextModel;
   version: number;
   savedText: string;
+  readOnlyEncoding?: string;
   dirty: boolean;
   viewState?: monaco.editor.ICodeEditorViewState | null;
 }
@@ -570,7 +571,7 @@ async function requestFim(): Promise<void> {
   const model = editor.getModel();
   const position = editor.getPosition();
   const selection = editor.getSelection();
-  if (!file || !model || !position || !selection || !selection.isEmpty()) {
+  if (!file || file.readOnlyEncoding || !model || !position || !selection || !selection.isEmpty()) {
     hideFim();
     return;
   }
@@ -607,7 +608,7 @@ function applyFimChunk(payload: FimChunk): void {
 function acceptFim(): void {
   const position = editor.getPosition();
   const model = editor.getModel();
-  if (!position || !model || !fimText) return;
+  if (state.current?.readOnlyEncoding || !position || !model || !fimText) return;
   const text = fimText;
   const offset = model.getOffsetAt(position);
   acceptingFim = true;
@@ -656,7 +657,7 @@ const lsp = new LspClient({
 
 const inlineEdit = new InlineEditController({
   editor,
-  currentFile: () => (state.current ? { path: state.current.path, model: state.current.model } : null),
+  currentFile: () => (state.current && !state.current.readOnlyEncoding ? { path: state.current.path, model: state.current.model } : null),
   languageId: () => state.current?.languageId ?? 'plaintext',
   setStatus,
   onSaveAfterApply: saveCurrent,
@@ -746,8 +747,8 @@ function configureTaskForPath(path: string): void {
 async function startCodeTask(): Promise<void> {
   const file = state.current;
   const root = state.root;
-  if (!file || !root) {
-    setStatus('Open a source file before running a task.');
+  if (!file || !root || file.readOnlyEncoding) {
+    setStatus('Open an editable source file before running a task.');
     return;
   }
   if (codeStarting || codeSessionId !== null) {
@@ -2639,6 +2640,7 @@ function selectOpenFile(path: string): void {
   if (!diffReview.classList.contains('hidden')) closeDiffReview();
   state.current = file;
   hideFim();
+  editor.updateOptions({ readOnly: !!file.readOnlyEncoding });
   editor.setModel(file.model);
   if (file.viewState) editor.restoreViewState(file.viewState);
   revealEditor();
@@ -2646,14 +2648,14 @@ function selectOpenFile(path: string): void {
   else workbenchLayout.classList.remove('hide-inspector');
   languageMode.value = file.languageId;
   configureTaskForPath(path);
-  runActiveFile.disabled = codeSessionId !== null;
-  activePath.textContent = file.path;
+  runActiveFile.disabled = codeSessionId !== null || !!file.readOnlyEncoding;
+  activePath.textContent = file.readOnlyEncoding ? `${file.path} · ${file.readOnlyEncoding} · Read-only` : file.path;
   dirtyFlag.classList.toggle('hidden', !file.dirty);
-  saveButton.disabled = false;
+  saveButton.disabled = !!file.readOnlyEncoding;
   renderFiles();
   updateTabs();
   updateCursor();
-  setStatus(file.path);
+  setStatus(file.readOnlyEncoding ? `Read-only preview: ${file.path} (${file.readOnlyEncoding}). Original bytes are unchanged.` : file.path);
   quickOpen.remember(file.path);
 }
 
@@ -2706,13 +2708,23 @@ async function openFile(path: string): Promise<void> {
   const ticket = ++fileOpenGeneration;
   try {
     setStatus(`Opening ${path}…`);
-    const content = await invoke<string>('read_file', { path });
+    let content: string;
+    let readOnlyEncoding: string | undefined;
+    try {
+      content = await invoke<string>('read_file', { path });
+    } catch (error) {
+      const message = String(error);
+      if (!message.includes('as UTF-8:') && !message.includes('binary or unsupported text encoding:')) throw error;
+      const preview = await invoke<{ content: string; encoding: string }>('read_encoded_file_preview', { path });
+      content = preview.content;
+      readOnlyEncoding = preview.encoding;
+    }
     if (ticket !== fileOpenGeneration || state.root !== root || workspaceSwitching) return;
     const languageId = detectEditorLanguage(path, content, monaco.languages.getLanguages());
     const model = monaco.editor.createModel(content, languageId, monaco.Uri.parse(uri));
-    const file: OpenFile = { path, uri, languageId, model, version: 1, savedText: content, dirty: false };
+    const file: OpenFile = { path, uri, languageId, model, version: 1, savedText: content, readOnlyEncoding, dirty: false };
     openFiles.set(uri, file);
-    lsp.ensureOpen(uri, languageId, file.version, content);
+    if (!readOnlyEncoding) lsp.ensureOpen(uri, languageId, file.version, content);
     selectOpenFile(path);
   } catch (error) {
     if (ticket === fileOpenGeneration) setStatus(error instanceof Error ? error.message : String(error));
@@ -2726,7 +2738,7 @@ function updateCursor(): void {
 
 async function saveCurrent(): Promise<void> {
   const file = state.current;
-  if (!file || !file.dirty || savingFiles.has(file.uri) || workspaceSwitching) return;
+  if (!file || file.readOnlyEncoding || !file.dirty || savingFiles.has(file.uri) || workspaceSwitching) return;
   savingFiles.add(file.uri);
   try {
     const content = file.model.getValue();
@@ -2839,7 +2851,7 @@ async function revealProblem(problem: FlatProblem): Promise<void> {
 
 editor.onDidChangeModelContent(() => {
   const file = state.current;
-  if (!file) return;
+  if (!file || file.readOnlyEncoding) return;
   scheduleFim();
   file.version += 1;
   markDirty(file);
@@ -3225,7 +3237,7 @@ languageMode.addEventListener('change', () => {
   monaco.editor.setModelLanguage(file.model, newLanguage);
   file.languageId = newLanguage;
   file.version += 1;
-  lsp.ensureOpen(file.uri, file.languageId, file.version, file.model.getValue());
+  if (!file.readOnlyEncoding) lsp.ensureOpen(file.uri, file.languageId, file.version, file.model.getValue());
   setStatus('Language mode: ' + newLanguage + ' (syntax support depends on installed language tooling)');
 });
 registerMonacoCapabilities(monaco, lsp, availableLanguages);

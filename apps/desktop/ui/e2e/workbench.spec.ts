@@ -6,6 +6,7 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const files: Record<string, string> = {
       'README.md': '# Demo workspace\n',
+      '.server.log': 'server started',
       'main.ts': 'const greeting = "Hello Ryoko";\nconsole.log(greeting);\n',
       'other.ts': 'export const value = 42;\n',
       'src/notes.unknown': 'example',
@@ -21,7 +22,12 @@ test.beforeEach(async ({ page }) => {
           if (command === 'pick_workspace_folder') return '/demo/workspace';
           if (command === 'open_workspace') return { root: '/demo/workspace', name: 'workspace' };
           if (command === 'list_files') return Object.keys(files).filter((path) => !path.startsWith('ignored/'));
-          if (command === 'read_file') { reads++; document.body.dataset.reads = String(reads); return files[args.path]; }
+          if (command === 'read_file') {
+            reads++; document.body.dataset.reads = String(reads);
+            if (args.path === '.server.log') throw new Error('cannot read .server.log as UTF-8: invalid byte');
+            return files[args.path];
+          }
+          if (command === 'read_encoded_file_preview') return { content: files[args.path], encoding: 'UTF-16 LE' };
           if (command === 'write_file') {
             if (files[args.path] !== args.expectedContent) throw new Error('File changed on disk');
             files[args.path] = args.content;
@@ -70,6 +76,22 @@ test('opens an unindexed file in a non-Git workspace and detects its content', a
     .toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('#editor')).toContainText('enabled');
   await expect(page.locator('#languageMode')).toHaveValue('json');
+});
+
+test('opens non-UTF-8 logs as read-only and restores normal editing on tab switch', async ({ page }) => {
+  await openProject(page);
+  await openFile(page, '.server.log');
+  await expect(page.locator('#editor')).toContainText('server started');
+  await expect(page.locator('#saveFile')).toBeDisabled();
+  await page.locator('#editor .inputarea').first().focus();
+  await page.keyboard.type('changed');
+  await expect(page.locator('#editor')).not.toContainText('changed');
+  await expect(page.getByRole('tab', { name: '.server.log', exact: true })).toBeVisible();
+  await openFile(page, 'main.ts');
+  await expect(page.locator('#saveFile')).toBeEnabled();
+  await edit(page);
+  await page.getByRole('tab', { name: '.server.log', exact: true }).click();
+  await expect(page.locator('#saveFile')).toBeDisabled();
 });
 
 test('opening folders without native IPC gives actionable guidance', async ({ page }) => {
