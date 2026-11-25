@@ -104,7 +104,10 @@ fn run_arguments(
         "--tmpfs".to_owned(),
         BUILD_TMPFS.to_owned(),
         "--mount".to_owned(),
-        format!("type=bind,source={},target={WORKDIR},readonly", root.display()),
+        format!(
+            "type=bind,source={},target={WORKDIR},readonly",
+            root.display()
+        ),
     ];
     if let Some(artifacts) = artifacts {
         args.push("--mount".to_owned());
@@ -524,7 +527,9 @@ mod runtime_flags {
         assert!(has("/tmp:rw,noexec,nosuid,nodev,size=512m"), "{args:?}");
         assert!(has(BUILD_TMPFS), "{args:?}");
         assert!(has("CARGO_TARGET_DIR=/ryoko-build/target"), "{args:?}");
-        assert!(has("type=bind,source=/repo/worktree,target=/workspace,readonly"));
+        assert!(has(
+            "type=bind,source=/repo/worktree,target=/workspace,readonly"
+        ));
         assert!(
             has("--ipc=private"),
             "a private IPC namespace keeps /dev/shm"
@@ -547,7 +552,9 @@ mod runtime_flags {
         assert!(args.contains(&format!(
             "type=bind,source=/repo/.ryoko/artifacts/task-1,target={ARTIFACT_MOUNT}"
         )));
-        assert!(args.contains(&"type=bind,source=/repo/worktree,target=/workspace,readonly".to_owned()));
+        assert!(
+            args.contains(&"type=bind,source=/repo/worktree,target=/workspace,readonly".to_owned())
+        );
         // The worktree stays the only source mount; artefacts are never mixed in.
         assert_eq!(
             args.iter()
