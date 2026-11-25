@@ -57,6 +57,29 @@ async function edit(page: Page) {
   await expect(page.getByRole('tab', { name: 'main.ts, unsaved changes' })).toBeVisible();
 }
 
+test('opening folders without native IPC gives actionable guidance', async ({ page }) => {
+  await page.evaluate(() => {
+    Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  });
+  await page.locator('#openFolder').click();
+  const notifications = page.getByRole('region', { name: 'Ryoko notifications' });
+  await expect(notifications.getByText(/desktop connection is missing/)).toBeVisible();
+  await expect(notifications.getByText(/npm run tauri dev/)).toBeVisible();
+  await expect(notifications.getByText(/reading 'invoke'/)).toHaveCount(0);
+  await expect(page.locator('#workspaceName')).toHaveText('Search files in workspace');
+});
+
+test('opening an unopened file with an incomplete native bridge fails closed', async ({ page }) => {
+  await openProject(page);
+  await page.evaluate(() => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} });
+  });
+  await page.locator('.file-link').filter({ hasText: 'main.ts' }).click();
+  const notifications = page.getByRole('region', { name: 'Ryoko notifications' });
+  await expect(notifications.getByText(/desktop connection is missing/)).toBeVisible();
+  await expect(page.getByRole('tab')).toHaveCount(0);
+});
+
 test('tabs preserve edits, save through IPC, and confirm discard', async ({ page }, info) => {
   await page.screenshot({ path: info.outputPath('welcome.png') });
   await openProject(page);
