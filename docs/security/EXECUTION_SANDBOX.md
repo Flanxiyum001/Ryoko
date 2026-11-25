@@ -14,8 +14,10 @@ An operator supplies an offline-ready image via `--sandbox-image` and can select
 shell interpretation of runtime arguments. The untrusted test command itself
 runs in `/bin/sh -c` **inside** the container. The runtime does not pull images.
 
-- Only the canonical task worktree is bind-mounted, at `/workspace`, with write access
-  so compilers can emit local build outputs.
+- The canonical task worktree is bind-mounted read-only at `/workspace`.
+  Build output goes to a per-container, size-limited executable tmpfs at
+  `/ryoko-build`; Cargo uses `/ryoko-build/target`. Temporary files and cache
+  writes use `/tmp`. Neither scratch mount survives the container.
 - No host home directory, SSH agent, Docker socket or credential environment
   variables are passed through.
 - Container networking is disabled; the container root is read-only.
@@ -28,9 +30,12 @@ runs in `/bin/sh -c` **inside** the container. The runtime does not pull images.
 
 **Security boundary and limitations:** This is an initial OCI isolation backend,
 not a disposable VM. Docker/Podman daemon and image supply-chain trust remain
-critical. Worktree bind mounts are writable and not immutable snapshots;
-there is no image digest attestation, disk quota, automatic dependency cache,
-per-task network allowlist or isolated dependency-audit runner yet.
+critical. Read-only source mounts assume an operator-controlled local daemon
+and a checkout without nested host mounts; this is not protection against
+host-side writers. Scratch mounts are size-limited; optional explicit host
+artifact exports have no enforced disk quota yet. There is no automatic
+persistent dependency cache, per-task network allowlist or isolated
+dependency-audit runner yet.
 Windows Docker Desktop bind-mount permissions may require image-specific
 configuration. There is no protection against another host process changing
 the worktree while validation runs. Treat cross-tenant malicious builds as
@@ -86,10 +91,12 @@ rename. The orchestrator seals a Git tree, checks out that commit into a
 separate validation worktree, rejects changes to its tracked source while
 tests run, and publishes only the sealed commit. Changes to the agent's
 worktree cannot affect validation or the published bytes. Generated untracked
-test artifacts are excluded from the sealed tree. Another process with access
-to the validation checkout could still change and restore a file during a
-check; a read-only mount plus separate writable build overlay is required to
-exclude that adversary.
+test artifacts are excluded from the sealed tree. The OCI guest cannot write
+its source mount, while the existing post-validation Git tree comparison and
+publish-time seal verification bind the published commit to the validated
+source. Another host process with access to the checkout could still change
+and restore a file during a check; it is outside the container trust boundary.
+The explicitly unsafe host backend does not have this isolation.
 
 ## Current guardrail
 
@@ -209,16 +216,25 @@ the root filesystem is not, and it needs enough processes:
 
 | Flag | Why |
 | --- | --- |
-| `--tmpfs /tmp:rw,noexec,nosuid,size=512m` | browsers and test runners write temp files; `noexec` keeps that space useless for dropped payloads |
+| `--tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m` | browsers and test runners write temp files; executable build output is separate |
+| `--tmpfs /ryoko-build:rw,exec,nosuid,nodev,size=1g,mode=1777` | bounded, disposable build output including compiled tests |
 | `--shm-size=512m` with `--ipc=private` | renderers share memory through `/dev/shm`; the 64 MiB default makes them crash. `--ipc=none` removes `/dev/shm` entirely, so it is no longer used |
 | `--pids-limit=256` | a browser launch forks renderer, GPU and utility processes; 128 was too few |
 | `--mount …,target=/ryoko-artifacts` | screenshots, traces and reports, in their own bind mount |
 
-The artefact mount is the only writable path besides `/tmp`; the worktree mount
-stays read-only. Its host directory is `.ryoko/artifacts/<task id>/`, and the
-sandbox refuses an artefacts directory that sits inside the worktree being
-checked, so a screenshot can never appear in `git status` or a staged diff. The
+The worktree mount stays read-only. The optional artifact mount is separate
+from `/tmp` and `/ryoko-build`. Its host directory is
+`.ryoko/artifacts/<task id>/`; the sandbox rejects overlapping source and
+artifact directories. This opt-in export is not subject to the tmpfs size
+limits: use an operator-controlled disk quota until bounded export is implemented. The
 generated build context ignores `.ryoko/artifacts` for the same reason.
+
+Build commands must direct other generated outputs (e.g. frontend bundles) to
+`$RYOKO_BUILD_DIR` using their own tool-specific configuration. Tools that
+require in-place writes or shared compilation output across separate invocations
+will fail rather than make the source writable. Each invocation starts with
+empty scratch mounts. Native Windows/macOS Docker Desktop and Podman parity
+must be verified separately; Linux Docker CI is the automated isolation gate.
 
 ## Browsers in the generated image
 

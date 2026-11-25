@@ -15,12 +15,14 @@ const MAX_STREAM_BYTES: u64 = 128 * 1024;
 const MAX_BUILD_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const WORKDIR: &str = "/workspace";
 
-/// Where read-only output (screenshots, traces, reports) is mounted. It is a
+/// Where explicitly exported output (screenshots, traces, reports) is mounted. It is a
 /// bind mount of its own, so artefacts never appear in the Git worktree.
 pub const ARTIFACT_MOUNT: &str = "/ryoko-artifacts";
 
 /// Chromium writes outside its install directory even with a read-only root.
-const TMPFS: &str = "/tmp:rw,noexec,nosuid,size=512m";
+const TMPFS: &str = "/tmp:rw,noexec,nosuid,nodev,size=512m";
+/// Disposable build outputs can contain executables (for example Rust tests).
+const BUILD_TMPFS: &str = "/ryoko-build:rw,exec,nosuid,nodev,size=1g,mode=1777";
 /// Chromium renderers communicate through /dev/shm; the default 64 MiB makes
 /// them crash with SIGBUS on real pages.
 const SHM_SIZE: &str = "512m";
@@ -99,8 +101,13 @@ fn run_arguments(
         uid_gid.to_owned(),
         "--tmpfs".to_owned(),
         TMPFS.to_owned(),
+        "--tmpfs".to_owned(),
+        BUILD_TMPFS.to_owned(),
         "--mount".to_owned(),
-        format!("type=bind,source={},target={WORKDIR}", root.display()),
+        format!(
+            "type=bind,source={},target={WORKDIR},readonly",
+            root.display()
+        ),
     ];
     if let Some(artifacts) = artifacts {
         args.push("--mount".to_owned());
@@ -114,6 +121,16 @@ fn run_arguments(
         WORKDIR.to_owned(),
         "--env".to_owned(),
         "HOME=/tmp".to_owned(),
+        "--env".to_owned(),
+        "RYOKO_BUILD_DIR=/ryoko-build".to_owned(),
+        "--env".to_owned(),
+        "CARGO_TARGET_DIR=/ryoko-build/target".to_owned(),
+        "--env".to_owned(),
+        "XDG_CACHE_HOME=/tmp/cache".to_owned(),
+        "--env".to_owned(),
+        "npm_config_cache=/tmp/npm-cache".to_owned(),
+        "--env".to_owned(),
+        "PYTHONPYCACHEPREFIX=/tmp/pycache".to_owned(),
         "--env".to_owned(),
         "CI=true".to_owned(),
         image.to_owned(),
@@ -141,7 +158,7 @@ impl BuildSandbox {
     }
 
     /// Exposes a writable host directory at [`ARTIFACT_MOUNT`] for the duration
-    /// of one run. Everything else in the container stays read-only.
+    /// of one run. The source and container root stay read-only.
     pub fn with_artifacts(mut self, dir: impl Into<PathBuf>) -> Self {
         self.artifacts = Some(dir.into());
         self
@@ -170,6 +187,7 @@ impl BuildSandbox {
         let canonical = dir.canonicalize()?;
         if !canonical.is_dir()
             || canonical.starts_with(&canonical_root)
+            || canonical_root.starts_with(&canonical)
             || canonical
                 .to_string_lossy()
                 .chars()
@@ -423,7 +441,7 @@ fn user_identity() -> Result<String, BuildSandboxError> {
 #[cfg(not(unix))]
 fn user_identity() -> Result<String, BuildSandboxError> {
     // On non-Unix hosts, prefer an unprivileged UID inside the Linux container.
-    // Writable worktree access depends on Docker Desktop's bind mount mapping.
+    // Artifact access depends on Docker Desktop's bind mount mapping.
     Ok("65534:65534".to_owned())
 }
 
@@ -506,7 +524,12 @@ mod runtime_flags {
         let has = |value: &str| args.iter().any(|arg| arg == value);
         assert!(has("--shm-size=512m"), "{args:?}");
         assert!(has("--pids-limit=256"), "{args:?}");
-        assert!(has("/tmp:rw,noexec,nosuid,size=512m"), "{args:?}");
+        assert!(has("/tmp:rw,noexec,nosuid,nodev,size=512m"), "{args:?}");
+        assert!(has(BUILD_TMPFS), "{args:?}");
+        assert!(has("CARGO_TARGET_DIR=/ryoko-build/target"), "{args:?}");
+        assert!(has(
+            "type=bind,source=/repo/worktree,target=/workspace,readonly"
+        ));
         assert!(
             has("--ipc=private"),
             "a private IPC namespace keeps /dev/shm"
@@ -529,7 +552,9 @@ mod runtime_flags {
         assert!(args.contains(&format!(
             "type=bind,source=/repo/.ryoko/artifacts/task-1,target={ARTIFACT_MOUNT}"
         )));
-        assert!(args.contains(&"type=bind,source=/repo/worktree,target=/workspace".to_owned()));
+        assert!(
+            args.contains(&"type=bind,source=/repo/worktree,target=/workspace,readonly".to_owned())
+        );
         // The worktree stays the only source mount; artefacts are never mixed in.
         assert_eq!(
             args.iter()
@@ -550,6 +575,19 @@ mod runtime_flags {
             sandbox.prepare_artifacts(&worktree),
             Err(BuildSandboxError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn an_artifacts_directory_containing_the_worktree_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        let sandbox = BuildSandbox::new(BuildBackend::Docker, None).with_artifacts(dir.path());
+        assert!(matches!(
+            sandbox.prepare_artifacts(&worktree),
+            Err(BuildSandboxError::InvalidConfiguration)
+        ));
+        assert!(worktree.is_dir());
     }
 
     #[test]
