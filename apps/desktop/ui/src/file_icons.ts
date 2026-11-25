@@ -1,5 +1,7 @@
 //! File-type icons for the explorer, tabs and breadcrumbs. Each icon is a
-//! short text badge with a colour, so no icon font or external asset is needed.
+//! short text badge with a colour, or a local SVG for unknown file types.
+
+import { workbenchIcon } from './workbench_icons';
 
 export interface FileIcon {
   /** One to three characters drawn inside the badge. */
@@ -77,12 +79,13 @@ export function iconForPath(path: string): FileIcon {
   return DEFAULT_FILE_ICON;
 }
 
-/** Builds the badge element. Text only: file names never become markup. */
+/** Builds the badge element from static icons; file names never become markup. */
 export function fileIconElement(path: string): HTMLSpanElement {
   const icon = iconForPath(path);
   const badge = document.createElement('span');
   badge.className = 'file-icon';
-  badge.textContent = icon.glyph;
+  if (icon === DEFAULT_FILE_ICON) badge.append(workbenchIcon('file', 'control-icon'));
+  else badge.textContent = icon.glyph;
   badge.style.color = icon.color;
   badge.dataset.length = String([...icon.glyph].length);
   badge.setAttribute('aria-hidden', 'true');

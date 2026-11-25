@@ -16,6 +16,7 @@ import { mountBugReporter } from './bug_report';
 import { mountMenuBar } from './menu_bar';
 import { DEFAULT_LAYOUT, loadLayout, resizeBy, saveLayout } from './layout_state';
 import { fileIconElement } from './file_icons';
+import { workbenchIcon } from './workbench_icons';
 import { THEMES, applyThemeToDocument, loadTheme, saveTheme, themeById, type ThemeDefinition } from './themes';
 import {
   breadcrumbItems, fromLspDocumentSymbols, symbolChain, type OutlineSymbol,
@@ -1004,9 +1005,7 @@ function renderFiles(): void {
       const chevron = document.createElement('span');
       chevron.className = 'tree-chevron' + (expanded ? ' open' : '');
       chevron.setAttribute('aria-hidden', 'true');
-      const folder = document.createElement('span');
-      folder.className = 'folder-icon' + (expanded ? ' open' : '');
-      folder.setAttribute('aria-hidden', 'true');
+      const folder = workbenchIcon(expanded ? 'folder-open' : 'folder', 'folder-icon');
       const dirName = document.createElement('span');
       dirName.className = 'tree-label';
       dirName.textContent = node.name;
