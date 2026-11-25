@@ -209,9 +209,8 @@ pub async fn get_github_queue(
     if installation_id == 0 || repo_id == 0 {
         return Err("choose an authorized GitHub repository".into());
     }
-    let mut url = format!(
-        "{BROKER}/api/desktop/queue?installationId={installation_id}&repoId={repo_id}"
-    );
+    let mut url =
+        format!("{BROKER}/api/desktop/queue?installationId={installation_id}&repoId={repo_id}");
     if let Some(number) = pull_number {
         if number == 0 {
             return Err("invalid pull request number".into());
