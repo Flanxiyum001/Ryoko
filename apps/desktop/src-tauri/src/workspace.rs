@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -169,14 +169,12 @@ pub fn list_files(state: State<'_, WorkspaceState>) -> Result<Vec<String>, Strin
     Ok(files)
 }
 
-#[tauri::command]
-pub fn read_file(path: String, state: State<'_, WorkspaceState>) -> Result<String, String> {
-    let root = current_root(&state)?;
-    let candidate = safe_join(&root, &path)?;
+fn read_workspace_bytes(path: &str, root: &std::path::Path) -> Result<Vec<u8>, String> {
+    let candidate = safe_join(root, path)?;
     let real = candidate
         .canonicalize()
         .map_err(|error| format!("cannot read {path}: {error}"))?;
-    if !real.starts_with(&root) {
+    if !real.starts_with(root) {
         return Err(format!("path escapes the workspace: {path}"));
     }
     if !real.is_file() {
@@ -186,7 +184,122 @@ pub fn read_file(path: String, state: State<'_, WorkspaceState>) -> Result<Strin
     if metadata.len() > MAX_FILE_BYTES {
         return Err(format!("file is larger than 2 MiB: {path}"));
     }
-    fs::read_to_string(&real).map_err(|error| format!("cannot read {path} as UTF-8: {error}"))
+    let mut bytes = Vec::new();
+    fs::File::open(&real)
+        .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("cannot read {path}: {error}"))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("file is larger than 2 MiB: {path}"));
+    }
+    Ok(bytes)
+}
+
+#[tauri::command]
+pub fn read_file(path: String, state: State<'_, WorkspaceState>) -> Result<String, String> {
+    let bytes = read_workspace_bytes(&path, &current_root(&state)?)?;
+    let content = String::from_utf8(bytes)
+        .map_err(|error| format!("cannot read {path} as UTF-8: {error}"))?;
+    validate_editor_text(&content, &path)?;
+    Ok(content)
+}
+
+#[derive(Serialize)]
+pub struct EncodedFilePreview {
+    content: String,
+    encoding: &'static str,
+}
+
+// Read-only by design: never convert an existing file's encoding on save.
+#[tauri::command]
+pub fn read_encoded_file_preview(
+    path: String,
+    state: State<'_, WorkspaceState>,
+) -> Result<EncodedFilePreview, String> {
+    let bytes = read_workspace_bytes(&path, &current_root(&state)?)?;
+    decode_editor_preview(&bytes, &path)
+}
+
+fn decode_editor_preview(bytes: &[u8], path: &str) -> Result<EncodedFilePreview, String> {
+    let unsupported = || format!("binary or unsupported text encoding: {path}");
+    // Reject UTF-32 before the overlapping UTF-16 LE BOM.
+    if bytes.starts_with(&[0xff, 0xfe, 0, 0]) || bytes.starts_with(&[0, 0, 0xfe, 0xff]) {
+        return Err(unsupported());
+    }
+    let utf16 = if bytes.starts_with(&[0xff, 0xfe]) {
+        Some((true, &bytes[2..]))
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        Some((false, &bytes[2..]))
+    } else if bytes.len() >= 8 && bytes.len() & 1 == 0 {
+        let pairs = bytes.len() / 2;
+        let even_zero = bytes.iter().step_by(2).filter(|&&byte| byte == 0).count();
+        let odd_zero = bytes
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .filter(|&&byte| byte == 0)
+            .count();
+        if odd_zero * 4 >= pairs * 3 && even_zero * 8 <= pairs {
+            Some((true, bytes))
+        } else if even_zero * 4 >= pairs * 3 && odd_zero * 8 <= pairs {
+            Some((false, bytes))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let (content, encoding) = if let Some((little_endian, data)) = utf16 {
+        if data.len() & 1 != 0 {
+            return Err(unsupported());
+        }
+        let units: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|pair| {
+                if little_endian {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        (
+            String::from_utf16(&units).map_err(|_| unsupported())?,
+            if little_endian {
+                "UTF-16 LE"
+            } else {
+                "UTF-16 BE"
+            },
+        )
+    } else {
+        // For text-like logs with mixed or legacy bytes, display a best-effort
+        // preview; do not pretend to know the encoding or allow saving it.
+        let log = path.to_ascii_lowercase().ends_with(".log");
+        let ascii = bytes
+            .iter()
+            .filter(|&&byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0x1b | 0x20..=0x7e))
+            .count();
+        if !log || bytes.is_empty() || ascii * 4 < bytes.len() * 3 {
+            return Err(unsupported());
+        }
+        (
+            String::from_utf8_lossy(bytes).into_owned(),
+            "Unknown encoding (lossy)",
+        )
+    };
+    if content
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\r' | '\n' | '\u{1b}'))
+    {
+        return Err(unsupported());
+    }
+    Ok(EncodedFilePreview { content, encoding })
+}
+
+fn validate_editor_text(content: &str, path: &str) -> Result<(), String> {
+    if content.contains('\0') {
+        return Err(format!("binary or unsupported text encoding: {path}"));
+    }
+    Ok(())
 }
 
 fn requires_sensitive_write_approval(path: &str) -> bool {
@@ -273,6 +386,8 @@ pub async fn write_file(
     // multi-process atomic compare-and-swap needs OS-specific primitives.
     let current = fs::read_to_string(&target)
         .map_err(|error| format!("cannot verify current file {path}: {error}"))?;
+    validate_editor_text(&current, &path)?;
+    validate_editor_text(&content, &path)?;
     if current != expected_content {
         return Err(format!(
             "file changed on disk since it was opened; reload or compare before saving: {path}"
@@ -313,7 +428,59 @@ pub async fn write_file(
 
 #[cfg(test)]
 mod permission_tests {
-    use super::requires_sensitive_write_approval;
+    use super::{decode_editor_preview, requires_sensitive_write_approval, validate_editor_text};
+
+    #[test]
+    fn rejects_binary_content_without_rejecting_unknown_text_files() {
+        assert!(validate_editor_text("example\n", "file.unknown").is_ok());
+        assert!(validate_editor_text("\0binary", "image.bin").is_err());
+    }
+
+    #[test]
+    fn previews_utf16_logs_with_and_without_bom() {
+        let text = "server started\r\n";
+        for little_endian in [true, false] {
+            let bytes: Vec<u8> = text
+                .encode_utf16()
+                .flat_map(|unit| {
+                    if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    }
+                })
+                .collect();
+            let mut bom = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            bom.extend_from_slice(&bytes);
+            for data in [&bytes, &bom] {
+                let preview = decode_editor_preview(data, ".server.log").unwrap();
+                assert_eq!(preview.content, text);
+                assert_eq!(
+                    preview.encoding,
+                    if little_endian {
+                        "UTF-16 LE"
+                    } else {
+                        "UTF-16 BE"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_preview_is_limited_to_text_like_logs() {
+        let bytes = b"server: started \xff successfully\n";
+        let preview = decode_editor_preview(bytes, ".server.log").unwrap();
+        assert!(preview.content.contains('\u{fffd}'));
+        assert!(preview.encoding.contains("lossy"));
+        assert!(decode_editor_preview(bytes, "main.rs").is_err());
+        assert!(decode_editor_preview(b"server started\0\xff\n", "binary.log").is_err());
+        assert!(decode_editor_preview(&[0xff, 0xfe, 0, 0], "utf32.log").is_err());
+    }
 
     #[test]
     fn prompts_for_environment_and_ci_files() {

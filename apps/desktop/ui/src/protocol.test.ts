@@ -4,9 +4,11 @@ import {
   isPublishDiagnostics,
   languageForPath,
   markerSeverityFor,
+  normalizeFilePath,
   parseJsonRpc,
   joinWorkspacePath,
   pathFromFileUri,
+  workspaceRelativeFile,
 } from './protocol';
 
 describe('language detection', () => {
@@ -30,12 +32,47 @@ describe('file URIs', () => {
     expect(fileUri('C:\\work\\ryoko\\main.rs')).toBe('file:///C:/work/ryoko/main.rs');
   });
 
+  it('opens files under Rust-canonicalized Windows drive roots', () => {
+    const root = '\\\\?\\C:\\work\\My Project';
+    const uri = fileUri(joinWorkspacePath(root, 'src/main #1%.rs'));
+    expect(uri).toBe('file:///C:/work/My%20Project/src/main%20%231%25.rs');
+    expect(pathFromFileUri(uri)).toBe('C:/work/My Project/src/main #1%.rs');
+    expect(normalizeFilePath(root)).toBe('C:/work/My Project');
+  });
+
+  it('uses the server as authority for ordinary and extended UNC roots', () => {
+    const ordinary = '\\\\server\\share\\project';
+    const extended = '\\\\?\\UNC\\server\\share\\project';
+    const expected = 'file://server/share/project/src/main.rs';
+    for (const root of [ordinary, extended]) {
+      const uri = fileUri(joinWorkspacePath(root, 'src/main.rs'));
+      expect(uri).toBe(expected);
+      expect(pathFromFileUri(uri)).toBe('//server/share/project/src/main.rs');
+      expect(normalizeFilePath(root)).toBe('//server/share/project');
+    }
+  });
+
+  it('does not produce an empty authority with a double-slash path', () => {
+    expect(fileUri('///home/me/main.rs')).toBe('file:///home/me/main.rs');
+  });
+
   it('round-trips absolute paths and rejects non-file URIs', () => {
     expect(pathFromFileUri('file:///home/me/My%20Project/src/main.rs')).toBe(
       '/home/me/My Project/src/main.rs',
     );
     expect(pathFromFileUri('file:///C:/work/main.rs')).toBe('C:/work/main.rs');
     expect(pathFromFileUri('untitled:Untitled-1')).toBeNull();
+  });
+
+  it('resolves direct file picks without depending on the file index', () => {
+    expect(workspaceRelativeFile('/repo', '/repo/ignored/file.xyz')).toBe('ignored/file.xyz');
+    expect(workspaceRelativeFile('/repo', 'ignored/file.xyz')).toBe('ignored/file.xyz');
+    expect(workspaceRelativeFile('/repo', './ignored//file.xyz')).toBe('ignored/file.xyz');
+    expect(workspaceRelativeFile('/repo', '../other/file.xyz')).toBeNull();
+    expect(workspaceRelativeFile('/repo', '/repository/file.xyz')).toBeNull();
+    expect(workspaceRelativeFile('/repo', '/other/file.xyz')).toBeNull();
+    expect(workspaceRelativeFile('\\\\?\\C:\\Repo', 'c:\\repo\\file.xyz')).toBe('file.xyz');
+    expect(workspaceRelativeFile('\\\\?\\UNC\\server\\share', '\\\\server\\share\\file.xyz')).toBe('file.xyz');
   });
 
   it('joins workspace roots without doubling or dropping separators', () => {

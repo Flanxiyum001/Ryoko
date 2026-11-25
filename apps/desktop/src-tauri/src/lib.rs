@@ -63,6 +63,7 @@ pub fn run() {
             onboarding::clone_repository,
             workspace::list_files,
             workspace::read_file,
+            workspace::read_encoded_file_preview,
             workspace::write_file,
             agent_chat::agent_chat,
             agent_chat::agent_chat_cancel,

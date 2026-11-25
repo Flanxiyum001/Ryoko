@@ -6,9 +6,11 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const files: Record<string, string> = {
       'README.md': '# Demo workspace\n',
+      '.server.log': 'server started',
       'main.ts': 'const greeting = "Hello Ryoko";\nconsole.log(greeting);\n',
       'other.ts': 'export const value = 42;\n',
       'src/notes.unknown': 'example',
+      'ignored/config.data': '{"enabled": true}',
     };
     let reads = 0;
     Object.assign(window, {
@@ -19,15 +21,20 @@ test.beforeEach(async ({ page }) => {
         async invoke(command: string, args: Record<string, string> = {}) {
           if (command === 'pick_workspace_folder') return '/demo/workspace';
           if (command === 'open_workspace') return { root: '/demo/workspace', name: 'workspace' };
-          if (command === 'list_files') return Object.keys(files);
-          if (command === 'read_file') { reads++; document.body.dataset.reads = String(reads); return files[args.path]; }
+          if (command === 'list_files') return Object.keys(files).filter((path) => !path.startsWith('ignored/'));
+          if (command === 'read_file') {
+            reads++; document.body.dataset.reads = String(reads);
+            if (args.path === '.server.log') throw new Error('cannot read .server.log as UTF-8: invalid byte');
+            return files[args.path];
+          }
+          if (command === 'read_encoded_file_preview') return { content: files[args.path], encoding: 'UTF-16 LE' };
           if (command === 'write_file') {
             if (files[args.path] !== args.expectedContent) throw new Error('File changed on disk');
             files[args.path] = args.content;
             document.body.dataset.saved = args.content;
             return;
           }
-          if (command === 'git_changes') return { isRepository: true, entries: [] };
+          if (command === 'git_changes') return { isRepository: false, entries: [] };
           if (command === 'run_status') return { running: false, paused: false, exitCode: null, eventLog: null, startedMs: null, logTail: '' };
           if (command === 'lsp_registry') return { registry: { servers: [] } };
           if (command === 'lsp_start') throw new Error('Language servers are outside renderer testing');
@@ -56,6 +63,36 @@ async function edit(page: Page) {
   await page.keyboard.type('// Unsaved edit\n');
   await expect(page.getByRole('tab', { name: 'main.ts, unsaved changes' })).toBeVisible();
 }
+
+test('opens an unindexed file in a non-Git workspace and detects its content', async ({ page }) => {
+  await openProject(page);
+  await page.locator('#menu-file').click();
+  await page.getByRole('menuitem', { name: /Open File by Path/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Open file by path' });
+  await dialog.getByRole('textbox', { name: 'File path' }).fill('ignored/config.data');
+  await dialog.getByRole('button', { name: 'Open', exact: true }).click();
+  // Tabs expose the full workspace-relative path as their accessible name.
+  await expect(page.getByRole('tab', { name: 'ignored/config.data', exact: true }))
+    .toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('#editor')).toContainText('enabled');
+  await expect(page.locator('#languageMode')).toHaveValue('json');
+});
+
+test('opens non-UTF-8 logs as read-only and restores normal editing on tab switch', async ({ page }) => {
+  await openProject(page);
+  await openFile(page, '.server.log');
+  await expect(page.locator('#editor')).toContainText('server started');
+  await expect(page.locator('#saveFile')).toBeDisabled();
+  await page.locator('#editor .inputarea').first().focus();
+  await page.keyboard.type('changed');
+  await expect(page.locator('#editor')).not.toContainText('changed');
+  await expect(page.getByRole('tab', { name: '.server.log', exact: true })).toBeVisible();
+  await openFile(page, 'main.ts');
+  await expect(page.locator('#saveFile')).toBeEnabled();
+  await edit(page);
+  await page.getByRole('tab', { name: '.server.log', exact: true }).click();
+  await expect(page.locator('#saveFile')).toBeDisabled();
+});
 
 test('opening folders without native IPC gives actionable guidance', async ({ page }) => {
   await page.evaluate(() => {

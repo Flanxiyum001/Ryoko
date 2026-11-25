@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LANGUAGE_IDS, defaultRunProfile, detectLanguage, parseTaskArgs } from './languages';
+import { LANGUAGE_IDS, defaultRunProfile, detectEditorLanguage, detectLanguage, parseTaskArgs } from './languages';
 
 describe('polyglot detection', () => {
   it('recognizes case-insensitive extensions and special filenames', () => {
@@ -17,6 +17,25 @@ describe('polyglot detection', () => {
     expect(detectLanguage('bin/entry', '#!/bin/sh\n')).toBe('shell');
     expect(detectLanguage('script.foo', '#!/usr/bin/env ruby\n')).toBe('ruby');
     expect(detectLanguage('mystery.foo', 'hello')).toBe('plaintext');
+  });
+  it('recognizes additional project languages, extensionless config, and BOM scripts', () => {
+    expect(detectLanguage('main.mts')).toBe('typescript');
+    expect(detectLanguage('App.svelte')).toBe('svelte');
+    expect(detectLanguage('main.bicep')).toBe('bicep');
+    expect(detectLanguage('.env.local')).toBe('ini');
+    expect(detectLanguage('Vagrantfile')).toBe('ruby');
+    expect(detectLanguage('script', '\uFEFF#!/usr/bin/env python3')).toBe('python');
+  });
+  it('uses registered editor modes and conservative content detection', () => {
+    const modes = [{ id: 'custom', extensions: ['.abc'], filenames: ['CUSTOMFILE'] },
+      { id: 'compound', extensions: ['.test.abc'] }];
+    expect(detectEditorLanguage('test.ABC', '', modes)).toBe('custom');
+    expect(detectEditorLanguage('x.test.abc', '', modes)).toBe('compound');
+    expect(detectEditorLanguage('CUSTOMFILE', '', modes)).toBe('custom');
+    expect(detectEditorLanguage('data', '{"x": 1}', [])).toBe('json');
+    expect(detectEditorLanguage('document', '<?xml version="1.0"?>', [])).toBe('xml');
+    expect(detectEditorLanguage('notes.txt', '{"x": 1}', [])).toBe('plaintext');
+    expect(detectEditorLanguage('unknown', 'arbitrary words', [])).toBe('plaintext');
   });
   it('has unique Monaco/LSP ids', () => {
     expect(LANGUAGE_IDS).toContain('typescript');
