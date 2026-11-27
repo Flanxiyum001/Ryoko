@@ -1,4 +1,5 @@
 mod agent_chat;
+mod agent_harness;
 mod agent_review;
 mod code_run;
 mod completion;
@@ -7,6 +8,7 @@ mod context_mentions;
 mod credential_store;
 mod debug_adapter;
 mod extensions;
+mod fast_context;
 mod git_status;
 mod github_queue;
 mod inline_edit;
@@ -19,6 +21,7 @@ mod model_runtime;
 mod onboarding;
 mod paths;
 mod review;
+mod review_swarm;
 mod run;
 mod search;
 mod servers;
@@ -47,6 +50,9 @@ pub fn run() {
         .manage(updater::UpdaterState::new(updates_configured))
         .manage(workspace::WorkspaceState::default())
         .manage(agent_chat::AgentChatState::default())
+        .manage(agent_harness::AgentHarnessState::default())
+        .manage(fast_context::FastContextState::default())
+        .manage(review_swarm::SwarmState::default())
         .manage(github_queue::GitHubQueueState::default())
         .manage(lsp::LspState::default())
         .manage(run::RunState::default())
@@ -67,6 +73,15 @@ pub fn run() {
             workspace::write_file,
             agent_chat::agent_chat,
             agent_chat::agent_chat_cancel,
+            agent_harness::harness_start,
+            agent_harness::harness_cancel,
+            agent_harness::harness_answer_approval,
+            agent_harness::harness_apply,
+            agent_harness::harness_discard,
+            fast_context::fast_context_search,
+            review_swarm::ryoko_review,
+            review_swarm::swarm_start,
+            review_swarm::swarm_push,
             context_mentions::resolve_context_mention,
             context_mentions::search_context_symbols,
             agent_review::read_agent_candidate,

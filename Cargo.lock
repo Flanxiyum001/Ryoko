@@ -1904,6 +1904,7 @@ dependencies = [
  "clap",
  "ignore",
  "ryoko-core",
+ "ryoko-harness",
  "ryoko-marketplace",
  "ryoko-models",
  "ryoko-sandbox",
@@ -1944,6 +1945,23 @@ dependencies = [
  "tree-sitter-sequel",
  "tree-sitter-swift",
  "tree-sitter-typescript",
+ "uuid",
+]
+
+[[package]]
+name = "ryoko-harness"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ignore",
+ "ryoko-models",
+ "ryoko-tools",
+ "ryoko-worktree",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
  "uuid",
 ]
 
