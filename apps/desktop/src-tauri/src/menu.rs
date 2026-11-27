@@ -45,6 +45,8 @@ pub const MENUS: &[(&str, &[Entry])] = &[
         "File",
         &[
             Command("workspace.openFolder", "Open Folder…", Some("CmdOrCtrl+O")),
+            Command("workspace.newFile", "New File…", None),
+            Command("workspace.newFolder", "New Folder…", None),
             Command("workspace.openFile", "Open File…", None),
             Command("workspace.openFileByPath", "Open File by Path…", None),
             Command("workbench.quickOpen", "Go to File…", Some("CmdOrCtrl+P")),
@@ -116,6 +118,11 @@ pub const MENUS: &[(&str, &[Entry])] = &[
                 None,
             ),
             Command("view.togglePanel", "Toggle Panel", Some("CmdOrCtrl+J")),
+            Command(
+                "editor.splitRight",
+                "Split Editor Right",
+                Some("CmdOrCtrl+\\"),
+            ),
             Command("view.toggleMinimap", "Toggle Minimap", None),
             Command("view.resetLayout", "Reset Layout", None),
             Separator,

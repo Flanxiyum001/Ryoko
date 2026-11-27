@@ -1,8 +1,8 @@
-# Ryoko UX improvements — implementation and next milestones
+# Ryoko UX improvements — CLI foundation and desktop workbench
 
-Ryoko is currently a Rust terminal application, not yet a graphical IDE. This milestone makes the terminal workflow easier to adopt and provides data contracts that can back a future desktop experience.
+Ryoko provides both a Rust terminal CLI (`crates/ryoko-cli`) and a native Tauri + Monaco desktop workbench (`apps/desktop`). This document records the shipped CLI UX contracts alongside the current desktop workbench status.
 
-## Implemented on this branch
+## Implemented CLI UX capabilities
 
 | Capability | User benefit | Command |
 | --- | --- | --- |
@@ -17,9 +17,9 @@ Ryoko is currently a Rust terminal application, not yet a graphical IDE. This mi
 | Multiline prompting | Use a UTF-8 prompt file rather than giant shell arguments | ryoko ask --prompt-file |
 | Local/cloud independence | Only initialize models actually selected, so unused cloud credentials do not block local work | ask, team-preview, run |
 
-**Limits:** The team preview remains advice-only. It does not change files or merge projects. The existing ryoko run/review workflow edits isolated worktrees and executes user-configured commands locally; it is NOT a hardened code sandbox. Per-role model routing is supported for team-preview. The run/review single coding agent still uses one selected model.
+**Limits:** The CLI `team-preview` remains advice-only. It does not change files or merge projects. The existing `ryoko run`/`review` workflow edits isolated worktrees and executes user-configured commands locally.
 
-## Quickstart
+## Quickstart (CLI)
 
 From a trusted checkout:
 
@@ -34,25 +34,19 @@ From a trusted checkout:
 
 Edit the team example to match local models you have actually installed. To use a remote endpoint, run init with --id, --base-url (HTTPS) and --api-key-env, then set that environment variable outside your repo. There is no implicit network probe in doctor.
 
+For the desktop IDE workbench, see [`apps/desktop/README.md`](../apps/desktop/README.md) and [`docs/product/UX_SPECIFICATION.md`](product/UX_SPECIFICATION.md).
+
 ## Review-safe reports
 
 - Reports are exported **only** when --output is provided, and existing files are never overwritten.
-- Markdown reports contain raw model output. Treat this as untrusted content when rendering in a future UI; do not execute embedded commands.
+- Markdown reports contain raw model output. Treat this as untrusted content when rendering in a UI; do not execute embedded commands.
 - Provider-reported token counts can be missing or incomplete. The CLI intentionally does not claim accurate prices from unknown providers.
 - If any specialist fails, earlier completed outputs can still be exported, with status "failed".
 - A fully complete multi-agent preview does not mean a functional application was compiled or tested.
 
-## Product UX roadmap — not implemented here
+## Desktop UX status & remaining roadmap
 
-1. **Graphical code editor:** tabs, Monaco-like editing, tabs and integrated diff viewer.
-2. **Agent activity board:** live DAG graph with parallel workers, handoff traces, retries and human review checkpoints.
-3. **Guided project wizard:** app templates and architecture preferences, project import, Git hosting connection and consent.
-4. **Secure tool permission system:** granular read/write/exec/network approvals, scope expirations, per-agent policies and audit log.
-5. **Visual app preview:** safely hosted web preview, hot reload, screenshot/DOM feedback and browser tests.
-6. **Native provider adapters:** dedicated protocols for APIs that aren't OpenAI chat-completions compatible; feature detection for tools and streaming.
-7. **Usage budgets and cancellation:** accurate cost telemetry, estimated ceilings, reservations, per-role caps and cancel controls.
-8. **Context manager:** search/index/retrieve source files, token budgeting, project knowledge and durable reviewed memory.
-9. **Accessibility and theming:** keyboard-first operation, dark/light themes, screen-reader labels and reduced-motion support.
-10. **Release workflow:** test matrix, sandbox isolation, CI status, GitHub PR creation, staging deploys and production approval gates.
+Most items originally listed as future desktop milestones are now implemented in `apps/desktop`:
 
-These features require additional architecture and validation and should not be advertised as functional until each is shipped and tested.
+- **Implemented in `apps/desktop`:** Monaco editor with tabs, split pane, polyglot language detection, Explorer file/folder CRUD, integrated diff/hunk review, Mission Control & agent sessions, onboarding & OS keychain credential storage, native provider adapters, context mentions & fast-context search, dark/light themes, keyboard navigation, reduced-motion support, and opt-in crash recovery.
+- **Remaining / hardening:** Live signed marketplace plugin installs (currently browse-only pending production signing registry), production auto-updater key configuration, and container-backed execution sandboxing across all host platforms.

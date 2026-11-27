@@ -22,6 +22,7 @@ export const DEFAULT_KEYBINDINGS: readonly Keybinding[] = [
   { action: 'workbench.settings', chord: 'MOD+,', title: 'Open settings' },
   { action: 'editor.inlineEdit', chord: 'MOD+K', title: 'Inline edit with the agent' },
   { action: 'editor.close', chord: 'MOD+W', title: 'Close active file' },
+  { action: 'editor.splitRight', chord: 'MOD+\\', title: 'Split editor right' },
   { action: 'editor.save', chord: 'MOD+S', title: 'Save the active buffer' },
 ];
 
@@ -91,6 +92,7 @@ function keyPart(event: KeyEventLike): string {
   if (event.code === 'Comma') return ',';
   if (event.code === 'Period') return '.';
   if (event.code === 'Slash') return '/';
+  if (event.code === 'Backslash') return '\\';
   return event.key.toUpperCase();
 }
 

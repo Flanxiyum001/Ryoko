@@ -255,7 +255,15 @@ const fileCount = element('fileCount');
 const activePath = element('activePath');
 const dirtyFlag = element('dirtyFlag');
 const readOnlyBadge = element('readOnlyBadge');
+const editorWorkspace = element('editorWorkspace');
 const editorHost = element('editor');
+const secondaryPane = element('secondaryPane');
+const secondaryEditorHost = element('secondaryEditor');
+const secondaryFileSelect = element<HTMLSelectElement>('secondaryFileSelect');
+const splitEditorBtn = element<HTMLButtonElement>('splitEditorBtn');
+const closeSplitEditor = element<HTMLButtonElement>('closeSplitEditor');
+const newFileBtn = element<HTMLButtonElement>('newFileBtn');
+const newFolderBtn = element<HTMLButtonElement>('newFolderBtn');
 const vimStatus = element('vimStatus');
 const emptyEditor = element('emptyEditor');
 const problemList = element('problemList');
@@ -441,9 +449,14 @@ const openFiles = new Map<string, OpenFile>();
 let fileOpenGeneration = 0;
 let workspaceSwitching = false;
 const savingFiles = new Set<string>();
+const createdEmptyDirs = new Set<string>();
+let splitOpen = false;
+let secondaryPath: string | null = null;
+let secondaryEditor: monaco.editor.IStandaloneCodeEditor | null = null;
 const renderTabs = mountEditorTabs(element('editorTabs'), selectOpenFile, closeOpenFile);
 function updateTabs(): void {
   renderTabs([...openFiles.values()], state.current?.path ?? null);
+  renderSecondaryFileOptions();
 }
 const diagnostics = new Map<string, PublishDiagnosticsParams>();
 const changeTimers = new Map<string, number>();
@@ -460,6 +473,7 @@ const quickOpen = mountQuickOpen({
 const initialTheme = loadTheme(localStorage);
 applyThemeToDocument(initialTheme);
 const layoutState = loadLayout(localStorage);
+const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const editor = monaco.editor.create(editorHost, {
   theme: initialTheme.monaco,
   automaticLayout: true,
@@ -469,7 +483,7 @@ const editor = monaco.editor.create(editorHost, {
   scrollBeyondLastLine: false,
   renderWhitespace: 'selection',
   padding: { top: 10 },
-  smoothScrolling: true,
+  smoothScrolling: !prefersReducedMotion,
 });
 
 let keymapPreset: KeymapPreset = loadKeymap(localStorage);
@@ -712,7 +726,7 @@ function showAgentChange(change: StagedChange, line?: number): void {
   diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
   diffReviewPath.textContent = `${change.path} · agent change (not saved yet)`;
   diffReview.classList.remove('hidden');
-  editorHost.classList.add('hidden');
+  editorWorkspace.classList.add('hidden');
   emptyEditor.classList.add('hidden');
   diffEditor.layout();
   if (line) {
@@ -1080,12 +1094,53 @@ function markDirty(file: OpenFile): void {
   updateTabs();
 }
 
+function makeTreeActionBtn(label: string, iconName: 'pencil' | 'trash-2', danger: boolean, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tree-action-btn' + (danger ? ' danger' : '');
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+  btn.append(workbenchIcon(iconName, 'control-icon'));
+  btn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
+function handleTreeKeydown(event: KeyboardEvent, path: string, isDir: boolean): void {
+  const items = Array.from(fileList.querySelectorAll<HTMLButtonElement>('[role="treeitem"]'));
+  const idx = items.indexOf(event.currentTarget as HTMLButtonElement);
+  if (event.key === 'ArrowDown' && idx >= 0 && idx + 1 < items.length) {
+    event.preventDefault();
+    items[idx + 1].focus();
+  } else if (event.key === 'ArrowUp' && idx > 0) {
+    event.preventDefault();
+    items[idx - 1].focus();
+  } else if (event.key === 'Home' && items.length > 0) {
+    event.preventDefault();
+    items[0].focus();
+  } else if (event.key === 'End' && items.length > 0) {
+    event.preventDefault();
+    items[items.length - 1].focus();
+  } else if (event.key === 'F2') {
+    event.preventDefault();
+    void renameWorkspaceEntry(path, isDir);
+  } else if (event.key === 'Delete') {
+    event.preventDefault();
+    void deleteWorkspaceEntry(path, isDir);
+  }
+}
+
 function renderFiles(): void {
   const query = fileFilter.value.trim().toLowerCase();
   const visible = filterTreePaths(state.files, query);
   fileCount.textContent = `${state.files.length} files`;
   fileList.replaceChildren();
-  if (visible.length === 0) {
+  const extraEmptyDirs = query
+    ? []
+    : [...createdEmptyDirs].filter((dir) => !state.files.some((file) => file.startsWith(`${dir}/`))).sort();
+  if (visible.length === 0 && extraEmptyDirs.length === 0) {
     const hint = document.createElement('p');
     hint.className = 'hint';
     hint.textContent = state.files.length === 0 ? 'No files in this workspace.' : 'No matching files.';
@@ -1093,12 +1148,21 @@ function renderFiles(): void {
     return;
   }
   const nodes = buildTree(visible, { expanded: expandedDirectories, changes: workbenchChanges });
+  for (const dir of extraEmptyDirs) {
+    if (!nodes.some((n) => n.type === 'dir' && n.path === dir)) {
+      const parts = dir.split('/');
+      nodes.push({ name: parts[parts.length - 1] ?? dir, path: dir, type: 'dir', depth: Math.max(0, parts.length - 1) });
+    }
+  }
   const fragment = document.createDocumentFragment();
   for (const node of nodes) {
+    const row = document.createElement('div');
+    row.className = 'tree-row';
     if (node.type === 'dir') {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'tree-dir';
+      button.setAttribute('role', 'treeitem');
       const expanded = expandedDirectories.has(node.path);
       button.style.paddingLeft = `${4 + node.depth * 12}px`;
       button.setAttribute('aria-expanded', String(expanded));
@@ -1116,13 +1180,24 @@ function renderFiles(): void {
         else expandedDirectories.add(node.path);
         renderFiles();
       });
-      fragment.append(button);
+      button.addEventListener('keydown', (event) => handleTreeKeydown(event, node.path, true));
+      const actions = document.createElement('div');
+      actions.className = 'tree-actions';
+      actions.append(
+        makeTreeActionBtn(`Rename ${node.path}`, 'pencil', false, () => void renameWorkspaceEntry(node.path, true)),
+        makeTreeActionBtn(`Delete ${node.path}`, 'trash-2', true, () => void deleteWorkspaceEntry(node.path, true)),
+      );
+      row.append(button, actions);
+      fragment.append(row);
     } else {
       const button = document.createElement('button');
       button.type = 'button';
+      const isSelected = state.current?.path === node.path;
       button.className = 'file-link tree-file'
-        + (state.current?.path === node.path ? ' active' : '')
+        + (isSelected ? ' active' : '')
         + (node.change ? ` change-${node.change}` : '');
+      button.setAttribute('role', 'treeitem');
+      button.setAttribute('aria-selected', String(isSelected));
       button.style.paddingLeft = `${20 + node.depth * 12}px`;
       const fileName = document.createElement('span');
       fileName.className = 'tree-label';
@@ -1139,7 +1214,15 @@ function renderFiles(): void {
         void openFile(node.path);
         if (window.matchMedia('(max-width: 720px)').matches) activateView('editor');
       });
-      fragment.append(button);
+      button.addEventListener('keydown', (event) => handleTreeKeydown(event, node.path, false));
+      const actions = document.createElement('div');
+      actions.className = 'tree-actions';
+      actions.append(
+        makeTreeActionBtn(`Rename ${node.path}`, 'pencil', false, () => void renameWorkspaceEntry(node.path, false)),
+        makeTreeActionBtn(`Delete ${node.path}`, 'trash-2', true, () => void deleteWorkspaceEntry(node.path, false)),
+      );
+      row.append(button, actions);
+      fragment.append(row);
     }
   }
   fileList.append(fragment);
@@ -1169,23 +1252,394 @@ async function refreshWorkbenchChanges(): Promise<void> {
   }
 }
 
-function revealEditor(): void {
-  editorHost.classList.remove('hidden');
-  emptyEditor.classList.add('hidden');
+function layoutEditors(): void {
   editor.layout();
-  requestAnimationFrame(() => editor.layout());
+  if (splitOpen) secondaryEditor?.layout();
+}
+
+function revealEditor(): void {
+  editorWorkspace.classList.remove('hidden');
+  emptyEditor.classList.add('hidden');
+  layoutEditors();
+  requestAnimationFrame(layoutEditors);
 }
 
 workbenchLayout.addEventListener('transitionend', (event) => {
   if (event.target === workbenchLayout && event.propertyName === 'grid-template-columns') {
-    editor.layout();
+    layoutEditors();
   }
 });
 
 async function loadFiles(): Promise<void> {
   state.files = await invoke<string[]>('list_files');
+  for (const dir of [...createdEmptyDirs]) {
+    if (state.files.some((file) => file.startsWith(`${dir}/`))) {
+      createdEmptyDirs.delete(dir);
+    }
+  }
   renderFiles();
 }
+
+function promptTextDialog(options: {
+  title: string;
+  label: string;
+  placeholder: string;
+  submitLabel: string;
+  initialValue?: string;
+}): Promise<string | null> {
+  return new Promise((resolve) => {
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'merge-dialog';
+    dialog.setAttribute('aria-label', options.title);
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    form.className = 'merge-form';
+    const heading = document.createElement('h2');
+    heading.textContent = options.title;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.placeholder = options.placeholder;
+    input.value = options.initialValue ?? '';
+    input.setAttribute('aria-label', options.label);
+    const actions = document.createElement('div');
+    actions.className = 'merge-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button ghost compact';
+    cancel.textContent = 'Cancel';
+    const submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.className = 'button primary compact';
+    submit.textContent = options.submitLabel;
+    actions.append(cancel, submit);
+    form.append(heading, input, actions);
+    dialog.append(form);
+    let done = false;
+    const finish = (value: string | null) => {
+      if (done) return;
+      done = true;
+      dialog.close();
+      dialog.remove();
+      if (returnFocus && document.contains(returnFocus)) returnFocus.focus();
+      resolve(value);
+    };
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const value = input.value.trim();
+      finish(value ? value : null);
+    });
+    cancel.addEventListener('click', () => finish(null));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      finish(null);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+    input.select();
+  });
+}
+
+function confirmActionDialog(options: {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  danger?: boolean;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'merge-dialog';
+    dialog.setAttribute('aria-label', options.title);
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    form.className = 'merge-form';
+    const heading = document.createElement('h2');
+    heading.textContent = options.title;
+    const body = document.createElement('p');
+    body.className = 'hint';
+    body.textContent = options.message;
+    const actions = document.createElement('div');
+    actions.className = 'merge-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button ghost compact';
+    cancel.textContent = 'Cancel';
+    const confirm = document.createElement('button');
+    confirm.type = 'submit';
+    confirm.className = options.danger ? 'button danger compact' : 'button primary compact';
+    confirm.textContent = options.confirmLabel;
+    actions.append(cancel, confirm);
+    form.append(heading, body, actions);
+    dialog.append(form);
+    let done = false;
+    const finish = (accepted: boolean) => {
+      if (done) return;
+      done = true;
+      dialog.close();
+      dialog.remove();
+      if (returnFocus && document.contains(returnFocus)) returnFocus.focus();
+      resolve(accepted);
+    };
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      finish(true);
+    });
+    cancel.addEventListener('click', () => finish(false));
+    dialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      finish(false);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    confirm.focus();
+  });
+}
+
+function normalizeRelativeWorkspacePath(raw: string): string {
+  return raw.trim().replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+async function createWorkspaceFile(): Promise<void> {
+  if (!requireNativeWorkspace() || !state.root || workspaceSwitching) {
+    setStatus('Open a project folder before creating a file.');
+    return;
+  }
+  const entered = await promptTextDialog({
+    title: 'New file',
+    label: 'New file path',
+    placeholder: 'src/example.ts',
+    submitLabel: 'Create',
+  });
+  if (!entered) return;
+  const path = normalizeRelativeWorkspacePath(entered);
+  if (!path) return;
+  try {
+    await invoke('create_file', { path });
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i += 1) {
+      expandedDirectories.add(parts.slice(0, i).join('/'));
+    }
+    await loadFiles();
+    await openFile(path);
+    setStatus(`Created ${path}`);
+    void refreshWorkbenchChanges();
+  } catch (error) {
+    setStatus(`Create file failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function createWorkspaceFolder(): Promise<void> {
+  if (!requireNativeWorkspace() || !state.root || workspaceSwitching) {
+    setStatus('Open a project folder before creating a folder.');
+    return;
+  }
+  const entered = await promptTextDialog({
+    title: 'New folder',
+    label: 'New folder path',
+    placeholder: 'src/components',
+    submitLabel: 'Create',
+  });
+  if (!entered) return;
+  const path = normalizeRelativeWorkspacePath(entered).replace(/\/+$/, '');
+  if (!path) return;
+  try {
+    await invoke('create_directory', { path });
+    createdEmptyDirs.add(path);
+    const parts = path.split('/');
+    for (let i = 1; i <= parts.length; i += 1) {
+      expandedDirectories.add(parts.slice(0, i).join('/'));
+    }
+    await loadFiles();
+    setStatus(`Created folder ${path}`);
+  } catch (error) {
+    setStatus(`Create folder failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function renameWorkspaceEntry(oldPath: string, isDir: boolean): Promise<void> {
+  if (!requireNativeWorkspace() || !state.root || workspaceSwitching) return;
+  const entered = await promptTextDialog({
+    title: isDir ? `Rename folder ${oldPath}` : `Rename ${oldPath}`,
+    label: 'New path',
+    placeholder: oldPath,
+    submitLabel: 'Rename',
+    initialValue: oldPath,
+  });
+  if (!entered) return;
+  const newPath = normalizeRelativeWorkspacePath(entered).replace(/\/+$/, '');
+  if (!newPath || newPath === oldPath) return;
+  try {
+    await invoke('rename_path', { oldPath, newPath });
+    if (isDir) {
+      createdEmptyDirs.delete(oldPath);
+      createdEmptyDirs.add(newPath);
+      if (expandedDirectories.delete(oldPath)) expandedDirectories.add(newPath);
+    }
+    const root = state.root;
+    const prefix = `${oldPath}/`;
+    const affected = [...openFiles.values()].filter((file) =>
+      file.path === oldPath || (isDir && file.path.startsWith(prefix)));
+    for (const file of affected) {
+      const updatedPath = file.path === oldPath ? newPath : `${newPath}/${file.path.slice(prefix.length)}`;
+      const updatedUri = fileUri(joinWorkspacePath(root, updatedPath));
+      const content = file.model.getValue();
+      const viewState = state.current === file ? editor.saveViewState() : file.viewState;
+      const languageId = detectEditorLanguage(updatedPath, content, monaco.languages.getLanguages());
+      const newModel = monaco.editor.createModel(content, languageId, monaco.Uri.parse(updatedUri));
+      const wasActive = state.current === file;
+      const wasSecondary = secondaryPath === file.path;
+      clearRecoverySnapshot(file.path, file.uri);
+      lsp.close(file.uri);
+      openFiles.delete(file.uri);
+      file.model.dispose();
+      const replacement: OpenFile = {
+        ...file,
+        path: updatedPath,
+        uri: updatedUri,
+        languageId,
+        model: newModel,
+        version: file.version + 1,
+        viewState,
+      };
+      openFiles.set(updatedUri, replacement);
+      if (!replacement.readOnlyEncoding) {
+        lsp.ensureOpen(updatedUri, languageId, replacement.version, content);
+      }
+      if (wasActive) {
+        state.current = replacement;
+        editor.setModel(newModel);
+        if (viewState) editor.restoreViewState(viewState);
+        activePath.textContent = updatedPath;
+        languageMode.value = languageId;
+      }
+      if (wasSecondary) {
+        secondaryPath = updatedPath;
+        secondaryEditor?.setModel(newModel);
+      }
+    }
+    await loadFiles();
+    updateTabs();
+    setStatus(`Renamed ${oldPath} to ${newPath}`);
+    void refreshWorkbenchChanges();
+  } catch (error) {
+    setStatus(`Rename failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function deleteWorkspaceEntry(path: string, isDir: boolean): Promise<void> {
+  if (!requireNativeWorkspace() || !state.root || workspaceSwitching) return;
+  const confirmed = await confirmActionDialog({
+    title: isDir ? `Delete folder ${path}?` : `Delete ${path}?`,
+    message: isDir
+      ? `This permanently deletes folder "${path}" and all files inside it from disk.`
+      : `This permanently deletes "${path}" from disk.`,
+    confirmLabel: 'Delete',
+    danger: true,
+  });
+  if (!confirmed) return;
+  try {
+    await invoke('delete_path', { path });
+    if (isDir) {
+      createdEmptyDirs.delete(path);
+      expandedDirectories.delete(path);
+    }
+    const prefix = `${path}/`;
+    const affected = [...openFiles.values()].filter((file) =>
+      file.path === path || (isDir && file.path.startsWith(prefix)));
+    for (const file of affected) {
+      file.dirty = false;
+      closeOpenFile(file.path, true);
+    }
+    await loadFiles();
+    setStatus(`Deleted ${path}`);
+    void refreshWorkbenchChanges();
+  } catch (error) {
+    setStatus(`Delete failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function ensureSecondaryEditor(): monaco.editor.IStandaloneCodeEditor {
+  if (secondaryEditor) return secondaryEditor;
+  secondaryEditor = monaco.editor.create(secondaryEditorHost, {
+    theme: loadTheme(localStorage).monaco,
+    automaticLayout: true,
+    fontSize: 13.5,
+    lineHeight: 21,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    renderWhitespace: 'selection',
+    padding: { top: 10 },
+    smoothScrolling: !prefersReducedMotion,
+  });
+  return secondaryEditor;
+}
+
+function renderSecondaryFileOptions(): void {
+  const files = [...openFiles.values()];
+  secondaryFileSelect.replaceChildren();
+  for (const file of files) {
+    const opt = document.createElement('option');
+    opt.value = file.path;
+    opt.textContent = file.path;
+    secondaryFileSelect.append(opt);
+  }
+  if (secondaryPath && files.some((f) => f.path === secondaryPath)) {
+    secondaryFileSelect.value = secondaryPath;
+  }
+  splitEditorBtn.disabled = files.length === 0;
+}
+
+function setSecondaryFile(path: string): void {
+  const file = [...openFiles.values()].find((candidate) => candidate.path === path);
+  if (!file) return;
+  secondaryPath = file.path;
+  const pane = ensureSecondaryEditor();
+  pane.updateOptions({ readOnly: !!file.readOnlyEncoding });
+  pane.setModel(file.model);
+  renderSecondaryFileOptions();
+}
+
+function openSplitPane(): void {
+  const files = [...openFiles.values()];
+  if (files.length === 0) {
+    setStatus('Open a file before splitting the editor.');
+    return;
+  }
+  splitOpen = true;
+  editorWorkspace.classList.add('split');
+  secondaryPane.classList.remove('hidden');
+  splitEditorBtn.setAttribute('aria-pressed', 'true');
+  const candidate = files.find((file) => file.path !== state.current?.path) ?? state.current ?? files[0];
+  setSecondaryFile(candidate.path);
+  revealEditor();
+  secondaryEditor?.focus();
+}
+
+function closeSplitPane(): void {
+  if (!splitOpen) return;
+  splitOpen = false;
+  secondaryPath = null;
+  secondaryEditor?.setModel(null);
+  secondaryPane.classList.add('hidden');
+  editorWorkspace.classList.remove('split');
+  splitEditorBtn.setAttribute('aria-pressed', 'false');
+  layoutEditors();
+  if (state.current) editor.focus();
+}
+
+function toggleSplitPane(): void {
+  if (splitOpen) closeSplitPane();
+  else openSplitPane();
+}
+
+newFileBtn.addEventListener('click', () => void createWorkspaceFile());
+newFolderBtn.addEventListener('click', () => void createWorkspaceFolder());
+splitEditorBtn.addEventListener('click', toggleSplitPane);
+closeSplitEditor.addEventListener('click', closeSplitPane);
+secondaryFileSelect.addEventListener('change', () => setSecondaryFile(secondaryFileSelect.value));
 
 let recoveryEnabled = loadRecoveryEnabled(localStorage);
 const recoverySessionId = createRecoverySessionId();
@@ -1280,7 +1734,7 @@ function previewRecoveredDiff(entry: RecoverableEntry): void {
   diffPrevFile.hidden = true;
   diffNextFile.hidden = true;
   proposalToolbar.classList.add('hidden');
-  editorHost.classList.add('hidden');
+  editorWorkspace.classList.add('hidden');
   emptyEditor.classList.add('hidden');
   diffReview.classList.remove('hidden');
   diffEditor.layout();
@@ -1421,6 +1875,8 @@ async function openFolder(selectedPath?: string): Promise<void> {
     recoveryTimers.clear();
     for (const file of openFiles.values()) file.model.dispose();
     openFiles.clear();
+    createdEmptyDirs.clear();
+    closeSplitPane();
     diagnostics.clear();
     workbenchChanges.clear();
     expandedDirectories.clear();
@@ -1434,7 +1890,7 @@ async function openFolder(selectedPath?: string): Promise<void> {
     chatOutputTokens = 0;
     chatEstimatedCostUsd = 0;
     updateUsageMeter();
-    editorHost.classList.add('hidden');
+    editorWorkspace.classList.add('hidden');
     emptyEditor.classList.remove('hidden');
     readOnlyBadge.textContent = '';
     readOnlyBadge.classList.add('hidden');
@@ -2177,7 +2633,7 @@ function openSuggestedReview(suggestion: CodeSuggestion): void {
   proposalApply.disabled = false;
   diffReviewPath.textContent = `${context.path} · proposed code (not applied)`;
   diffReview.classList.remove('hidden');
-  editorHost.classList.add('hidden');
+  editorWorkspace.classList.add('hidden');
   emptyEditor.classList.add('hidden');
   diffEditor.layout();
   setStatus(`Review ${hunks.length} suggested hunk(s). Uncheck any changes you reject.`);
@@ -2254,7 +2710,7 @@ async function openPathDiff(path: string): Promise<void> {
     diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
     diffReviewPath.textContent = `${path} - working tree`;
     diffReview.classList.remove('hidden');
-    editorHost.classList.add('hidden');
+    editorWorkspace.classList.add('hidden');
     emptyEditor.classList.add('hidden');
     diffEditor.layout();
     setStatus(`Reviewing ${path} against HEAD`);
@@ -2312,7 +2768,7 @@ async function openSessionDiff(
     diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
     diffReviewPath.textContent = `${session.branch} · ${change.path} (${index + 1}/${changes.length})`;
     diffReview.classList.remove('hidden');
-    editorHost.classList.add('hidden');
+    editorWorkspace.classList.add('hidden');
     emptyEditor.classList.add('hidden');
     diffEditor.layout();
     diffPrevFile.hidden = false;
@@ -2331,7 +2787,7 @@ function closeDiffReview(): void {
   if (state.current) {
     revealEditor();
   } else {
-    editorHost.classList.add('hidden');
+    editorWorkspace.classList.add('hidden');
     emptyEditor.classList.remove('hidden');
   }
 }
@@ -2395,7 +2851,7 @@ async function openHunkDiff(hunk: GitHunk): Promise<void> {
     diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
     diffReviewPath.textContent = `${hunk.path} · hunk #${hunk.id}`;
     diffReview.classList.remove('hidden');
-    editorHost.classList.add('hidden');
+    editorWorkspace.classList.add('hidden');
     emptyEditor.classList.add('hidden');
     diffEditor.layout();
     const modified = diffEditor.getModifiedEditor();
@@ -2946,14 +3402,15 @@ function selectOpenFile(path: string): void {
   editor.focus();
 }
 
-function closeOpenFile(path: string): void {
+function closeOpenFile(path: string, skipConfirm = false): void {
   const file = [...openFiles.values()].find((candidate) => candidate.path === path);
   if (!file) return;
   if (savingFiles.has(file.uri)) { setStatus('Wait for this file to finish saving.'); return; }
-  if (file.dirty && !window.confirm(`Discard unsaved changes to ${file.path}?`)) return;
+  if (!skipConfirm && file.dirty && !window.confirm(`Discard unsaved changes to ${file.path}?`)) return;
   fileOpenGeneration += 1;
   const next = selectionAfterClose([...openFiles.values()].map((item) => item.path), state.current?.path ?? null, path);
   const wasActive = state.current === file;
+  const wasSecondary = secondaryPath === file.path;
   const timer = changeTimers.get(file.uri);
   if (timer !== undefined) window.clearTimeout(timer);
   changeTimers.delete(file.uri);
@@ -2967,10 +3424,15 @@ function closeOpenFile(path: string): void {
     editor.setModel(null);
     closeDiffReview();
   }
+  if (wasSecondary) {
+    const remaining = [...openFiles.values()][0];
+    if (remaining && splitOpen) setSecondaryFile(remaining.path);
+    else closeSplitPane();
+  }
   file.model.dispose();
   if (wasActive && next) selectOpenFile(next);
   else if (wasActive) {
-    editorHost.classList.add('hidden');
+    editorWorkspace.classList.add('hidden');
     emptyEditor.classList.remove('hidden');
     activePath.textContent = 'No file open';
     readOnlyBadge.textContent = '';
@@ -3868,7 +4330,7 @@ editor.onDidChangeCursorPosition(renderBreadcrumbs);
 // Commands ------------------------------------------------------------------
 
 function showWelcome(): void {
-  editorHost.classList.add('hidden');
+  editorWorkspace.classList.add('hidden');
   emptyEditor.classList.remove('hidden');
 }
 
@@ -3876,6 +4338,8 @@ const definitions: WorkbenchCommand[] = [
   { id: 'workbench.commandPalette', category: 'View', title: 'Command Palette…', run: () => palette.open() },
   { id: 'workbench.quickOpen', category: 'File', title: 'Go to File…', run: () => quickOpen.open() },
   { id: 'workspace.openFolder', category: 'File', title: 'Open Folder…', run: () => openFolderButton.click() },
+  { id: 'workspace.newFile', category: 'File', title: 'New File…', run: () => { void createWorkspaceFile(); } },
+  { id: 'workspace.newFolder', category: 'File', title: 'New Folder…', run: () => { void createWorkspaceFolder(); } },
   { id: 'workspace.openFile', category: 'File', title: 'Open File…', run: () => openWorkspaceFile() },
   { id: 'workspace.openFileByPath', category: 'File', title: 'Open File by Path…', run: () => openWorkspaceFile(true) },
   { id: 'workspace.openFolderByPath', category: 'File', title: 'Open Folder by Path…', run: () => { void openFolderByPath(); } },
@@ -3897,6 +4361,7 @@ const definitions: WorkbenchCommand[] = [
   { id: 'view.toggleSidebar', category: 'View', title: 'Toggle Primary Side Bar', run: toggleSidebar },
   { id: 'view.toggleInspector', category: 'View', title: 'Toggle Mission Control Side Bar', run: () => activateView(workbenchLayout.classList.contains('hide-inspector') ? 'mission' : 'editor') },
   { id: 'view.togglePanel', category: 'View', title: 'Toggle Panel', run: togglePanel },
+  { id: 'editor.splitRight', category: 'View', title: 'Split Editor Right', run: toggleSplitPane, enabled: () => openFiles.size > 0 },
   { id: 'view.toggleMinimap', category: 'View', title: 'Toggle Minimap', run: toggleMinimap },
   { id: 'view.resetLayout', category: 'View', title: 'Reset Layout', run: resetLayout },
   { id: 'theme.pick', category: 'Preferences', title: 'Color Theme…', run: () => palette.open('Theme: ') },

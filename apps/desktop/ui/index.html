@@ -8,6 +8,7 @@
   <link rel="icon" type="image/png" href="/ryoko-logo.png">
 </head>
 <body>
+  <a class="skip-link" href="#editorColumn">Skip to editor</a>
   <div id="startupSplash" class="startup-splash" aria-hidden="true"><img src="/ryoko-logo.png" alt=""><span>RYOKO</span><small>Preparing your workspace</small></div>
   <div id="app">
     <header class="topbar">
@@ -37,16 +38,23 @@
       </nav>
       <aside class="explorer" id="explorerPane" aria-label="Workspace explorer">
         <div id="sidebarSash" class="sash sash-vertical sash-right" role="separator" aria-orientation="vertical" aria-label="Resize side bar" tabindex="0" title="Drag to resize. Double-click to reset."></div>
-        <div class="panel-head"><span>Explorer</span><button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg></button></div>
+        <div class="panel-head">
+          <span>Explorer</span>
+          <div class="panel-head-actions">
+            <button id="newFileBtn" class="button ghost compact" type="button" aria-label="New file" title="New file"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="file-plus"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /> <path d="M14 2v4a2 2 0 0 0 2 2h4" /> <path d="M9 15h6" /> <path d="M12 12v6" /></svg></button>
+            <button id="newFolderBtn" class="button ghost compact" type="button" aria-label="New folder" title="New folder"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="folder-plus"><path d="M12 10v6" /> <path d="M9 13h6" /> <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg></button>
+            <button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg></button>
+          </div>
+        </div>
         <div class="explorer-summary"><span id="fileCount" class="counter">0 files</span><span>Workspace</span></div>
         <label class="sr-only" for="fileFilter">Filter files</label>
         <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
-        <div id="fileList" class="file-list">
+        <div id="fileList" class="file-list" role="tree" aria-label="Workspace files">
           <p class="hint">Open a folder to browse its files.</p>
         </div>
       </aside>
 
-      <main class="editor-column" aria-label="Code editor">
+      <main id="editorColumn" class="editor-column" aria-label="Code editor" tabindex="-1">
         <div id="editorTabs" class="editor-tabs"></div>
         <div class="tabbar">
           <span id="activePath" class="active-path sr-only">No file open</span>
@@ -54,11 +62,22 @@
           <span id="dirtyFlag" class="dirty hidden" title="Unsaved changes">●</span>
           <span id="readOnlyBadge" class="readonly-badge hidden" role="status"></span>
           <span class="status-spacer"></span>
+          <button id="splitEditorBtn" class="button ghost compact" type="button" aria-label="Split editor right" aria-pressed="false" title="Split Editor (Ctrl+\ / Cmd+\)" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="columns-2"><rect width="18" height="18" x="3" y="3" rx="2" /> <path d="M12 3v18" /></svg>Split</button>
           <button id="runActiveFile" class="button primary compact" type="button" disabled><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="play"><polygon points="6 3 20 12 6 21 6 3" /></svg>Run file</button>
           <button id="toggleTerminal" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="terminal"><polyline points="4 17 10 11 4 5" /> <line x1="12" x2="20" y1="19" y2="19" /></svg>Terminal</button>
           <button id="toggleDebug" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="bug"><path d="m8 2 1.88 1.88" /> <path d="M14.12 3.88 16 2" /> <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1" /> <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6" /> <path d="M12 20v-9" /> <path d="M6.53 9C4.6 8.8 3 7.1 3 5" /> <path d="M6 13H2" /> <path d="M3 21c0-2.1 1.7-3.9 3.8-4" /> <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4" /> <path d="M22 13h-4" /> <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4" /></svg>Debug</button>
         </div>
-        <div id="editor" class="editor hidden" role="tabpanel" aria-label="Active file editor"></div>
+        <div id="editorWorkspace" class="editor-workspace hidden">
+          <div id="editor" class="editor" role="tabpanel" aria-label="Active file editor"></div>
+          <div id="secondaryPane" class="secondary-pane hidden" role="region" aria-label="Split editor pane">
+            <div class="secondary-tabbar">
+              <label class="sr-only" for="secondaryFileSelect">Split pane file</label>
+              <select id="secondaryFileSelect" class="secondary-tab-select" aria-label="Split pane file"></select>
+              <button id="closeSplitEditor" class="button ghost compact" type="button" aria-label="Close split editor" title="Close split editor"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="x"><path d="M18 6 6 18" /> <path d="m6 6 12 12" /></svg></button>
+            </div>
+            <div id="secondaryEditor" class="editor" aria-label="Secondary split editor"></div>
+          </div>
+        </div>
         <div id="vimStatus" class="vim-status hidden" aria-live="polite"></div>
         <div class="diff-review hidden" id="diffReview">
           <div class="diff-review-bar">
