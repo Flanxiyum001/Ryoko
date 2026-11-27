@@ -59,6 +59,19 @@ export class DebugViewController {
   private dapSeq = 0;
   private pendingRequests = new Map<number, { command: string; args?: Record<string, unknown> }>();
   private dapStatusPolling = false;
+  private adapterReady = false;
+  private launchSent = false;
+  private configurationStarted = false;
+  private supportsConfigurationDone = false;
+  private launchTarget: { program: string; cwd: string } | null = null;
+
+  private resetHandshake(): void {
+    this.adapterReady = false;
+    this.launchSent = false;
+    this.configurationStarted = false;
+    this.supportsConfigurationDone = false;
+    this.launchTarget = null;
+  }
   private unlistenMessage: UnlistenFn | null = null;
   private unlistenLog: UnlistenFn | null = null;
 
@@ -214,6 +227,16 @@ export class DebugViewController {
     }
     try {
       this.deps.showBottom('debug');
+      const program = this.programInput.value.trim();
+      const root = this.deps.getWorkspaceRoot();
+      const isAbsolute = program.startsWith('/') || /^[A-Za-z]:[\\/]/.test(program);
+      this.resetHandshake();
+      if (program) {
+        this.launchTarget = {
+          program: isAbsolute ? program : this.deps.joinWorkspacePath(root, program),
+          cwd: root,
+        };
+      }
       const args = this.argsInput.value.trim().split(/\s+/).filter(Boolean);
       const status = await invoke<DapStatus>('dap_start', { adapter, args });
       const sessionId = status.sessionId ?? 1;
@@ -232,6 +255,8 @@ export class DebugViewController {
       });
     } catch (error) {
       await invoke('dap_stop').catch(() => undefined);
+      this.resetHandshake();
+      this.pendingRequests.clear();
       this.state = handleSessionStopped(
         this.state,
         `Debug adapter unavailable: ${error instanceof Error ? error.message : String(error)}`,
@@ -243,6 +268,7 @@ export class DebugViewController {
   public async stopDebug(): Promise<void> {
     await invoke('dap_stop').catch(() => undefined);
     this.pendingRequests.clear();
+    this.resetHandshake();
     this.state = handleSessionStopped(this.state, 'Debug adapter stopped');
     this.render();
   }
@@ -256,37 +282,57 @@ export class DebugViewController {
   public async resetOnWorkspaceSwitch(): Promise<void> {
     await invoke('dap_stop').catch(() => undefined);
     this.state = handleWorkspaceReset();
+    this.resetHandshake();
     this.dapSeq = 0;
     this.pendingRequests.clear();
     this.render();
   }
 
   private async launchDap(): Promise<void> {
-    const program = this.programInput.value.trim();
-    if (!program) {
+    const sessionId = this.state.sessionId;
+    const target = this.launchTarget;
+    if (!target) {
       this.state.statusText = 'Adapter initialized. Set a program path and restart to launch it.';
       this.render();
       return;
     }
-    const root = this.deps.getWorkspaceRoot();
-    const isAbsolute = program.startsWith('/') || /^[A-Za-z]:[\\/]/.test(program);
-    const resolvedProgram = isAbsolute ? program : this.deps.joinWorkspacePath(root, program);
-
     try {
-      // Sync configured breakpoints before launching
-      await this.syncAllBreakpoints();
-
+      // A real adapter may not emit initialized until it receives launch.
+      // Do not wait for that event (or for the launch response) to send launch.
       await this.sendDap('launch', {
-        program: resolvedProgram,
-        cwd: root,
+        program: target.program,
+        cwd: target.cwd,
         args: [],
         stopOnEntry: false,
       });
-      await this.sendDap('configurationDone');
-      this.state.statusText = 'Launch requested';
-      this.render();
+      if (this.state.sessionId !== sessionId) return;
+      this.launchSent = true;
+      await this.configureDap();
     } catch (error) {
-      this.state.statusText = `Launch failed: ${error instanceof Error ? error.message : String(error)}`;
+      if (this.state.sessionId !== sessionId) return;
+      this.state.statusText = `Launch failed: ${String(error)}`;
+      this.render();
+    }
+  }
+
+  private async configureDap(): Promise<void> {
+    if (!this.adapterReady || !this.launchSent || this.configurationStarted) return;
+    this.configurationStarted = true;
+    const sessionId = this.state.sessionId;
+    try {
+      // initialized means the adapter is ready to accept breakpoints.
+      await this.syncAllBreakpoints(sessionId);
+      if (this.state.sessionId !== sessionId) return;
+      if (this.supportsConfigurationDone) {
+        await this.sendDap('configurationDone');
+      }
+      if (this.state.sessionId === sessionId && !this.state.isPaused) {
+        this.state.statusText = 'Launch requested';
+        this.render();
+      }
+    } catch (error) {
+      if (this.state.sessionId !== sessionId) return;
+      this.state.statusText = `Debug configuration failed: ${String(error)}`;
       this.render();
     }
   }
@@ -317,7 +363,7 @@ export class DebugViewController {
     this.state = result.nextState;
     this.renderBreakpoints();
 
-    if (this.state.running) {
+    if (this.state.running && this.adapterReady && this.launchSent) {
       try {
         await this.sendDap('setBreakpoints', {
           source: { path: absolute, name: file.path },
@@ -329,8 +375,9 @@ export class DebugViewController {
     }
   }
 
-  private async syncAllBreakpoints(): Promise<void> {
+  private async syncAllBreakpoints(sessionId: number | null): Promise<void> {
     for (const [path, bps] of this.state.breakpoints) {
+      if (this.state.sessionId !== sessionId) return;
       const filename = path.split(/[\\/]/).pop() || path;
       await this.sendDap('setBreakpoints', {
         source: { path, name: filename },
@@ -374,9 +421,8 @@ export class DebugViewController {
 
   private handleDapEvent(event: string, body: unknown): void {
     if (event === 'initialized') {
-      this.state.statusText = 'Adapter initialized';
-      this.render();
-      void this.launchDap();
+      this.adapterReady = true;
+      void this.configureDap();
     } else if (event === 'stopped') {
       const stoppedResult = handleStoppedEvent(this.state, body);
       this.state = stoppedResult.nextState;
@@ -397,6 +443,7 @@ export class DebugViewController {
       this.render();
     } else if (event === 'terminated' || event === 'exited') {
       this.pendingRequests.clear();
+      this.resetHandshake();
       this.state = handleSessionStopped(this.state, 'Session ended');
       this.render();
     } else if (event === 'breakpoint') {
@@ -430,7 +477,11 @@ export class DebugViewController {
       return;
     }
 
-    if (command === 'stackTrace') {
+    if (command === 'initialize') {
+      const capabilities = msg.body as { supportsConfigurationDoneRequest?: unknown } | undefined;
+      this.supportsConfigurationDone = capabilities?.supportsConfigurationDoneRequest === true;
+      void this.launchDap();
+    } else if (command === 'stackTrace') {
       if (!this.state.isPaused) return;
       const res = handleStackTraceResponse(this.state, msg.body);
       this.state = res.nextState;
@@ -512,6 +563,8 @@ export class DebugViewController {
     void invoke<DapStatus>('dap_status')
       .then((status) => {
         if (!status.running && this.state.sessionId === observedId) {
+          this.pendingRequests.clear();
+          this.resetHandshake();
           this.state = handleSessionStopped(this.state, 'Debug adapter exited');
           this.render();
         }
@@ -538,7 +591,7 @@ export class DebugViewController {
     this.nextBtn.disabled = !running || !isPaused;
     this.stepInBtn.disabled = !running || !isPaused;
     this.stepOutBtn.disabled = !running || !isPaused;
-    this.breakpointBtn.disabled = !running;
+    this.breakpointBtn.disabled = false;
 
     this.statusText.textContent = this.state.statusText;
 
@@ -709,7 +762,7 @@ export class DebugViewController {
     this.state = res.nextState;
     this.renderBreakpoints();
 
-    if (this.state.running) {
+    if (this.state.running && this.adapterReady && this.launchSent) {
       const filename = bp.path.split(/[\\/]/).pop() || bp.path;
       try {
         await this.sendDap('setBreakpoints', {
