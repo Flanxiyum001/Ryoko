@@ -24,7 +24,7 @@ at the operating-system level.
 For a test build that has not yet been published as a Release:
 
 1. Open [Ryoko preview installer runs](https://github.com/Flanxiyum001/Ryoko/actions/workflows/desktop-preview.yml).
-2. Select a **successful** run from `main` or a `desktop-preview-v*` tag.
+2. Select a **successful** run from `ryoko` or a `desktop-preview-v*` tag.
 3. Under **Artifacts**, download the ZIP matching your platform.
 4. Extract the ZIP, then install or launch the installer inside:
    - **Windows 10/11 x64:** `.exe` (NSIS) or `.msi` (Windows Installer).
@@ -142,10 +142,20 @@ control. Publishing a package and making it public are two different checks.
 
 ## Publishing the next GitHub prerelease
 
-On the default `main` branch, the **Ryoko preview installers (unsigned)**
+On the default `ryoko` branch, the **Ryoko preview installers (unsigned)**
 GitHub Actions workflow can be started manually using **Actions → Run workflow**.
-It also runs on a push to `main` that changes the release workflow, the
-CLI container packaging files, or this tester guide.
+It also runs on every push to `ryoko` (including merged pull requests).
+Automatic releases require both post-merge CI workflows to pass on the
+exact commit before native builds start. Publication is serialized across
+branch builds and explicit tags, with up to 100 pending runs. Branch builds
+check the head immediately before and after public release promotion and
+updater-manifest publication. Detected drift fails the job and attempts to
+withdraw the just-published release or restore the previous manifest.
+GitHub does not offer a branch-head compare-and-swap for release mutations:
+this is best-effort compensation, not an atomic guarantee. A concurrent
+branch advance can briefly expose the release or manifest; rollback failure
+requires maintainer attention. Strict exclusion requires coordinating all
+branch writers with the publisher.
 
 It builds native desktop installers on three operating systems, then publishes
 a real **GitHub pre-release** with the five installers and SHA-256 checksums
@@ -153,17 +163,18 @@ a real **GitHub pre-release** with the five installers and SHA-256 checksums
 and published separately in the same workflow after the desktop release
 succeeds. If any OS build fails, the release and package jobs do not start.
 
-A run from `main` creates a unique versioned tag, e.g.
+A run from `ryoko` creates a unique versioned tag, e.g.
 `desktop-preview-v0.1.0-alpha.7`. Existing releases are never overwritten.
 A tag matching `desktop-preview-v*` can also be pushed explicitly to build
 and publish that tag.
 
-GitHub's **Latest** badge intentionally doesn't apply to pre-alpha versions;
-the correct public share link is
+The repository currently publishes alpha testing builds as **Latest**;
+they are not production-certified. The public share link is
 [github.com/Flanxiyum001/Ryoko/releases](https://github.com/Flanxiyum001/Ryoko/releases).
 
 The signed-production `Desktop installers` workflow is separate and requires
-Apple and Windows signing credentials. No auto-updater is provided yet.
+Apple and Windows signing credentials. In-app updates require the separate
+updater signing configuration below.
 
 ## In-app updates
 
@@ -200,7 +211,7 @@ workflow publishes no update manifest.
    - **Variables:** `RYOKO_UPDATER_PUBKEY` (the contents of
      `~/.tauri/ryoko-updater.key.pub`).
 3. Publish a release as usual, by pushing a `desktop-preview-v<version>` tag or
-   letting the workflow run on `main`. The workflow signs the updater artifacts,
+   letting the workflow run on `ryoko`. The workflow signs the updater artifacts,
    attaches them to the versioned release and uploads `latest.json` to the
    `desktop-updates` prerelease.
 

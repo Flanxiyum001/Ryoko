@@ -3,24 +3,59 @@ name: Ryoko preview installers (unsigned)
 on:
   push:
     branches:
-      - main
+      - ryoko
     tags:
       - 'desktop-preview-v*'
-    paths:
-      - '.github/workflows/desktop-preview.yml'
-      - 'packaging/cli/**'
-      - 'docs/DESKTOP_PREVIEW_TESTING.md'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ryoko-preview-${{ github.ref }}
-  cancel-in-progress: true
+  # Serialize publication across branch builds and explicit tags.
+  group: ryoko-preview-publication
+  cancel-in-progress: false
+  queue: max
 
 jobs:
+  verify:
+    name: Require green CI for the default-branch commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 125
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check exact commit against both required workflows
+        if: github.ref == 'refs/heads/ryoko'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # PR checks can run against a synthetic merge SHA. Require the
+          # actual post-merge commit to pass both push-triggered workflows.
+          for attempt in $(seq 1 120); do
+            ready=true
+            for workflow in ci.yml platform-integration.yml; do
+              result="$(gh api --method GET "repos/$GH_REPO/actions/workflows/$workflow/runs" \
+                -f head_sha="$GITHUB_SHA" -f event=push -f branch=ryoko -F per_page=10 \
+                --jq '.workflow_runs | max_by(.id) | if . == null then "missing" elif .status != "completed" then "pending" else .conclusion end')"
+              case "$result" in
+                success) ;;
+                missing|pending) ready=false ;;
+                *) echo "::error::$workflow concluded $result for $GITHUB_SHA"; exit 1 ;;
+              esac
+            done
+            if [[ "$ready" == true ]]; then exit 0; fi
+            sleep 60
+          done
+          echo "::error::Timed out waiting for both CI workflows."
+          exit 1
+
   build:
+    needs: verify
     name: ${{ matrix.label }}
     strategy:
       fail-fast: false
@@ -186,7 +221,7 @@ jobs:
 
   preview-release:
     name: Publish desktop prerelease and checksums
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/desktop-preview-v')
+    if: github.ref == 'refs/heads/ryoko' || startsWith(github.ref, 'refs/tags/desktop-preview-v')
     outputs:
       release_tag: ${{ steps.publish.outputs.release_tag }}
     needs: build
@@ -222,6 +257,12 @@ jobs:
         with:
           subject-path: dist/*
 
+      - name: Checkout publication guard and updater scripts
+        uses: actions/checkout@v5
+        with:
+          path: source
+          sparse-checkout: apps/desktop/scripts/updater
+
       - name: Publish preview release assets
         id: publish
         shell: bash
@@ -235,16 +276,21 @@ jobs:
                -o -name '*.deb' -o -name '*.AppImage' \) -print0)
           mapfile -d '' UPDATER_ASSETS < <(find dist -type f \
             \( -name '*.sig' -o -name '*.app.tar.gz' \) -print0)
-          if [ "${#INSTALLERS[@]}" -lt 3 ]; then
-            echo "::error::Missing platform installers, refusing to publish."
-            exit 1
-          fi
+          for extension in exe msi dmg deb AppImage; do
+            mapfile -t MATCHES < <(find dist -type f -name "*.$extension")
+            if [ "${#MATCHES[@]}" -ne 1 ]; then
+              echo "::error::Expected exactly one .$extension installer, refusing to publish."
+              exit 1
+            fi
+          done
+          source source/apps/desktop/scripts/updater/publication_guard.sh
+          require_current_preview_head
           if [[ "$GITHUB_REF" == refs/tags/desktop-preview-v* ]]; then
             TAG="$GITHUB_REF_NAME"
             TAG_FLAGS=(--verify-tag)
           else
-            # A successful preview build from main creates a public
-            # GitHub prerelease. Nothing is published if any OS build fails.
+            # A successful preview build from ryoko creates a public
+            # alpha release. Nothing is published if any OS build fails.
             TAG="desktop-preview-v0.1.0-alpha.${GITHUB_RUN_NUMBER}"
             TAG_FLAGS=(--target "$GITHUB_SHA")
           fi
@@ -269,7 +315,7 @@ jobs:
           are bundled with the desktop app. The container package is a
           separate **CLI-only** distribution (not a graphical IDE).
 
-          [Installation and tester checklist](https://github.com/Flanxiyum001/Ryoko/blob/main/docs/DESKTOP_PREVIEW_TESTING.md)
+          [Installation and tester checklist](https://github.com/Flanxiyum001/Ryoko/blob/ryoko/docs/DESKTOP_PREVIEW_TESTING.md)
 
           GitHub Packages (CLI-only): `ghcr.io/flanxiyum001/ryoko-cli:preview`
 
@@ -281,20 +327,18 @@ jobs:
           printf '\nBuilt from commit: `%s`\n' "$GITHUB_SHA" >> "$RUNNER_TEMP/release-notes.md"
           # Published as the repository's Latest release by policy, even for
           # alpha tags; the notes still describe the build as pre-alpha.
+          # Upload the expensive assets while private; only the final promotion
+          # is a public mutation. Never overwrite an existing version.
           gh release create "$TAG" \
             "${TAG_FLAGS[@]}" \
-            --latest \
+            --draft --latest=false \
             --title "Ryoko Desktop $TAG (Alpha Testing)" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             "${INSTALLERS[@]}" "${UPDATER_ASSETS[@]}" dist/SHA256SUMS.txt
+          promote() { gh release edit "$TAG" --draft=false --latest; }
+          withdraw() { gh release edit "$TAG" --draft=true --latest=false; }
+          guarded_preview_publish promote withdraw
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout updater scripts
-        if: vars.RYOKO_UPDATER_PUBKEY != ''
-        uses: actions/checkout@v5
-        with:
-          path: source
-          sparse-checkout: apps/desktop/scripts/updater
 
       - name: Publish in-app update manifest
         if: vars.RYOKO_UPDATER_PUBKEY != ''
@@ -305,6 +349,8 @@ jobs:
           TAG: ${{ steps.publish.outputs.release_tag }}
         run: |
           set -euo pipefail
+          source source/apps/desktop/scripts/updater/publication_guard.sh
+          require_current_preview_head
           VERSION="${TAG#desktop-preview-v}"
           printf 'Ryoko Desktop %s.\n\nSee https://github.com/%s/releases/tag/%s for details.\n' \
             "$VERSION" "$GH_REPO" "$TAG" > "$RUNNER_TEMP/update-notes.txt"
@@ -313,12 +359,34 @@ jobs:
           # The manifest lives on one fixed prerelease so its URL never changes
           # and it never becomes the repository's Latest release. Installed apps
           # verify each artifact's signature before installing it.
-          if ! gh release view desktop-updates > /dev/null 2>&1; then
-            gh release create desktop-updates --prerelease --latest=false \
+          if gh release view desktop-updates --json assets > "$RUNNER_TEMP/update-assets.json"; then
+            # Keep the old manifest for compensation if the head advances
+            # during upload, or if clobber removes it but the upload fails.
+            mkdir -p "$RUNNER_TEMP/previous-update"
+            if jq -e '.assets | any(.name == "latest.json")' "$RUNNER_TEMP/update-assets.json" >/dev/null; then
+              gh release download desktop-updates --pattern latest.json --dir "$RUNNER_TEMP/previous-update"
+            fi
+            upload_manifest() {
+              gh release upload desktop-updates "$RUNNER_TEMP/latest.json" --clobber
+            }
+            restore_manifest() {
+              if [[ -f "$RUNNER_TEMP/previous-update/latest.json" ]]; then
+                gh release upload desktop-updates "$RUNNER_TEMP/previous-update/latest.json" --clobber
+              else
+                gh release delete-asset desktop-updates latest.json --yes
+              fi
+            }
+            guarded_preview_publish upload_manifest restore_manifest
+          else
+            # A new manifest release is private until the guarded promotion.
+            gh release create desktop-updates --draft --prerelease --latest=false \
               --target "$GITHUB_SHA" --title "Ryoko Desktop update manifest" \
-              --notes "Machine-readable manifest for Ryoko's in-app updater. Download installers from the versioned releases instead."
+              --notes "Machine-readable manifest for Ryoko's in-app updater. Download installers from the versioned releases instead." \
+              "$RUNNER_TEMP/latest.json"
+            promote_manifest() { gh release edit desktop-updates --draft=false --prerelease --latest=false; }
+            withdraw_manifest() { gh release edit desktop-updates --draft=true --latest=false; }
+            guarded_preview_publish promote_manifest withdraw_manifest
           fi
-          gh release upload desktop-updates "$RUNNER_TEMP/latest.json" --clobber
 
   publish-cli-package:
     name: Publish Ryoko CLI to GitHub Packages (GHCR)
