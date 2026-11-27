@@ -209,11 +209,13 @@
 
       <aside class="problems" id="inspectorPane" aria-label="Agent chat, review inbox, Mission Control and diagnostics">
         <section class="agent-chat" id="agentChat" aria-label="Agent chat">
-          <div class="panel-head"><span>Ask Ryoko</span><span class="counter">Answers only</span></div>
+          <div class="panel-head"><span>Ryoko</span><span id="chatModeHint" class="counter">Answers only</span></div>
           <div id="chatHistory" class="chat-history" role="log" aria-live="polite">
             <div class="chat-empty"><strong>What do you want to know?</strong><p class="hint">Ask about your code: how something works, where a bug might be, or how to build a feature.</p></div>
           </div>
           <div class="chat-compose">
+            <div class="chat-mode" role="radiogroup" aria-label="What should Ryoko do?"><button id="chatModeAsk" type="button" role="radio" aria-checked="true" title="Answer questions about your code">Ask</button><button id="chatModeAgent" type="button" role="radio" aria-checked="false" title="Make changes you review before they are saved">Agent</button></div>
+            <label id="chatAgentOptions" class="chat-agent-options hidden"><input id="chatAllowCommands" type="checkbox"> Let it run tests and builds (asks you each time)</label>
             <div id="chatAttachments" class="chat-attachments"></div>
             <textarea id="chatInput" rows="3" maxlength="8000" spellcheck="true" placeholder="Ask anything about your code…"></textarea>
             <details class="chat-context"><summary>Add context</summary><div class="chat-file-row">

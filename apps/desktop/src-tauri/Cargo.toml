@@ -21,7 +21,9 @@ ignore = "0.4"
 portable-pty = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 regex = "1"
+async-trait = "0.1"
 ryoko-core = { path = "../../../crates/ryoko-core" }
+ryoko-harness = { path = "../../../crates/ryoko-harness" }
 ryoko-models = { path = "../../../crates/ryoko-models" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +31,7 @@ serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
+tokio = { version = "1", features = ["sync", "time"] }
 
 # The Linux folder picker is a GTK dialog made transient for the main window;
 # gtk is already part of the Tauri dependency tree on Linux.
@@ -37,3 +40,6 @@ gtk = "0.18"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+tempfile = "3"

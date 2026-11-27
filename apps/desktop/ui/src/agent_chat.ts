@@ -45,6 +45,10 @@ interface ChatPayload { requestId: string; text: string }
 interface ChatDone { requestId: string; cancelled: boolean; inputTokens: number; outputTokens: number; estimatedCostUsd: number }
 
 export interface AgentChatDeps {
+  /** When true, messages go to the agent harness instead of read-only chat. */
+  agentMode?: () => boolean;
+  /** Starts an agent run for a message already shown as the user's turn. */
+  runAgent?: (message: string) => void;
   files: () => string[];
   selection: () => EditorSelectionContext | null;
   review: (suggestion: CodeSuggestion) => void;
@@ -290,6 +294,12 @@ export function mountAgentChat(deps: AgentChatDeps): { focus: () => void; reset:
     }
     if (Array.from(message).length > 8000) {
       note.textContent = 'The prompt exceeds 8000 characters; remove some text before sending.';
+      return;
+    }
+    if (deps.agentMode?.() && deps.runAgent) {
+      appendTurn('user', message);
+      input.value = '';
+      deps.runAgent(message);
       return;
     }
     const known = deps.files();

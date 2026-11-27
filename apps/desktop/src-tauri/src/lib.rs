@@ -1,4 +1,5 @@
 mod agent_chat;
+mod agent_harness;
 mod agent_review;
 mod code_run;
 mod completion;
@@ -47,6 +48,7 @@ pub fn run() {
         .manage(updater::UpdaterState::new(updates_configured))
         .manage(workspace::WorkspaceState::default())
         .manage(agent_chat::AgentChatState::default())
+        .manage(agent_harness::AgentHarnessState::default())
         .manage(github_queue::GitHubQueueState::default())
         .manage(lsp::LspState::default())
         .manage(run::RunState::default())
@@ -67,6 +69,11 @@ pub fn run() {
             workspace::write_file,
             agent_chat::agent_chat,
             agent_chat::agent_chat_cancel,
+            agent_harness::harness_start,
+            agent_harness::harness_cancel,
+            agent_harness::harness_answer_approval,
+            agent_harness::harness_apply,
+            agent_harness::harness_discard,
             context_mentions::resolve_context_mention,
             context_mentions::search_context_symbols,
             agent_review::read_agent_candidate,
