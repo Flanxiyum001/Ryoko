@@ -418,19 +418,14 @@ impl HunkPatch {
         }
 
         let reviewed_bodies: Vec<_> = self.files.iter().flat_map(|file| &file.hunks).collect();
-        let current_bodies: Vec<_> = current
-            .files
-            .iter()
-            .flat_map(|file| &file.hunks)
-            .collect();
+        let current_bodies: Vec<_> = current.files.iter().flat_map(|file| &file.hunks).collect();
         let mut audit = SelectionAudit::default();
         let mut ordered = ids.into_iter().collect::<Vec<_>>();
         ordered.sort_unstable();
         for id in ordered {
             let hunk = &self.hunks[id - 1];
-            let matching_base = |candidate: &ReviewHunk| {
-                candidate.path == hunk.path && candidate.base == hunk.base
-            };
+            let matching_base =
+                |candidate: &ReviewHunk| candidate.path == hunk.path && candidate.base == hunk.base;
             let anchors: Vec<_> = current
                 .hunks
                 .iter()
