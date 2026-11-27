@@ -117,6 +117,7 @@ interface OpenFile {
   model: monaco.editor.ITextModel;
   version: number;
   savedText: string;
+  encoding?: string;
   readOnlyEncoding?: string;
   dirty: boolean;
   viewState?: monaco.editor.ICodeEditorViewState | null;
@@ -242,6 +243,7 @@ const fileList = element('fileList');
 const fileCount = element('fileCount');
 const activePath = element('activePath');
 const dirtyFlag = element('dirtyFlag');
+const readOnlyBadge = element('readOnlyBadge');
 const editorHost = element('editor');
 const vimStatus = element('vimStatus');
 const emptyEditor = element('emptyEditor');
@@ -1079,7 +1081,14 @@ function revealEditor(): void {
   editorHost.classList.remove('hidden');
   emptyEditor.classList.add('hidden');
   editor.layout();
+  requestAnimationFrame(() => editor.layout());
 }
+
+workbenchLayout.addEventListener('transitionend', (event) => {
+  if (event.target === workbenchLayout && event.propertyName === 'grid-template-columns') {
+    editor.layout();
+  }
+});
 
 async function loadFiles(): Promise<void> {
   state.files = await invoke<string[]>('list_files');
@@ -1155,6 +1164,8 @@ async function openFolder(selectedPath?: string): Promise<void> {
     updateUsageMeter();
     editorHost.classList.add('hidden');
     emptyEditor.classList.remove('hidden');
+    readOnlyBadge.textContent = '';
+    readOnlyBadge.classList.add('hidden');
     missionLogs = [];
     missionSnapshot = null;
     toolStream.show([]);
@@ -2643,13 +2654,15 @@ function selectOpenFile(path: string): void {
   editor.updateOptions({ readOnly: !!file.readOnlyEncoding });
   editor.setModel(file.model);
   if (file.viewState) editor.restoreViewState(file.viewState);
-  revealEditor();
   if (window.matchMedia('(max-width: 720px)').matches) activateView('editor');
   else workbenchLayout.classList.remove('hide-inspector');
+  revealEditor();
   languageMode.value = file.languageId;
   configureTaskForPath(path);
   runActiveFile.disabled = codeSessionId !== null || !!file.readOnlyEncoding;
   activePath.textContent = file.readOnlyEncoding ? `${file.path} · ${file.readOnlyEncoding} · Read-only` : file.path;
+  readOnlyBadge.textContent = file.readOnlyEncoding ? `Read-only · ${file.readOnlyEncoding}` : '';
+  readOnlyBadge.classList.toggle('hidden', !file.readOnlyEncoding);
   dirtyFlag.classList.toggle('hidden', !file.dirty);
   saveButton.disabled = !!file.readOnlyEncoding;
   renderFiles();
@@ -2657,6 +2670,7 @@ function selectOpenFile(path: string): void {
   updateCursor();
   setStatus(file.readOnlyEncoding ? `Read-only preview: ${file.path} (${file.readOnlyEncoding}). Original bytes are unchanged.` : file.path);
   quickOpen.remember(file.path);
+  editor.focus();
 }
 
 function closeOpenFile(path: string): void {
@@ -2685,6 +2699,8 @@ function closeOpenFile(path: string): void {
     editorHost.classList.add('hidden');
     emptyEditor.classList.remove('hidden');
     activePath.textContent = 'No file open';
+    readOnlyBadge.textContent = '';
+    readOnlyBadge.classList.add('hidden');
     dirtyFlag.classList.add('hidden');
     saveButton.disabled = true;
     languageMode.value = 'plaintext';
@@ -2709,20 +2725,42 @@ async function openFile(path: string): Promise<void> {
   try {
     setStatus(`Opening ${path}…`);
     let content: string;
+    let encoding: string | undefined;
     let readOnlyEncoding: string | undefined;
     try {
       content = await invoke<string>('read_file', { path });
     } catch (error) {
       const message = String(error);
       if (!message.includes('as UTF-8:') && !message.includes('binary or unsupported text encoding:')) throw error;
-      const preview = await invoke<{ content: string; encoding: string }>('read_encoded_file_preview', { path });
+      const preview = await invoke<{
+        content: string;
+        encoding: string;
+        editable?: boolean;
+        encodingId?: string;
+      }>('read_encoded_file_preview', { path });
       content = preview.content;
-      readOnlyEncoding = preview.encoding;
+      if (preview.editable === true && preview.encodingId) {
+        encoding = preview.encodingId;
+      } else {
+        readOnlyEncoding = preview.encoding;
+      }
     }
     if (ticket !== fileOpenGeneration || state.root !== root || workspaceSwitching) return;
     const languageId = detectEditorLanguage(path, content, monaco.languages.getLanguages());
-    const model = monaco.editor.createModel(content, languageId, monaco.Uri.parse(uri));
-    const file: OpenFile = { path, uri, languageId, model, version: 1, savedText: content, readOnlyEncoding, dirty: false };
+    const modelUri = monaco.Uri.parse(uri);
+    monaco.editor.getModel(modelUri)?.dispose();
+    const model = monaco.editor.createModel(content, languageId, modelUri);
+    const file: OpenFile = {
+      path,
+      uri,
+      languageId,
+      model,
+      version: 1,
+      savedText: content,
+      encoding,
+      readOnlyEncoding,
+      dirty: false,
+    };
     openFiles.set(uri, file);
     if (!readOnlyEncoding) lsp.ensureOpen(uri, languageId, file.version, content);
     selectOpenFile(path);
@@ -2742,7 +2780,12 @@ async function saveCurrent(): Promise<void> {
   savingFiles.add(file.uri);
   try {
     const content = file.model.getValue();
-    await invoke('write_file', { path: file.path, content, expectedContent: file.savedText });
+    await invoke('write_file', {
+      path: file.path,
+      content,
+      expectedContent: file.savedText,
+      ...(file.encoding ? { encoding: file.encoding } : {}),
+    });
     file.savedText = content;
     file.version += 1;
     markDirty(file);
@@ -3053,7 +3096,13 @@ window.addEventListener('keydown', (event) => {
   const inEditor = event.target instanceof Node && editorHost.contains(event.target);
   if (shouldDeferToEditor(keymapPreset, chord, inEditor)) return;
   const action = keybindings.byChord.get(chord);
-  if (!action || action === 'editor.save') return;
+  if (!action) return;
+  if (action === 'editor.save') {
+    if (inEditor) return;
+    event.preventDefault();
+    void saveCurrent();
+    return;
+  }
   event.preventDefault();
   dispatchBinding(action);
 });

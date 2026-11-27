@@ -7,6 +7,7 @@ test.beforeEach(async ({ page }) => {
     const files: Record<string, string> = {
       'README.md': '# Demo workspace\n',
       '.server.log': 'server started',
+      'script.ps1': 'Write-Host "hi"\r\n',
       'main.ts': 'const greeting = "Hello Ryoko";\nconsole.log(greeting);\n',
       'other.ts': 'export const value = 42;\n',
       'src/notes.unknown': 'example',
@@ -25,13 +26,20 @@ test.beforeEach(async ({ page }) => {
           if (command === 'read_file') {
             reads++; document.body.dataset.reads = String(reads);
             if (args.path === '.server.log') throw new Error('cannot read .server.log as UTF-8: invalid byte');
+            if (args.path === 'script.ps1') throw new Error('cannot read script.ps1 as UTF-8: invalid byte');
             return files[args.path];
           }
-          if (command === 'read_encoded_file_preview') return { content: files[args.path], encoding: 'UTF-16 LE' };
+          if (command === 'read_encoded_file_preview') {
+            if (args.path === 'script.ps1') {
+              return { content: files[args.path], encoding: 'UTF-16 LE', editable: true, encodingId: 'utf-16le-bom' };
+            }
+            return { content: files[args.path], encoding: 'Unknown encoding (lossy)', editable: false, encodingId: 'lossy' };
+          }
           if (command === 'write_file') {
             if (files[args.path] !== args.expectedContent) throw new Error('File changed on disk');
             files[args.path] = args.content;
             document.body.dataset.saved = args.content;
+            document.body.dataset.savedEncoding = args.encoding ?? 'utf-8';
             return;
           }
           if (command === 'git_changes') return { isRepository: false, entries: [] };
@@ -64,6 +72,28 @@ async function edit(page: Page) {
   await expect(page.getByRole('tab', { name: 'main.ts, unsaved changes' })).toBeVisible();
 }
 
+test('focuses editor immediately on file open so any language or unknown file can be edited right away', async ({ page }) => {
+  await openProject(page);
+  await page.locator('.tree-dir').filter({ hasText: 'src' }).click();
+  await page.locator('.file-link').filter({ hasText: 'notes.unknown' }).click();
+  await expect(page.getByRole('tab', { name: 'src/notes.unknown', exact: true })).toHaveAttribute('aria-selected', 'true');
+  // Type immediately without clicking inside the editor.
+  await page.keyboard.type('edited ');
+  await expect(page.locator('#editor')).toContainText('edited example');
+  await expect(page.getByRole('tab', { name: 'src/notes.unknown, unsaved changes' })).toBeVisible();
+  await page.keyboard.press('Control+s');
+  await expect(page.locator('body')).toHaveAttribute('data-saved', 'edited example');
+  await expect(page.locator('body')).toHaveAttribute('data-saved-encoding', 'utf-8');
+
+  // Editable UTF-16 files can be edited and saved back with their original encoding.
+  await openFile(page, 'script.ps1');
+  await expect(page.locator('#readOnlyBadge')).toBeHidden();
+  await page.keyboard.type('# header\n');
+  await page.locator('#saveFile').click();
+  await expect(page.locator('body')).toHaveAttribute('data-saved', /# header/);
+  await expect(page.locator('body')).toHaveAttribute('data-saved-encoding', 'utf-16le-bom');
+});
+
 test('opens an unindexed file in a non-Git workspace and detects its content', async ({ page }) => {
   await openProject(page);
   await page.locator('#menu-file').click();
@@ -82,15 +112,18 @@ test('opens non-UTF-8 logs as read-only and restores normal editing on tab switc
   await openProject(page);
   await openFile(page, '.server.log');
   await expect(page.locator('#editor')).toContainText('server started');
+  await expect(page.locator('#readOnlyBadge')).toBeVisible();
   await expect(page.locator('#saveFile')).toBeDisabled();
   await page.locator('#editor .inputarea').first().focus();
   await page.keyboard.type('changed');
   await expect(page.locator('#editor')).not.toContainText('changed');
   await expect(page.getByRole('tab', { name: '.server.log', exact: true })).toBeVisible();
   await openFile(page, 'main.ts');
+  await expect(page.locator('#readOnlyBadge')).toBeHidden();
   await expect(page.locator('#saveFile')).toBeEnabled();
   await edit(page);
   await page.getByRole('tab', { name: '.server.log', exact: true }).click();
+  await expect(page.locator('#readOnlyBadge')).toBeVisible();
   await expect(page.locator('#saveFile')).toBeDisabled();
 });
 
