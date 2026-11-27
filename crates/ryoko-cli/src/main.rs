@@ -81,6 +81,9 @@ enum Commands {
     DiscoverLocal,
     /// Run Ryoko's agent harness on a goal. Edits are staged for review, never written.
     Agent(Box<agent::AgentArgs>),
+    /// DeepSeek-inspired agent harness (dsh): profiles, plugins, and execution traces.
+    #[command(alias = "dsh")]
+    Harness(Box<agent::HarnessArgs>),
     /// Fast Context: find the files and lines that match a description, in milliseconds.
     Find(harness_cmds::FindArgs),
     /// Ryoko Review: review your uncommitted, staged or branch changes with a model.
@@ -1034,6 +1037,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Providers(args) => providers(args).await,
         Commands::DiscoverLocal => discover_local().await,
         Commands::Agent(args) => agent::run(*args).await,
+        Commands::Harness(args) => agent::run_harness(*args).await,
         Commands::Find(args) => harness_cmds::find(args),
         Commands::ReviewDiff(args) => harness_cmds::review_diff(*args).await,
         Commands::Swarm(args) => harness_cmds::swarm(*args).await,

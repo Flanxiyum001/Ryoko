@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 ignore.workspace = true
 ryoko-models = { path = "../ryoko-models" }
 ryoko-tools = { path = "../ryoko-tools" }

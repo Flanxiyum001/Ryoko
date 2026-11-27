@@ -204,6 +204,7 @@ pub fn wire_body(request: &ChatRequest, stream: bool) -> Value {
 
 fn wire_message(message: &Message) -> Value {
     let mut text = Vec::new();
+    let mut reasoning = Vec::new();
     let mut tool_calls = Vec::new();
     let mut images: Vec<(String, String)> = Vec::new();
     let mut tool_call_id = None;
@@ -211,6 +212,7 @@ fn wire_message(message: &Message) -> Value {
     for block in &message.content {
         match block {
             ContentBlock::Text { text: value } => text.push(value.clone()),
+            ContentBlock::Reasoning { text: value } => reasoning.push(value.clone()),
             ContentBlock::Image {
                 media_type,
                 data_base64,
@@ -265,6 +267,9 @@ fn wire_message(message: &Message) -> Value {
         wire["content"] = Value::String(content);
     } else {
         wire["content"] = Value::Null;
+    }
+    if !reasoning.is_empty() {
+        wire["reasoning_content"] = Value::String(reasoning.join("\n"));
     }
     if !tool_calls.is_empty() {
         wire["tool_calls"] = Value::Array(tool_calls);
@@ -380,6 +385,13 @@ fn dispatch_event(data: &str, provider: &str) -> Result<Vec<StreamEvent>, ModelE
         for choice in choices {
             let delta = choice.get("delta").unwrap_or(&Value::Null);
 
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                if !reasoning.is_empty() {
+                    events.push(StreamEvent::ReasoningDelta {
+                        text: reasoning.to_owned(),
+                    });
+                }
+            }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
                     events.push(StreamEvent::TextDelta {
@@ -649,5 +661,57 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ModelError::Provider { .. }));
+    }
+
+    #[test]
+    fn decodes_deepseek_reasoning_content_delta() {
+        let events = dispatch_event(
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"Thinking through the problem..."}}]}"#,
+            "deepseek",
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            StreamEvent::ReasoningDelta {
+                text: "Thinking through the problem...".to_owned()
+            }
+        );
+
+        // Test combined chunk with both reasoning and content
+        let combined = dispatch_event(
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"step 1","content":"done"}}]}"#,
+            "deepseek",
+        )
+        .unwrap();
+        assert_eq!(combined.len(), 2);
+        assert_eq!(
+            combined[0],
+            StreamEvent::ReasoningDelta {
+                text: "step 1".to_owned()
+            }
+        );
+        assert_eq!(
+            combined[1],
+            StreamEvent::TextDelta {
+                text: "done".to_owned()
+            }
+        );
+
+        // Test wire_message serializes reasoning_content
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "internal thought".into(),
+                },
+                ContentBlock::Text {
+                    text: "response text".into(),
+                },
+            ],
+        };
+        let wire = wire_message(&msg);
+        assert_eq!(wire["reasoning_content"], "internal thought");
+        assert_eq!(wire["content"], "response text");
     }
 }
