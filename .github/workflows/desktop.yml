@@ -15,6 +15,9 @@ concurrency:
 
 jobs:
   build:
+    # Configure required reviewers and allowed refs on this environment before use.
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ryoko')
+    environment: desktop-production
     name: ${{ matrix.label }}
     strategy:
       fail-fast: false
@@ -32,6 +35,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -50,8 +55,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
             librsvg2-dev patchelf rpm libssl-dev build-essential curl wget file
 
-      - name: Require release signing secrets
-        if: runner.os != 'Linux'
+      - name: Require macOS release signing secrets
+        if: runner.os == 'macOS'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -61,18 +66,22 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for key in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD; do
+            if [ -z "${!key}" ]; then echo "::error::Missing required macOS signing material: $key"; exit 1; fi
+          done
+
+      - name: Require Windows release signing secrets
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            for key in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID KEYCHAIN_PASSWORD; do
-              if [ -z "${!key}" ]; then echo "::error::Missing required macOS signing material: $key"; exit 1; fi
-            done
-          else
-            if [ -z "$WINDOWS_CERTIFICATE" ] || [ -z "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
-              echo "::error::Missing Windows certificate or password"; exit 1
-            fi
+          if [ -z "$WINDOWS_CERTIFICATE" ] || [ -z "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
+            echo "::error::Missing Windows certificate or password"; exit 1
           fi
 
       - name: Import macOS Developer ID certificate
@@ -167,7 +176,7 @@ jobs:
             npm run tauri build -- --target "${{ matrix.target }}"
           fi
 
-      - name: Verify macOS code signature and Gatekeeper assessment
+      - name: Verify macOS code signature, notarization ticket and Gatekeeper assessment
         if: runner.os == 'macOS'
         shell: bash
         run: |
@@ -175,6 +184,7 @@ jobs:
           APP="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/Ryoko.app"
           test -d "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
+          xcrun stapler validate "$APP"
           spctl --assess --type execute --verbose=2 "$APP"
 
       - name: Verify Windows installer Authenticode signatures
@@ -184,11 +194,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = 'apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle'
           $files = @(Get-ChildItem $dir -Recurse -File | Where-Object { $_.Extension -in @('.msi', '.exe') })
-          if ($files.Count -eq 0) { throw 'No Windows installer outputs found' }
+          if (@($files | Where-Object Extension -eq '.msi').Count -ne 1 -or @($files | Where-Object Extension -eq '.exe').Count -ne 1) { throw 'Expected exactly one MSI and one NSIS installer' }
+          $expected = (Get-Content 'apps/desktop/src-tauri/windows-signing.json' -Raw | ConvertFrom-Json).bundle.windows.certificateThumbprint
           foreach ($file in $files) {
             $signature = Get-AuthenticodeSignature -FilePath $file.FullName
             if ($signature.Status -ne 'Valid') {
               throw "Unsigned or untrusted installer: $($file.Name) ($($signature.Status))"
+            }
+            if ($signature.SignerCertificate.Thumbprint -ne $expected -or -not $signature.TimeStamperCertificate) {
+              throw "Unexpected signer or missing trusted timestamp: $($file.Name)"
             }
           }
 
