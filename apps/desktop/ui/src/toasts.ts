@@ -1,3 +1,8 @@
+export function isToastWarning(text: string): boolean {
+  const isPath = /^(?:[A-Za-z]:[\\/]|[\w./\\:-]+(?:\.[\w-]+)+$)/.test(text);
+  return !isPath && /(?:failed|\berror\b|invalid|cannot |could not|refus|missing|required|denied)/i.test(text);
+}
+
 /** Accessible, non-blocking app notifications. Transient events do not overwrite
  * the permanent language/cursor and LSP status indicators. */
 export function createNotifier(doc: Document = document): (message: string) => void {
@@ -16,7 +21,7 @@ export function createNotifier(doc: Document = document): (message: string) => v
     if (text === lastMessage && now - lastTime < 1800) return;
     lastMessage = text;
     lastTime = now;
-    const warning = /(?:failed|error|invalid|cannot |could not|refus|missing|required|denied)/i.test(text);
+    const warning = isToastWarning(text);
     const toast = doc.createElement('div');
     toast.className = 'toast-item' + (warning ? ' toast-error' : '');
     toast.setAttribute('role', warning ? 'alert' : 'status');
