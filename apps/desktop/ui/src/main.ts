@@ -806,8 +806,20 @@ const agentChat = mountAgentChat({
   setStatus,
 });
 
+function isEditorBufferStatus(text: string): boolean {
+  if (text === 'Ready' || text === 'No file open' || text === 'Loading files…') return true;
+  if (text.startsWith('Opening ') && text.endsWith('…')) return true;
+  if (text.startsWith('Read-only preview: ')) return true;
+  if (/^\d+\s+files\s+from\s+/i.test(text)) return true;
+  if (/^(?:[A-Za-z]:[\\/]|[\w./\\:-]+(?:\.[\w-]+)+$)/.test(text)) return true;
+  return false;
+}
+
 function setStatus(message: string): void {
   editorStatus.textContent = message;
+  if (!isEditorBufferStatus(message)) {
+    notify(message);
+  }
 }
 
 function showBottom(panel: 'terminal' | 'debug' | 'search' | 'task'): void {
