@@ -44,6 +44,7 @@ def read_message() -> dict | None:
 def main() -> None:
     seq = 0
     breakpoints_store = {}
+    launch_request = None
 
     def next_seq() -> int:
         nonlocal seq
@@ -74,19 +75,14 @@ def main() -> None:
                     "supportsConditionalBreakpoints": False,
                 }
             })
+        elif cmd == "launch":
+            # Match adapters that wait for launch before accepting configuration
+            # and only acknowledge launch after configurationDone.
+            launch_request = req_seq
             send_message({
                 "seq": next_seq(),
                 "type": "event",
                 "event": "initialized",
-            })
-
-        elif cmd == "launch":
-            send_message({
-                "seq": next_seq(),
-                "type": "response",
-                "request_seq": req_seq,
-                "command": "launch",
-                "success": True,
             })
 
         elif cmd == "setBreakpoints":
@@ -115,6 +111,24 @@ def main() -> None:
             })
 
         elif cmd == "configurationDone":
+            if launch_request is None:
+                send_message({
+                    "seq": next_seq(),
+                    "type": "response",
+                    "request_seq": req_seq,
+                    "command": cmd,
+                    "success": False,
+                    "message": "launch must precede configuration",
+                })
+                continue
+            send_message({
+                "seq": next_seq(),
+                "type": "response",
+                "request_seq": launch_request,
+                "command": "launch",
+                "success": True,
+            })
+            launch_request = None
             send_message({
                 "seq": next_seq(),
                 "type": "response",

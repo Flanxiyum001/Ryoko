@@ -51,13 +51,43 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 The Tauri tests also require platform-native prerequisites. After CI, run interactive smoke tests with a disposable workspace and a user-selected debug adapter on each target OS. Passing CI does **not** substitute for interactive manual verification.
 
 ### DAP Inspector manual smoke checklist
-1. **Adapter start & initialize:** Enter `python3` with args `tests/fixtures/fake_dap_adapter.py`, click Start. Verify status updates to "Adapter initialized" and execution controls (Continue, Next, Step in, Step out) are available.
+1. **Adapter start & initialize:** Open a disposable workspace, enter a trusted Python executable and the absolute path to `tests/fixtures/fake_dap_adapter.py` as its argument, enter a program path, and click Start. Verify the DAP log shows initialize response → launch request → initialized event → breakpoint configuration → configurationDone → stopped event. Execution controls become available when paused. On Windows use the installed Python executable (e.g. `python.exe`).
 2. **Breakpoints:** Toggle breakpoint on current line via F9 or button. Verify breakpoint appears in the Breakpoints list with file, line, and verified badge. Clicking breakpoint navigates editor to file:line.
 3. **Call Stack navigation:** When paused, verify paused stack frames populate the Call Stack list with function name and `source:line:col`. Selecting frames with arrow keys / Enter navigates the editor and loads frame scopes.
 4. **Variables inspection:** Verify local variables appear in the Variables tree. Expanding nested variables (`variablesReference > 0`) fetches child properties without freezing UI.
 5. **Restart & Stop:** Click Restart; verify previous session terminates cleanly and new session starts without duplicate logs or leaked child processes. Click Stop; verify controls reset to idle state and "Not paused" is displayed.
 6. **Workspace switch:** Switch workspace while debugging; verify active adapter process is killed, all session frames/variables are cleared, and no stale data persists.
 7. **Resilience:** Provide invalid adapter command or non-existent path; verify bounded error message appears in status/output without hanging the webview.
+
+### Trusted real-adapter smoke (issue #43)
+
+Use a disposable workspace on Windows, macOS and Linux. Install debugpy into a
+trusted local Python environment (for example with `python -m pip install debugpy`
+after reviewing the package). In the workspace create `smoke.py`:
+
+```python
+def calculate():
+    values = {"count": 3, "items": [1, 2, 3]}
+    result = values["count"] + 1
+    print(result)
+
+calculate()
+```
+
+Open the file and set a breakpoint on line 3 before starting. Enter the trusted
+Python executable in Adapter, `-m debugpy.adapter` in Args, and `smoke.py` in
+Program. Explicitly click Start; no agent may launch the adapter. Confirm that the
+adapter receives launch after initialize succeeds, and that it receives
+setBreakpoints and configurationDone only after the initialized event. Verify
+that execution pauses, stack navigation selects line 3, expanding `values` shows
+its children, and stepping/continuing works. Repeat Restart, Stop, and switch
+workspaces while paused; verify stale inspector data is cleared and the adapter
+process exits. Also exercise the invalid adapter case and the fake-adapter
+checklist above.
+
+Record the tested commit, OS/version, Python/debugpy versions, each checklist
+result and any errors in issue #43. The deterministic tests cover protocol
+ordering but do not constitute a real-adapter or interactive platform pass.
 
 ## Recommended sequencing
 
