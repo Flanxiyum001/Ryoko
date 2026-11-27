@@ -219,7 +219,10 @@ async fn run_harness_internal(args: HarnessRunArgs) -> Result<(), Box<dyn Error>
     if args.goal.trim().is_empty() {
         return Err("goal cannot be empty".into());
     }
-    if args.max_turns.is_some_and(|turns| !(1..=200).contains(&turns)) {
+    if args
+        .max_turns
+        .is_some_and(|turns| !(1..=200).contains(&turns))
+    {
         return Err("--max-turns must be between 1 and 200".into());
     }
     let catalog = crate::load_catalog(&args.config)?;
