@@ -401,6 +401,11 @@
         <select id="settingsKeymap" class="settings-theme"></select>
       </section>
       <section class="settings-section">
+        <h2>Crash recovery</h2>
+        <p class="hint">Opt in to save private, atomic snapshots of unsaved non-sensitive buffers locally (7-day retention). After an abnormal exit, Ryoko asks for your review before restoring any buffer and never overwrites disk automatically.</p>
+        <label class="run-check"><input id="settingsRecoveryToggle" type="checkbox"> Enable local crash recovery snapshots</label>
+      </section>
+      <section class="settings-section">
         <h2>Import from VS Code</h2>
         <p class="hint">Import a VS Code color-theme JSON or <code>settings.json</code>. Values are validated locally; nothing is uploaded. Theme colors are mapped onto Ryoko's Monaco theme and workbench variables.</p>
         <div class="settings-actions">

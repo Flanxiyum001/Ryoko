@@ -20,6 +20,7 @@ mod mission;
 mod model_runtime;
 mod onboarding;
 mod paths;
+mod recovery;
 mod review;
 mod review_swarm;
 mod run;
@@ -49,6 +50,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(updater::UpdaterState::new(updates_configured))
         .manage(workspace::WorkspaceState::default())
+        .manage(recovery::RecoveryState::default())
         .manage(agent_chat::AgentChatState::default())
         .manage(agent_harness::AgentHarnessState::default())
         .manage(fast_context::FastContextState::default())
@@ -71,6 +73,10 @@ pub fn run() {
             workspace::read_file,
             workspace::read_encoded_file_preview,
             workspace::write_file,
+            recovery::recovery_save,
+            recovery::recovery_clear,
+            recovery::recovery_list,
+            recovery::recovery_retire_session,
             agent_chat::agent_chat,
             agent_chat::agent_chat_cancel,
             agent_harness::harness_start,
@@ -153,6 +159,9 @@ pub fn run() {
 
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
+            if let Some(state) = handle.try_state::<recovery::RecoveryState>() {
+                recovery::shutdown(&state);
+            }
             if let Some(state) = handle.try_state::<lsp::LspState>() {
                 lsp::shutdown(&state);
             }
