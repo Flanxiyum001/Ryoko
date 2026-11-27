@@ -1,3 +1,4 @@
+mod agent;
 mod audit;
 mod check;
 mod connectors;
@@ -77,6 +78,8 @@ enum Commands {
     Providers(ProvidersArgs),
     /// Probe only fixed loopback Ollama and LM Studio endpoints, with no keys.
     DiscoverLocal,
+    /// Run Ryoko's agent harness on a goal. Edits are staged for review, never written.
+    Agent(Box<agent::AgentArgs>),
     /// Ask one configured model a question (no tools or filesystem changes).
     Ask(AskArgs),
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
@@ -1023,6 +1026,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Plan(args) => plan(args).await,
         Commands::Providers(args) => providers(args).await,
         Commands::DiscoverLocal => discover_local().await,
+        Commands::Agent(args) => agent::run(*args).await,
         Commands::Ask(args) => ask(args).await,
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(*args).await,

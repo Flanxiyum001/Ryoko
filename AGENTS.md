@@ -55,6 +55,7 @@ pushes and force pushes are blocked. See `docs/decisions/016-main-branch-protect
 apps/desktop            Tauri shell and Monaco/Vite frontend (Tauri crate excluded from the workspace)
 crates/ryoko-cli        terminal entry point and workflows
 crates/ryoko-core       domain types, agents, IACP, orchestrator, memory
+crates/ryoko-harness    native agent loop: staged edits, gated commands, memory, skills, sub-agents
 crates/ryoko-models     provider adapters, routing, streaming, usage
 crates/ryoko-native     LSP server and agent diagnostic publisher
 crates/ryoko-sandbox    WASM validation guardrail and spec evidence

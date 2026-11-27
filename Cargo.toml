@@ -9,6 +9,7 @@ members = [
     "crates/ryoko-scripting",
     "crates/ryoko-storage",
     "crates/ryoko-tools",
+    "crates/ryoko-harness",
     "crates/ryoko-vfs",
     "crates/ryoko-worktree",
     "crates/ryoko-cli",

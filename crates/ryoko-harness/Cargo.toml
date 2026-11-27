@@ -1,0 +1,20 @@
+[package]
+name = "ryoko-harness"
+description = "Ryoko's native agent harness: bounded tool loop, staged edits, memory, skills and sub-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+ryoko-models = { path = "../ryoko-models" }
+ryoko-tools = { path = "../ryoko-tools" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
