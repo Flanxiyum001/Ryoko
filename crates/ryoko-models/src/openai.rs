@@ -386,6 +386,12 @@ fn dispatch_event(data: &str, provider: &str) -> Result<Vec<StreamEvent>, ModelE
                         text: content.to_owned(),
                     });
                 }
+            } else if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                if !reasoning.is_empty() {
+                    events.push(StreamEvent::TextDelta {
+                        text: reasoning.to_owned(),
+                    });
+                }
             }
 
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -649,5 +655,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ModelError::Provider { .. }));
+    }
+
+    #[test]
+    fn decodes_deepseek_reasoning_content_delta() {
+        let events = dispatch_event(
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"Thinking through the problem..."}}]}"#,
+            "deepseek",
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            StreamEvent::TextDelta {
+                text: "Thinking through the problem...".to_owned()
+            }
+        );
     }
 }

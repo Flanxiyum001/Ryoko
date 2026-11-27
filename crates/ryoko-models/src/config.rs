@@ -75,6 +75,18 @@ fn is_loopback(host: &str) -> bool {
 }
 
 impl ProviderProfile {
+    /// Built-in profile for DeepSeek's official API endpoint.
+    pub fn deepseek() -> Self {
+        Self {
+            id: "deepseek".to_owned(),
+            base_url: "https://api.deepseek.com".to_owned(),
+            api_key_env: Some("DEEPSEEK_API_KEY".to_owned()),
+            chat_path: None,
+            allow_insecure_http: false,
+            wire: Some(WireProtocol::OpenAi),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ModelError> {
         if !valid_id(&self.id) {
             return Err(invalid(
@@ -396,5 +408,14 @@ mod tests {
         let json = serde_json::to_string(&catalog).unwrap();
         assert!(!json.contains("api_key\":\""));
         assert!(ProviderCatalog::parse_json(&json).is_ok());
+    }
+
+    #[test]
+    fn deepseek_profile_preset_is_valid() {
+        let profile = ProviderProfile::deepseek();
+        assert_eq!(profile.id, "deepseek");
+        assert_eq!(profile.base_url, "https://api.deepseek.com");
+        assert_eq!(profile.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+        assert!(profile.validate().is_ok());
     }
 }
