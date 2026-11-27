@@ -104,6 +104,14 @@ import {
   type SessionChange,
   type SessionFileDiff,
 } from './sessions';
+import {
+  createRecoverySessionId,
+  describeRecoverableEntry,
+  loadRecoveryEnabled,
+  saveRecoveryEnabled,
+  type RecoverableEntry,
+  type RecoveryListResult,
+} from './recovery';
 
 interface WorkspaceInfo {
   root: string;
@@ -1086,6 +1094,184 @@ async function loadFiles(): Promise<void> {
   renderFiles();
 }
 
+let recoveryEnabled = loadRecoveryEnabled(localStorage);
+const recoverySessionId = createRecoverySessionId();
+const recoveryTimers = new Map<string, number>();
+
+function clearRecoverySnapshot(path: string, uri?: string): void {
+  if (uri) {
+    const timer = recoveryTimers.get(uri);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      recoveryTimers.delete(uri);
+    }
+  }
+  if (!state.root) return;
+  void invoke('recovery_clear', { path }).catch(() => undefined);
+}
+
+function scheduleRecoverySnapshot(file: OpenFile): void {
+  if (!recoveryEnabled || file.readOnlyEncoding || !state.root) return;
+  const existing = recoveryTimers.get(file.uri);
+  if (existing !== undefined) window.clearTimeout(existing);
+  if (!file.dirty) {
+    clearRecoverySnapshot(file.path, file.uri);
+    return;
+  }
+  const root = state.root;
+  recoveryTimers.set(file.uri, window.setTimeout(() => {
+    recoveryTimers.delete(file.uri);
+    if (!recoveryEnabled || state.root !== root || !file.dirty || file.readOnlyEncoding) return;
+    void invoke('recovery_save', {
+      path: file.path,
+      fileUri: file.uri,
+      content: file.model.getValue(),
+      baseContent: file.savedText,
+      revision: file.version,
+      sessionId: recoverySessionId,
+    }).catch(() => undefined);
+  }, 1500));
+}
+
+async function applyRecoveredEntryToEditor(entry: RecoverableEntry): Promise<void> {
+  if (!state.root) return;
+  const uri = fileUri(joinWorkspacePath(state.root, entry.path));
+  let file = openFiles.get(uri);
+  if (!file) {
+    if (entry.diskExists) {
+      await openFile(entry.path);
+      file = openFiles.get(uri);
+    }
+    if (!file) {
+      const languageId = detectEditorLanguage(entry.path, entry.content, monaco.languages.getLanguages());
+      const model = monaco.editor.createModel(entry.diskContent, languageId, monaco.Uri.parse(uri));
+      file = {
+        path: entry.path,
+        uri,
+        languageId,
+        model,
+        version: 1,
+        savedText: entry.diskContent,
+        dirty: false,
+      };
+      openFiles.set(uri, file);
+    }
+  }
+  if (file.readOnlyEncoding) return;
+  // Never silently write to disk: load recovered text into the unsaved editor
+  // buffer so the user reviews and saves explicitly.
+  file.model.setValue(entry.content);
+  file.version += 1;
+  markDirty(file);
+  selectOpenFile(file.path);
+  clearRecoverySnapshot(entry.path, file.uri);
+  setStatus(`Recovered unsaved buffer for ${entry.path} (not saved to disk yet).`);
+}
+
+function previewRecoveredDiff(entry: RecoverableEntry): void {
+  clearDiffEditor();
+  const languageId = detectEditorLanguage(entry.path, entry.content, monaco.languages.getLanguages());
+  const suffix = encodeURIComponent(`recovery/${entry.path}`).replaceAll('%', '_');
+  diffOriginalModel = monaco.editor.createModel(
+    entry.diskContent,
+    languageId,
+    monaco.Uri.parse(`ryoko-diff://recovery/disk/${suffix}`),
+  );
+  diffModifiedModel = monaco.editor.createModel(
+    entry.content,
+    languageId,
+    monaco.Uri.parse(`ryoko-diff://recovery/buffer/${suffix}`),
+  );
+  diffEditor.setModel({ original: diffOriginalModel, modified: diffModifiedModel });
+  diffReviewPath.textContent = `${entry.path} · Disk vs. Recovered Snapshot`;
+  diffPrevFile.hidden = true;
+  diffNextFile.hidden = true;
+  proposalToolbar.classList.add('hidden');
+  editorHost.classList.add('hidden');
+  emptyEditor.classList.add('hidden');
+  diffReview.classList.remove('hidden');
+  diffEditor.layout();
+}
+
+async function promptRecoverySnapshots(expectedRoot: string): Promise<void> {
+  if (!requireNativeWorkspace()) return;
+  let result: RecoveryListResult | null;
+  try {
+    result = await invoke<RecoveryListResult | null>('recovery_list', {
+      currentSessionId: recoverySessionId,
+    });
+  } catch {
+    return;
+  }
+  if (!result || !Array.isArray(result.entries) || state.root !== expectedRoot) return;
+  if (typeof result.corruptedCount === 'number' && result.corruptedCount > 0) {
+    setStatus(`Skipped ${result.corruptedCount} corrupted recovery snapshot(s); disk files are untouched.`);
+  }
+  if (!result.entries.length) return;
+
+  const dialog = document.createElement('dialog');
+  dialog.className = 'merge-dialog';
+  dialog.setAttribute('aria-label', 'Recover unsaved editor buffers');
+  const form = document.createElement('form');
+  form.method = 'dialog';
+  form.className = 'merge-form';
+  const heading = document.createElement('h2');
+  heading.textContent = `Recover ${result.entries.length} unsaved buffer(s)`;
+  const intro = document.createElement('p');
+  intro.className = 'hint';
+  intro.textContent =
+    'Ryoko found unsaved edits from a previous session. Review the diff before restoring. Cancel or discard leaves disk files untouched.';
+  const list = document.createElement('div');
+  list.className = 'merge-form';
+  for (const entry of result.entries) {
+    const row = document.createElement('div');
+    row.className = 'settings-actions';
+    const label = document.createElement('span');
+    label.textContent = describeRecoverableEntry(entry);
+    const preview = document.createElement('button');
+    preview.type = 'button';
+    preview.className = 'button ghost compact';
+    preview.textContent = 'Preview diff';
+    preview.addEventListener('click', () => {
+      dialog.close();
+      previewRecoveredDiff(entry);
+    });
+    const restore = document.createElement('button');
+    restore.type = 'button';
+    restore.className = 'button primary compact';
+    restore.textContent = 'Restore to editor';
+    restore.addEventListener('click', () => {
+      row.remove();
+      void applyRecoveredEntryToEditor(entry);
+      if (list.childElementCount === 0) dialog.close();
+    });
+    const discard = document.createElement('button');
+    discard.type = 'button';
+    discard.className = 'button ghost compact';
+    discard.textContent = 'Discard';
+    discard.addEventListener('click', () => {
+      row.remove();
+      clearRecoverySnapshot(entry.path);
+      setStatus(`Discarded recovery snapshot for ${entry.path}. Disk file unchanged.`);
+      if (list.childElementCount === 0) dialog.close();
+    });
+    row.append(label, preview, restore, discard);
+    list.append(row);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'settings-actions';
+  const cancel = document.createElement('button');
+  cancel.type = 'submit';
+  cancel.className = 'button ghost compact';
+  cancel.textContent = 'Close';
+  actions.append(cancel);
+  form.append(heading, intro, list, actions);
+  dialog.append(form);
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
 let onboarding: ReturnType<typeof mountOnboarding> | null = null;
 
 // Local filesystem access is only available through the native Tauri shell.
@@ -1138,6 +1324,8 @@ async function openFolder(selectedPath?: string): Promise<void> {
     await stopCodeTask();
     for (const timer of changeTimers.values()) window.clearTimeout(timer);
     changeTimers.clear();
+    for (const timer of recoveryTimers.values()) window.clearTimeout(timer);
+    recoveryTimers.clear();
     for (const file of openFiles.values()) file.model.dispose();
     openFiles.clear();
     diagnostics.clear();
@@ -1211,6 +1399,7 @@ async function openFolder(selectedPath?: string): Promise<void> {
     void refreshRunStatus();
     connectors.reload();
     syncWorkspaceButtons();
+    void promptRecoverySnapshots(info.root);
     await lsp.start(info.root);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
@@ -2670,6 +2859,7 @@ function closeOpenFile(path: string): void {
   const timer = changeTimers.get(file.uri);
   if (timer !== undefined) window.clearTimeout(timer);
   changeTimers.delete(file.uri);
+  clearRecoverySnapshot(file.path, file.uri);
   lsp.close(file.uri);
   openFiles.delete(file.uri);
   if (wasActive) {
@@ -2746,6 +2936,7 @@ async function saveCurrent(): Promise<void> {
     file.savedText = content;
     file.version += 1;
     markDirty(file);
+    clearRecoverySnapshot(file.path, file.uri);
     lsp.change(file.uri, file.version, content);
     renderFiles();
     setStatus(`Saved ${file.path}`);
@@ -2855,6 +3046,7 @@ editor.onDidChangeModelContent(() => {
   scheduleFim();
   file.version += 1;
   markDirty(file);
+  scheduleRecoverySnapshot(file);
   const timer = changeTimers.get(file.uri);
   if (timer !== undefined) window.clearTimeout(timer);
   changeTimers.set(
@@ -3164,6 +3356,7 @@ updateRunLabels();
 refreshRunStatus();
 
 window.addEventListener('beforeunload', () => {
+  void invoke('recovery_retire_session', { sessionId: recoverySessionId }).catch(() => undefined);
   void lsp.stop();
   debugController.unmount();
   void invoke('terminal_stop').catch(() => undefined);
@@ -3628,6 +3821,22 @@ for (const option of KEYMAP_OPTIONS) {
 }
 keymapPicker.value = keymapPreset;
 keymapPicker.addEventListener('change', () => void applyKeymap(keymapPicker.value as KeymapPreset));
+
+// Settings › Crash recovery (opt-in).
+const recoveryToggle = element<HTMLInputElement>('settingsRecoveryToggle');
+recoveryToggle.checked = recoveryEnabled;
+recoveryToggle.addEventListener('change', () => {
+  recoveryEnabled = recoveryToggle.checked;
+  saveRecoveryEnabled(localStorage, recoveryEnabled);
+  if (!recoveryEnabled) {
+    for (const timer of recoveryTimers.values()) window.clearTimeout(timer);
+    recoveryTimers.clear();
+    void invoke('recovery_retire_session', { sessionId: recoverySessionId }).catch(() => undefined);
+    setStatus('Crash recovery snapshots disabled; active session snapshots cleared.');
+  } else {
+    setStatus('Crash recovery snapshots enabled (local, non-sensitive buffers only).');
+  }
+});
 
 // Settings › Import from VS Code.
 const vscodeImportFile = element<HTMLInputElement>('vscodeImportFile');
