@@ -76,7 +76,7 @@ jobs:
         working-directory: apps/desktop
         run: npm test
 
-      - name: Build Ryoko CLI and language-server sidecars
+      - name: Build Ryoko CLI, language-server and guardrail worker sidecars
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -84,10 +84,11 @@ jobs:
           set -euo pipefail
           cargo build --locked --release -p ryoko-native --bin ryoko-lsp --target "$TARGET"
           cargo build --locked --release -p ryoko-cli --bin ryoko --target "$TARGET"
+          cargo build --locked --release -p ryoko-sandbox --bin wasm-guardrail-worker --target "$TARGET"
           mkdir -p apps/desktop/src-tauri/binaries
           SUFFIX=""
           if [ "$RUNNER_OS" = "Windows" ]; then SUFFIX=".exe"; fi
-          for BINARY in ryoko-lsp ryoko; do
+          for BINARY in ryoko-lsp ryoko wasm-guardrail-worker; do
             SOURCE="target/$TARGET/release/$BINARY$SUFFIX"
             test -f "$SOURCE"
             cp "$SOURCE" "apps/desktop/src-tauri/binaries/$BINARY-$TARGET$SUFFIX"

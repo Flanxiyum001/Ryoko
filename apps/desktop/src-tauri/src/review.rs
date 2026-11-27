@@ -82,8 +82,9 @@ pub struct ReviewFileContent {
 }
 
 fn git_diff(root: &Path) -> Result<String, String> {
+    let host_root = crate::paths::host_path(root);
     let top = Command::new("git")
-        .current_dir(root)
+        .current_dir(&host_root)
         .args(["rev-parse", "--show-toplevel"])
         .stdin(Stdio::null())
         .output()
@@ -100,7 +101,7 @@ fn git_diff(root: &Path) -> Result<String, String> {
         return Err("open the repository root to review Git hunks".into());
     }
     let mut child = Command::new("git")
-        .current_dir(root)
+        .current_dir(&host_root)
         .args([
             "diff",
             "--no-ext-diff",
@@ -149,7 +150,7 @@ fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Result<
     }
     args.extend(["--whitespace=nowarn", "-"]);
     let mut child = Command::new("git")
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -471,7 +472,7 @@ pub async fn read_review_file(
     .map_err(|_| "file read worker failed".to_owned())??;
     let original = tauri::async_runtime::spawn_blocking(move || {
         let output = Command::new("git")
-            .current_dir(&source)
+            .current_dir(crate::paths::host_path(&source))
             .args(["show", &format!("HEAD:{git_path}")])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

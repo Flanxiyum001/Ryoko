@@ -13,6 +13,9 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use std::path::Path;
+
+use crate::paths::host_path;
 use crate::terminal_decode::TerminalUtf8Decoder;
 use crate::workspace::{WorkspaceState, current_root};
 
@@ -39,6 +42,12 @@ struct TerminalOutput {
     data: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalExit {
+    session_id: u64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalStatus {
@@ -46,23 +55,58 @@ pub struct TerminalStatus {
     pub session_id: Option<u64>,
 }
 
+fn find_on_path(binary: &str) -> Option<String> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 fn default_shell() -> String {
     if cfg!(windows) {
-        "powershell.exe".to_owned()
-    } else {
-        std::env::var("SHELL")
+        for candidate in ["pwsh.exe", "powershell.exe"] {
+            if let Some(found) = find_on_path(candidate) {
+                return found;
+            }
+        }
+        std::env::var("COMSPEC")
             .ok()
-            .filter(|shell| shell.starts_with('/') && !shell.chars().any(char::is_control))
-            .unwrap_or_else(|| "/bin/sh".to_owned())
+            .filter(|shell| {
+                !shell.trim().is_empty()
+                    && !shell.chars().any(char::is_control)
+                    && Path::new(shell).is_file()
+            })
+            .unwrap_or_else(|| "cmd.exe".to_owned())
+    } else {
+        if let Some(shell) = std::env::var("SHELL").ok().filter(|shell| {
+            shell.starts_with('/')
+                && !shell.chars().any(char::is_control)
+                && Path::new(shell).is_file()
+        }) {
+            return shell;
+        }
+        for fallback in ["/bin/bash", "/bin/zsh", "/bin/sh"] {
+            if Path::new(fallback).is_file() {
+                return fallback.to_owned();
+            }
+        }
+        "/bin/sh".to_owned()
     }
 }
 
 fn stop_session(state: &TerminalState) {
-    let mut guard = state
-        .session
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if let Some(mut session) = guard.take() {
+    let session = {
+        let mut guard = state
+            .session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard.take()
+    };
+    if let Some(mut session) = session {
         let _ = session.child.kill();
         let _ = session.child.wait();
     }
@@ -78,9 +122,11 @@ pub fn terminal_start(
     state: State<'_, TerminalState>,
     workspace: State<'_, WorkspaceState>,
     shell: Option<String>,
+    rows: Option<u16>,
+    cols: Option<u16>,
 ) -> Result<TerminalStatus, String> {
     stop_session(&state);
-    let root = current_root(&workspace)?;
+    let root = host_path(&current_root(&workspace)?);
     let shell = shell
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
@@ -90,8 +136,8 @@ pub fn terminal_start(
     }
     let pty = native_pty_system()
         .openpty(PtySize {
-            rows: 30,
-            cols: 100,
+            rows: rows.unwrap_or(30).clamp(2, 500),
+            cols: cols.unwrap_or(100).clamp(20, 500),
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -168,6 +214,7 @@ pub fn terminal_start(
                 },
             );
         }
+        let _ = app.emit("ryoko-terminal-exit", TerminalExit { session_id: id });
     });
 
     Ok(TerminalStatus {
@@ -253,4 +300,16 @@ pub fn terminal_status(state: State<'_, TerminalState>) -> Result<TerminalStatus
 pub fn terminal_stop(state: State<'_, TerminalState>) -> Result<(), String> {
     stop_session(&state);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_shell;
+
+    #[test]
+    fn default_shell_resolves_non_empty_executable_without_control_chars() {
+        let shell = default_shell();
+        assert!(!shell.trim().is_empty());
+        assert!(!shell.chars().any(char::is_control));
+    }
 }

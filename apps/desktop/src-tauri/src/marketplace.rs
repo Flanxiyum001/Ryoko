@@ -42,7 +42,7 @@ pub async fn marketplace_catalog(
     tauri::async_runtime::spawn_blocking(move || {
         let cli = resolve_cli(&root)?;
         let result = Command::new(cli)
-            .current_dir(&root)
+            .current_dir(crate::paths::host_path(&root))
             .args(["marketplace", "list", &kind, "--json"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

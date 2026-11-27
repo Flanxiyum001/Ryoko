@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
-use crate::paths::safe_join;
+use crate::paths::{host_path, safe_join};
 use crate::terminal_decode::TerminalUtf8Decoder;
 use crate::workspace::{WorkspaceState, current_root};
 
@@ -87,14 +87,16 @@ fn prepare_argv(
     if args.len() > MAX_ARGS {
         return Err(format!("task accepts at most {MAX_ARGS} arguments"));
     }
+    let host_file = host_path(file);
+    let host_root = host_path(root);
     let mut result = Vec::with_capacity(args.len());
     for arg in args {
         if arg.len() > MAX_ARG_BYTES || arg.chars().any(char::is_control) {
             return Err("invalid task argument (maximum 2048 bytes, no line breaks)".to_owned());
         }
         result.push(match arg.as_str() {
-            "{file}" => file.to_string_lossy().into_owned(),
-            "{workspace}" => root.to_string_lossy().into_owned(),
+            "{file}" => host_file.to_string_lossy().into_owned(),
+            "{workspace}" => host_root.to_string_lossy().into_owned(),
             _ => arg.clone(),
         });
     }
@@ -240,7 +242,7 @@ pub async fn code_run_start(
     }
     let mut child = Command::new(&program)
         .args(&argv)
-        .current_dir(&root)
+        .current_dir(host_path(&root))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -284,33 +286,44 @@ pub fn code_run_status(
     workspace: State<'_, WorkspaceState>,
 ) -> Result<CodeRunStatus, String> {
     let root = current_root(&workspace)?;
-    let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.as_ref().is_some_and(|task| task.root != root) {
-        if let Some(task) = guard.as_mut() {
-            let _ = task.child.kill();
-            let _ = task.child.wait();
+    let stale = {
+        let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().is_some_and(|task| task.root != root) {
+            guard.take()
+        } else {
+            return inspect_task(&mut guard);
         }
-        *guard = None;
-        return Ok(CodeRunStatus::idle());
+    };
+    if let Some(mut task) = stale {
+        let _ = task.child.kill();
+        let _ = task.child.wait();
     }
-    inspect_task(&mut guard)
+    Ok(CodeRunStatus::idle())
 }
 
 #[tauri::command]
 pub fn code_run_stop(state: State<'_, CodeRunState>) -> Result<(), String> {
-    let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mut task) = guard.take() {
-        task.child
-            .kill()
-            .map_err(|error| format!("cannot stop code task: {error}"))?;
-        let _ = task.child.wait();
+    let task = {
+        let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
+        guard.take()
+    };
+    if let Some(mut task) = task {
+        if task.child.try_wait().ok().flatten().is_none() {
+            task.child
+                .kill()
+                .map_err(|error| format!("cannot stop code task: {error}"))?;
+            let _ = task.child.wait();
+        }
     }
     Ok(())
 }
 
 pub fn shutdown(state: &CodeRunState) {
-    let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mut task) = guard.take() {
+    let task = {
+        let mut guard = state.active.lock().unwrap_or_else(|e| e.into_inner());
+        guard.take()
+    };
+    if let Some(mut task) = task {
         let _ = task.child.kill();
         let _ = task.child.wait();
     }

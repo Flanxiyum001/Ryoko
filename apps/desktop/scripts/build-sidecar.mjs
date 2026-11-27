@@ -15,12 +15,18 @@ const host = execFileSync('rustc', ['-vV'], { encoding: 'utf8' })
   .trim();
 if (!host) throw new Error('could not determine the Rust host target triple');
 
-execFileSync('cargo', ['build', '--locked', '-p', 'ryoko-native', '--bin', 'ryoko-lsp'], {
-  cwd: workspace,
-  stdio: 'inherit',
-});
 const exe = process.platform === 'win32' ? '.exe' : '';
-const destination = join(desktop, 'src-tauri', 'binaries', `ryoko-lsp-${host}${exe}`);
-mkdirSync(dirname(destination), { recursive: true });
-copyFileSync(join(workspace, 'target', 'debug', `ryoko-lsp${exe}`), destination);
-console.log(`ryoko-lsp sidecar -> ${destination}`);
+const sidecars = [
+  { pkg: 'ryoko-native', bin: 'ryoko-lsp' },
+  { pkg: 'ryoko-sandbox', bin: 'wasm-guardrail-worker' },
+];
+for (const { pkg, bin } of sidecars) {
+  execFileSync('cargo', ['build', '--locked', '-p', pkg, '--bin', bin], {
+    cwd: workspace,
+    stdio: 'inherit',
+  });
+  const destination = join(desktop, 'src-tauri', 'binaries', `${bin}-${host}${exe}`);
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(join(workspace, 'target', 'debug', `${bin}${exe}`), destination);
+  console.log(`${bin} sidecar -> ${destination}`);
+}

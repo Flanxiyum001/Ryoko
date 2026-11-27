@@ -137,7 +137,7 @@ fn default_target(session: &PublishedSession) -> String {
 
 fn run_git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -164,7 +164,7 @@ fn merge_base(root: &Path, target: &str, branch: &str) -> Result<String, String>
 
 fn blob_exists(root: &Path, spec: &str) -> Result<bool, String> {
     let status = Command::new("git")
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args(["cat-file", "-e", spec])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -342,7 +342,7 @@ fn run_review(root: &Path, args: &[String]) -> Result<serde_json::Value, String>
     let cli = resolve_cli(root)?;
     let mut command = Command::new(cli);
     command
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .arg("review")
         .args(args)
         .stdin(Stdio::null())

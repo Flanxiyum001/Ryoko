@@ -115,12 +115,15 @@ jobs:
       - name: Build frontend assets
         working-directory: apps/desktop
         run: npm ci && npm run build
-      - name: Build ryoko-lsp sidecar
+      - name: Build ryoko-lsp and wasm-guardrail-worker sidecars
         run: |
           cargo build --locked -p ryoko-native --bin ryoko-lsp
+          cargo build --locked -p ryoko-sandbox --bin wasm-guardrail-worker
           mkdir -p apps/desktop/src-tauri/binaries
           cp target/debug/ryoko-lsp \
             apps/desktop/src-tauri/binaries/ryoko-lsp-x86_64-unknown-linux-gnu
+          cp target/debug/wasm-guardrail-worker \
+            apps/desktop/src-tauri/binaries/wasm-guardrail-worker-x86_64-unknown-linux-gnu
       - name: Check Tauri shell
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
       - name: Test Tauri shell modules

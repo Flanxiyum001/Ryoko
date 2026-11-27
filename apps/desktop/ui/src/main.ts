@@ -895,8 +895,15 @@ async function startTerminal(): Promise<void> {
     showBottom('terminal');
     const terminal = ensureTerminal();
     terminal.reset();
+    if (fitAddon && terminalHost.clientWidth > 0 && terminalHost.clientHeight > 0) {
+      fitAddon.fit();
+    }
     terminalSessionId = null;
-    const status = await invoke<TerminalStatus>('terminal_start', { shell: null });
+    const status = await invoke<TerminalStatus>('terminal_start', {
+      shell: null,
+      rows: terminal.rows,
+      cols: terminal.cols,
+    });
     terminalSessionId = status.sessionId;
     for (const output of pendingTerminalOutput) {
       if (output.sessionId === terminalSessionId) terminal.write(output.data);
@@ -3106,6 +3113,15 @@ void listen<TerminalOutput>('ryoko-terminal-output', (event) => {
     if (bytes + event.payload.data.length <= 64 * 1024) {
       pendingTerminalOutput.push(event.payload);
     }
+  }
+});
+void listen<{ sessionId: number }>('ryoko-terminal-exit', (event) => {
+  if (terminalSessionId !== null && event.payload.sessionId === terminalSessionId) {
+    terminalSessionId = null;
+    terminalStart.disabled = false;
+    terminalStop.disabled = true;
+    bottomStatus.textContent = 'Shell exited';
+    xterm?.write('\r\n[Shell exited]\r\n');
   }
 });
 void listen<FimChunk>('ryoko-fim-chunk', (event) => applyFimChunk(event.payload));

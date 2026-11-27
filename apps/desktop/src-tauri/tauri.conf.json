@@ -38,6 +38,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/ryoko-lsp"]
+    "externalBin": ["binaries/ryoko-lsp", "binaries/wasm-guardrail-worker"]
   }
 }

@@ -10,7 +10,7 @@
 //!
 //! Unix hosts evaluate in-process; Windows delegates every evaluation to the
 //! isolated `wasm-guardrail-worker` process because Wasmtime 26 guest traps
-//! there can abort the host. The worker receives one typed request and答复
+//! there can abort the host. The worker receives one typed request and replies
 //! with one typed response and is spawned with a cleared environment; see
 //! the [`worker`] module.
 
