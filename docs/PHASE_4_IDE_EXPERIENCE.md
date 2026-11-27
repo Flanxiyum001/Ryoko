@@ -89,6 +89,27 @@ Record the tested commit, OS/version, Python/debugpy versions, each checklist
 result and any errors in issue #43. The deterministic tests cover protocol
 ordering but do not constitute a real-adapter or interactive platform pass.
 
+### Diff review smoke checklist (issue #40)
+
+Use a disposable Git repository, never a production checkout. Commit two text
+files and a small binary file, then make unstaged changes to both text files.
+
+- Open the second file's hunk, then introduce an earlier-sorting file change.
+  Accept the original hunk and verify only that exact file and content are staged.
+- Open a new review, change the selected hunk's added text without changing its
+  line range, then accept or reject. The action must fail with a stale-review
+  error and leave both the index and working files unchanged.
+- Repeat with index-base drift (stage a different version externally).
+- Reject a fresh hunk after explicit native approval; verify unrelated working
+  edits and staged content remain unchanged. Cancel approval and verify no writes.
+- Inspect rename and binary review states; no text-hunk action should be offered
+  for a rename or binary diff. Record any limitation of the unstaged-only view.
+- Verify the per-file action report, refresh, and explicitly select the next
+  hunk; the old inline widget must never target a reassigned ID.
+
+Record OS, commit, Git version and results in #40. Automated regression tests
+do not substitute for this interactive checklist.
+
 ## Recommended sequencing
 
 1. Navigation and terminal/debug lifecycle hardening (current increment).
