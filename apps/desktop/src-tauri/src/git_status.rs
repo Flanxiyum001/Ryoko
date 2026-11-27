@@ -83,7 +83,7 @@ fn normalized(path: &str) -> String {
 
 fn repository_root(root: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args(["rev-parse", "--show-toplevel"])
         .stdin(Stdio::null())
         .output()
@@ -100,7 +100,7 @@ fn repository_root(root: &Path) -> Option<PathBuf> {
 pub fn working_tree_changes(root: &Path) -> Option<Vec<ChangeEntry>> {
     repository_root(root)?;
     let mut child = Command::new("git")
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args([
             "status",
             "--porcelain=v1",

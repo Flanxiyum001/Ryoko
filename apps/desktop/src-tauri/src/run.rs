@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::paths::create_directories_without_symlinks;
+use crate::paths::{create_directories_without_symlinks, host_path};
 use crate::workspace::{WorkspaceState, current_root};
 
 const MAX_GOAL_CHARS: usize = 8_000;
@@ -270,7 +270,7 @@ pub async fn sandbox_init(
     let cli = resolve_cli(&root)?;
     tauri::async_runtime::spawn_blocking(move || {
         let output = Command::new(&cli)
-            .current_dir(&root)
+            .current_dir(host_path(&root))
             .args(["sandbox", "init", "--repo", ".", "--json"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -383,7 +383,7 @@ pub fn start_run(
 
     let mut command = Command::new(&cli);
     command
-        .current_dir(&root)
+        .current_dir(host_path(&root))
         .arg("run")
         .args(["--repo", "."])
         .args(["--event-log"])
@@ -520,7 +520,7 @@ pub async fn validate_review(
     let timeout = timeout_secs.unwrap_or(300).clamp(1, 1_800);
     let mut command = Command::new(cli);
     command
-        .current_dir(&root)
+        .current_dir(host_path(&root))
         .args(["check", "--repo", ".", "--sandbox-image", image])
         .args(["--timeout-secs", &timeout.to_string(), "--json"])
         .stdin(Stdio::null())
@@ -606,6 +606,131 @@ fn signal_group(pid: u32, signal: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(windows)]
+fn suspend_or_resume_process_tree(root_pid: u32, suspend: bool) -> Result<(), String> {
+    use std::collections::HashSet;
+    use std::ffi::c_void;
+
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+    const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+    const INVALID_HANDLE_VALUE: *mut c_void = (-1isize) as *mut c_void;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_process_id: u32,
+        th32_default_heap_id: usize,
+        th32_module_id: u32,
+        cnt_threads: u32,
+        th32_parent_process_id: u32,
+        pc_pri_class_base: i32,
+        dw_flags: u32,
+        sz_exe_file: [u16; 260],
+    }
+
+    #[repr(C)]
+    struct ThreadEntry32 {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_thread_id: u32,
+        th32_owner_process_id: u32,
+        tp_base_pri: i32,
+        tp_delta_pri: i32,
+        dw_flags: u32,
+    }
+
+    unsafe extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> *mut c_void;
+        fn Process32FirstW(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(h_snapshot: *mut c_void, lppe: *mut ProcessEntry32W) -> i32;
+        fn Thread32First(h_snapshot: *mut c_void, lpte: *mut ThreadEntry32) -> i32;
+        fn Thread32Next(h_snapshot: *mut c_void, lpte: *mut ThreadEntry32) -> i32;
+        fn OpenThread(
+            dw_desired_access: u32,
+            b_inherit_handle: i32,
+            dw_thread_id: u32,
+        ) -> *mut c_void;
+        fn SuspendThread(h_thread: *mut c_void) -> u32;
+        fn ResumeThread(h_thread: *mut c_void) -> u32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+    }
+
+    // Collect root_pid and any child processes so the entire run tree pauses.
+    let mut pids = HashSet::from([root_pid]);
+    // SAFETY: standard Win32 Toolhelp32 snapshot enumeration; handles are closed.
+    let proc_snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if proc_snap != INVALID_HANDLE_VALUE && !proc_snap.is_null() {
+        let mut edges = Vec::new();
+        let mut entry = ProcessEntry32W {
+            dw_size: std::mem::size_of::<ProcessEntry32W>() as u32,
+            cnt_usage: 0,
+            th32_process_id: 0,
+            th32_default_heap_id: 0,
+            th32_module_id: 0,
+            cnt_threads: 0,
+            th32_parent_process_id: 0,
+            pc_pri_class_base: 0,
+            dw_flags: 0,
+            sz_exe_file: [0; 260],
+        };
+        let mut ok = unsafe { Process32FirstW(proc_snap, &mut entry) };
+        while ok != 0 {
+            edges.push((entry.th32_parent_process_id, entry.th32_process_id));
+            ok = unsafe { Process32NextW(proc_snap, &mut entry) };
+        }
+        unsafe { CloseHandle(proc_snap) };
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &(parent, child) in &edges {
+                if pids.contains(&parent) && pids.insert(child) {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    let thread_snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if thread_snap == INVALID_HANDLE_VALUE || thread_snap.is_null() {
+        return Err("cannot inspect run threads on Windows".to_owned());
+    }
+    let mut entry = ThreadEntry32 {
+        dw_size: std::mem::size_of::<ThreadEntry32>() as u32,
+        cnt_usage: 0,
+        th32_thread_id: 0,
+        th32_owner_process_id: 0,
+        tp_base_pri: 0,
+        tp_delta_pri: 0,
+        dw_flags: 0,
+    };
+    let mut touched = 0usize;
+    let mut ok = unsafe { Thread32First(thread_snap, &mut entry) };
+    while ok != 0 {
+        if pids.contains(&entry.th32_owner_process_id) {
+            let handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32_thread_id) };
+            if !handle.is_null() {
+                let result = if suspend {
+                    unsafe { SuspendThread(handle) }
+                } else {
+                    unsafe { ResumeThread(handle) }
+                };
+                unsafe { CloseHandle(handle) };
+                if result != u32::MAX {
+                    touched += 1;
+                }
+            }
+        }
+        ok = unsafe { Thread32Next(thread_snap, &mut entry) };
+    }
+    unsafe { CloseHandle(thread_snap) };
+    if touched == 0 {
+        return Err("the run has already stopped".to_owned());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn pause_run(state: State<'_, RunState>) -> Result<RunStatus, String> {
     let active = state
@@ -616,23 +741,20 @@ pub fn pause_run(state: State<'_, RunState>) -> Result<RunStatus, String> {
         .as_ref()
         .ok_or_else(|| "no run is active".to_owned())?;
     #[cfg(unix)]
-    {
-        signal_group(run.pid, "-STOP")?;
-        state.paused.store(true, Ordering::SeqCst);
-        Ok(snapshot(
-            true,
-            true,
-            None,
-            Some(run.event_log.clone()),
-            Some(run.started_ms),
-            &run.log_path,
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = run;
-        Err("pause is not supported on this platform; cancel the run instead".to_owned())
-    }
+    signal_group(run.pid, "-STOP")?;
+    #[cfg(windows)]
+    suspend_or_resume_process_tree(run.pid, true)?;
+    #[cfg(not(any(unix, windows)))]
+    return Err("pause is not supported on this platform; cancel the run instead".to_owned());
+    state.paused.store(true, Ordering::SeqCst);
+    Ok(snapshot(
+        true,
+        true,
+        None,
+        Some(run.event_log.clone()),
+        Some(run.started_ms),
+        &run.log_path,
+    ))
 }
 
 #[tauri::command]
@@ -645,32 +767,32 @@ pub fn resume_run(state: State<'_, RunState>) -> Result<RunStatus, String> {
         .as_ref()
         .ok_or_else(|| "no run is active".to_owned())?;
     #[cfg(unix)]
-    {
-        signal_group(run.pid, "-CONT")?;
-        state.paused.store(false, Ordering::SeqCst);
-        Ok(snapshot(
-            true,
-            false,
-            None,
-            Some(run.event_log.clone()),
-            Some(run.started_ms),
-            &run.log_path,
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = run;
-        Err("resume is not supported on this platform; cancel the run instead".to_owned())
-    }
+    signal_group(run.pid, "-CONT")?;
+    #[cfg(windows)]
+    suspend_or_resume_process_tree(run.pid, false)?;
+    #[cfg(not(any(unix, windows)))]
+    return Err("resume is not supported on this platform; cancel the run instead".to_owned());
+    state.paused.store(false, Ordering::SeqCst);
+    Ok(snapshot(
+        true,
+        false,
+        None,
+        Some(run.event_log.clone()),
+        Some(run.started_ms),
+        &run.log_path,
+    ))
 }
 
 #[tauri::command]
 pub fn cancel_run(state: State<'_, RunState>) -> Result<RunStatus, String> {
-    let mut active = state
-        .active
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let Some(mut run) = active.take() else {
+    let run = {
+        let mut active = state
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        active.take()
+    };
+    let Some(mut run) = run else {
         state.paused.store(false, Ordering::SeqCst);
         return Ok(RunStatus::idle());
     };

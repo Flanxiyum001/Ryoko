@@ -143,9 +143,9 @@ fn run_install(root: &Path, source: &Path, sha256: Option<&str>) -> Result<Strin
     let cli = resolve_cli(root)?;
     let mut command = Command::new(cli);
     command
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args(["plugin", "install"])
-        .arg(source)
+        .arg(crate::paths::host_path(source))
         .args(["--dir", ".ryoko/plugins"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

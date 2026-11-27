@@ -70,6 +70,30 @@ pub enum BuildSandboxError {
     OutputLimit,
 }
 
+/// Strips Windows extended-length verbatim prefixes (`\\?\` and `\\?\UNC\`)
+/// before passing canonicalized paths to Docker/Podman bind mounts, `docker
+/// build`, or `cmd.exe`, which reject `\\?\` paths.
+fn host_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc) = raw
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| raw.strip_prefix(r"\\?\unc\"))
+    {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        let bytes = stripped.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+        {
+            return PathBuf::from(stripped);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// The complete `docker run` argument list. It is a pure function so the
 /// hardening flags can be asserted without a container runtime.
 fn run_arguments(
@@ -80,6 +104,7 @@ fn run_arguments(
     command: &str,
     artifacts: Option<&Path>,
 ) -> Vec<String> {
+    let host_root = host_path(root);
     let mut args: Vec<String> = vec![
         "run".to_owned(),
         "--rm".to_owned(),
@@ -106,14 +131,15 @@ fn run_arguments(
         "--mount".to_owned(),
         format!(
             "type=bind,source={},target={WORKDIR},readonly",
-            root.display()
+            host_root.display()
         ),
     ];
     if let Some(artifacts) = artifacts {
+        let host_artifacts = host_path(artifacts);
         args.push("--mount".to_owned());
         args.push(format!(
             "type=bind,source={},target={ARTIFACT_MOUNT}",
-            artifacts.display()
+            host_artifacts.display()
         ));
     }
     args.extend([
@@ -317,14 +343,16 @@ impl BuildSandbox {
             return Err(BuildSandboxError::InvalidConfiguration);
         }
         let runtime = self.resolve_runtime().await?;
+        let host_dockerfile = host_path(&dockerfile);
+        let host_root = host_path(&root);
         let mut process = Command::new(runtime);
         process.args([
             "build",
             "--file",
-            &dockerfile.to_string_lossy(),
+            &host_dockerfile.to_string_lossy(),
             "--tag",
             tag,
-            &root.to_string_lossy(),
+            &host_root.to_string_lossy(),
         ]);
         run_bounded_with_limit(process, timeout, MAX_BUILD_OUTPUT_BYTES).await
     }
@@ -347,7 +375,7 @@ impl BuildSandbox {
             process.args(["-c", command]);
             process
         };
-        process.current_dir(root);
+        process.current_dir(host_path(root));
         run_bounded(process, timeout).await
     }
 
@@ -670,5 +698,39 @@ mod tests {
         ] {
             assert_ne!(backend, BuildBackend::UnsafeHost);
         }
+    }
+
+    #[test]
+    fn host_path_strips_windows_verbatim_prefixes_for_mounts() {
+        assert_eq!(
+            host_path(Path::new(r"\\?\C:\Users\dev\repo")),
+            PathBuf::from(r"C:\Users\dev\repo")
+        );
+        assert_eq!(
+            host_path(Path::new(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+        assert_eq!(
+            host_path(Path::new("/tmp/repo")),
+            PathBuf::from("/tmp/repo")
+        );
+
+        let args = run_arguments(
+            "ryoko-check-1",
+            "1000:1000",
+            Path::new(r"\\?\C:\Users\dev\repo"),
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "cargo test",
+            Some(Path::new(r"\\?\C:\Users\dev\artifacts")),
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == r"type=bind,source=C:\Users\dev\repo,target=/workspace,readonly")
+        );
+        assert!(
+            args.iter().any(
+                |arg| arg == r"type=bind,source=C:\Users\dev\artifacts,target=/ryoko-artifacts"
+            )
+        );
     }
 }

@@ -531,13 +531,72 @@ pub async fn write_file(
         let _ = fs::remove_file(&temp);
         return Err(format!("cannot save {path}: {error}"));
     }
-    // Avoid the destructive delete-before-rename fallback on Windows: a failed
-    // rename must never remove the existing document. Windows native atomic
-    // replacement will need a dedicated implementation for full parity.
-    fs::rename(&temp, &target).map_err(|error| {
+    replace_file_atomically(&temp, &target).map_err(|error| {
         let _ = fs::remove_file(&temp);
         format!("cannot save {path}: {error}")
     })
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(
+    temp: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    const REPLACEFILE_IGNORE_MERGE_ERRORS: u32 = 0x0000_0002;
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+
+    unsafe extern "system" {
+        fn ReplaceFileW(
+            lp_replaced_file_name: *const u16,
+            lp_replacement_file_name: *const u16,
+            lp_backup_file_name: *const u16,
+            dw_replace_flags: u32,
+            lp_exclude: *mut c_void,
+            lp_reserved: *mut c_void,
+        ) -> i32;
+    }
+
+    let replaced: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let replacement: Vec<u16> = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both pointers are valid NUL-terminated UTF-16 buffers that
+    // outlive the synchronous Win32 ReplaceFileW call.
+    let ok = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) {
+        return fs::rename(temp, target);
+    }
+    Err(error)
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(
+    temp: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    fs::rename(temp, target)
 }
 
 #[cfg(test)]
@@ -613,5 +672,20 @@ mod permission_tests {
         for path in ["src/main.rs", "apps/site/index.ts", ".github/README.md"] {
             assert!(!requires_sensitive_write_approval(path), "{path}");
         }
+    }
+
+    #[test]
+    fn replaces_existing_file_atomically_and_removes_temp() {
+        let dir = std::env::temp_dir().join(format!("ryoko-atomic-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("doc.txt");
+        let temp = dir.join(".ryoko-save.tmp");
+        std::fs::write(&target, "before").unwrap();
+        std::fs::write(&temp, "after").unwrap();
+        super::replace_file_atomically(&temp, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "after");
+        assert!(!temp.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

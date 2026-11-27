@@ -2,7 +2,8 @@
   "bundle": {
     "externalBin": [
       "binaries/ryoko-lsp",
-      "binaries/ryoko"
+      "binaries/ryoko",
+      "binaries/wasm-guardrail-worker"
     ]
   }
 }

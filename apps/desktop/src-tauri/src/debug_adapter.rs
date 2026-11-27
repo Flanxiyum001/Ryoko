@@ -15,6 +15,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::lsp_frame::{MAX_FRAME_BYTES, frame, read_frame};
+use crate::paths::host_path;
 use crate::workspace::{WorkspaceState, current_root};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -55,11 +56,14 @@ pub struct DapStatus {
 }
 
 fn stop_session(state: &DebugState) {
-    let mut guard = state
-        .session
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if let Some(mut session) = guard.take() {
+    let session = {
+        let mut guard = state
+            .session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard.take()
+    };
+    if let Some(mut session) = session {
         let _ = session.child.kill();
         let _ = session.child.wait();
     }
@@ -109,7 +113,7 @@ pub fn dap_start(
     args: Option<Vec<String>>,
 ) -> Result<DapStatus, String> {
     stop_session(&state);
-    let root = current_root(&workspace)?;
+    let root = host_path(&current_root(&workspace)?);
     let adapter = validate_adapter(&adapter)?;
     let args = args.unwrap_or_default();
     validate_args(&args)?;

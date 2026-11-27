@@ -147,6 +147,8 @@ pub fn lsp_start(
     };
     let registry = LspRegistry::load(&root)?;
 
+    let mut started = Vec::new();
+    let mut failed = Vec::new();
     let mut targets: Vec<(String, PathBuf, Vec<String>)> = vec![(
         RYOKO_LSP_ID.to_owned(),
         resolve_binary(RYOKO_LSP_ID)?,
@@ -155,16 +157,15 @@ pub fn lsp_start(
     // Opening an untrusted repository must not execute its configured
     // language-server commands without an explicit operator approval.
     for server in registry.servers.iter().filter(|_| allow_external_servers) {
-        targets.push((
-            server.id.clone(),
-            resolve_binary(&server.command)
-                .map_err(|_| format!("server {} has no resolvable command", server.id))?,
-            server.args.clone(),
-        ));
+        match resolve_binary(&server.command) {
+            Ok(binary) => targets.push((server.id.clone(), binary, server.args.clone())),
+            Err(_) => failed.push(format!(
+                "{}: command '{}' not found on PATH",
+                server.id, server.command
+            )),
+        }
     }
 
-    let mut started = Vec::new();
-    let mut failed = Vec::new();
     let mut children = state
         .children
         .lock()
@@ -193,7 +194,7 @@ fn spawn_server(
 ) -> Result<Child, String> {
     let mut command = Command::new(binary);
     command
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -530,7 +530,7 @@ fn docs_context(root: &Path, query: &str) -> Result<String, String> {
 
 fn git_root(root: &Path) -> Result<(), String> {
     let output = Command::new("git")
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args(["rev-parse", "--show-toplevel"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -564,7 +564,7 @@ fn safe_diff_path(path: &str) -> bool {
 
 fn safe_diff_paths(root: &Path) -> Result<Vec<String>, String> {
     let output = Command::new("git")
-        .current_dir(root)
+        .current_dir(crate::paths::host_path(root))
         .args([
             "diff",
             "--name-only",
@@ -609,7 +609,7 @@ pub(crate) fn git_diff_context(root: &Path) -> Result<String, String> {
         return Err("there are no non-sensitive tracked working-tree changes to pin".to_owned());
     }
     let mut command = Command::new("git");
-    command.current_dir(root).args([
+    command.current_dir(crate::paths::host_path(root)).args([
         "diff",
         "--no-ext-diff",
         "--no-textconv",

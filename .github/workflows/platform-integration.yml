@@ -72,17 +72,19 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then BIN="$BIN.exe"; fi
           "$BIN" --help
 
-      - name: Build native language-server sidecar
+      - name: Build native language-server and guardrail worker sidecars
         shell: bash
         run: |
           set -euo pipefail
           HOST="$(rustc -vV | sed -n 's/^host: //p')"
           test -n "$HOST"
           cargo build --locked -p ryoko-native --bin ryoko-lsp
+          cargo build --locked -p ryoko-sandbox --bin wasm-guardrail-worker
           mkdir -p apps/desktop/src-tauri/binaries
           EXT=""
           if [[ "$RUNNER_OS" == "Windows" ]]; then EXT=".exe"; fi
           cp "target/debug/ryoko-lsp$EXT" "apps/desktop/src-tauri/binaries/ryoko-lsp-$HOST$EXT"
+          cp "target/debug/wasm-guardrail-worker$EXT" "apps/desktop/src-tauri/binaries/wasm-guardrail-worker-$HOST$EXT"
 
       # Linux Tauri compilation is covered by the Tauri shell job in ci.yml,
       # which installs WebKit once instead of repeating the slow apt download here.

@@ -136,17 +136,20 @@ jobs:
         working-directory: apps/desktop
         run: npm test
 
-      - name: Build ryoko-lsp sidecar
+      - name: Build ryoko-lsp and wasm-guardrail-worker sidecars
         shell: bash
         run: |
           set -euo pipefail
           cargo build --locked --release -p ryoko-native --bin ryoko-lsp --target "${{ matrix.target }}"
+          cargo build --locked --release -p ryoko-sandbox --bin wasm-guardrail-worker --target "${{ matrix.target }}"
           mkdir -p apps/desktop/src-tauri/binaries
-          BIN="target/${{ matrix.target }}/release/ryoko-lsp"
-          if [ ! -f "$BIN" ]; then BIN="$BIN.exe"; fi
-          DEST="apps/desktop/src-tauri/binaries/ryoko-lsp-${{ matrix.target }}"
-          if [ "${{ runner.os }}" = "Windows" ]; then DEST="$DEST.exe"; fi
-          cp "$BIN" "$DEST"
+          SUFFIX=""
+          if [ "${{ runner.os }}" = "Windows" ]; then SUFFIX=".exe"; fi
+          for BINARY in ryoko-lsp wasm-guardrail-worker; do
+            SOURCE="target/${{ matrix.target }}/release/$BINARY$SUFFIX"
+            test -f "$SOURCE"
+            cp "$SOURCE" "apps/desktop/src-tauri/binaries/$BINARY-${{ matrix.target }}$SUFFIX"
+          done
 
       - name: Build native installers
         working-directory: apps/desktop

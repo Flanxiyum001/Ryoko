@@ -78,6 +78,30 @@ pub fn create_directories_without_symlinks(root: &Path, parent: &Path) -> Result
     Ok(())
 }
 
+/// Strips Windows extended-length verbatim prefixes (`\\?\` and `\\?\UNC\`)
+/// before passing canonicalized paths to external shells, language servers,
+/// debuggers, or build tools that reject `\\?\` paths.
+pub fn host_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc) = raw
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| raw.strip_prefix(r"\\?\unc\"))
+    {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+        let bytes = stripped.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+        {
+            return PathBuf::from(stripped);
+        }
+    }
+    path.to_path_buf()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +112,22 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn host_path_strips_windows_verbatim_prefixes() {
+        assert_eq!(
+            host_path(Path::new(r"\\?\C:\Users\dev\project")),
+            PathBuf::from(r"C:\Users\dev\project")
+        );
+        assert_eq!(
+            host_path(Path::new(r"\\?\UNC\files\share\project")),
+            PathBuf::from(r"\\files\share\project")
+        );
+        assert_eq!(
+            host_path(Path::new("/home/dev/project")),
+            PathBuf::from("/home/dev/project")
+        );
     }
 
     #[test]
