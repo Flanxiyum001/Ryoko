@@ -1,0 +1,93 @@
+name: Desktop installer smoke evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_run_id:
+        description: Successful unsigned desktop-preview Actions run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify-source:
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Verify selected run belongs to the successful preview workflow
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.preview_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          sha="$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq             '. | select(.path == ".github/workflows/desktop-preview.yml" and .status == "completed" and .conclusion == "success" and .head_repository.full_name == .repository.full_name) | .head_sha')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: verify-source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Download exact preview artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ryoko-preview-${{ matrix.target }}
+          path: ${{ runner.temp }}/ryoko-smoke-input
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.preview_run_id }}
+      - name: Install Linux display dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth dbus-x11
+      - name: Install, launch and remove DEB
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.verify-source.outputs.source_sha }}
+          SOURCE_RUN: ${{ inputs.preview_run_id }}
+        run: bash scripts/release/smoke-linux.sh
+      - name: Install, launch and uninstall MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ needs.verify-source.outputs.source_sha }}
+          SOURCE_RUN: ${{ inputs.preview_run_id }}
+        run: ./scripts/release/smoke-windows.ps1
+      - name: Mount DMG and assess installed app
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.verify-source.outputs.source_sha }}
+          SOURCE_RUN: ${{ inputs.preview_run_id }}
+        run: bash scripts/release/smoke-macos.sh
+      - name: Upload bounded evidence (no environment dump)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-smoke-${{ matrix.target }}
+          path: ${{ runner.temp }}/ryoko-smoke-report.txt
+          if-no-files-found: error
+          retention-days: 14
