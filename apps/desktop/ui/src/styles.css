@@ -350,8 +350,8 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
 }
 .tree-dir:hover, .file-link:hover { background: transparent; }
 .file-link.active { color: var(--text-strong); background: var(--selection-bg); }
-.tree-actions { display: none; flex: none; align-items: center; gap: 2px; padding-right: var(--sp-2); }
-.tree-row:hover .tree-actions, .tree-row:focus-within .tree-actions { display: inline-flex; }
+.tree-actions { display: inline-flex; flex: none; align-items: center; gap: 2px; padding-right: var(--sp-2); opacity: 0; }
+.tree-row:hover .tree-actions, .tree-row:focus-within .tree-actions { opacity: 1; }
 .tree-action-btn {
   display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
   padding: 0; border: 0; border-radius: 3px; color: var(--muted); background: transparent; cursor: pointer;

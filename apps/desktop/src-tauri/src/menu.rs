@@ -118,7 +118,11 @@ pub const MENUS: &[(&str, &[Entry])] = &[
                 None,
             ),
             Command("view.togglePanel", "Toggle Panel", Some("CmdOrCtrl+J")),
-            Command("editor.splitRight", "Split Editor Right", Some("CmdOrCtrl+\\")),
+            Command(
+                "editor.splitRight",
+                "Split Editor Right",
+                Some("CmdOrCtrl+\\"),
+            ),
             Command("view.toggleMinimap", "Toggle Minimap", None),
             Command("view.resetLayout", "Reset Layout", None),
             Separator,
