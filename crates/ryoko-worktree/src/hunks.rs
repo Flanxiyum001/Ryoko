@@ -9,7 +9,7 @@
 //!
 //! Before applying, a selection is verified against a freshly captured patch:
 //! every hunk must still anchor to the same file identity (path and index
-//! base) and the same line ranges it was reviewed against, so a changed base
+//! base), exact line ranges and complete hunk content, so a changed base
 //! surfaces as an understandable conflict instead of an overwrite or a
 //! misleading success.
 use std::collections::{HashMap, HashSet};
@@ -126,6 +126,7 @@ pub struct StaleHunk {
 /// Outcome of verifying a selection against the freshly captured patch.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SelectionAudit {
+    /// IDs in the current patch, not the reviewed snapshot.
     pub fresh: Vec<usize>,
     pub stale: Vec<StaleHunk>,
 }
@@ -400,9 +401,9 @@ impl HunkPatch {
     /// `self` is the reviewed snapshot the caller selected from; `current` is
     /// the diff captured immediately before apply. A hunk stays fresh only
     /// when the same file identity (path and index base blob) still carries
-    /// the exact same hunk header in `current`, so a changed base, a moved
-    /// line range or a vanished difference is reported per file instead of
-    /// being applied blindly.
+    /// the exact same hunk header and complete body in `current`. IDs are
+    /// snapshot-local: fresh IDs refer to the current patch, not `self`.
+    /// Ambiguous matches and changed content are refused.
     pub fn verify_selection(
         &self,
         chosen: &[usize],
@@ -416,43 +417,47 @@ impl HunkPatch {
             return Err("invalid or repeated hunk ID".into());
         }
 
-        let mut fresh_anchors: HashSet<(String, String, String)> = HashSet::new();
-        let mut current_paths: HashMap<String, HashSet<String>> = HashMap::new();
-        for hunk in &current.hunks {
-            fresh_anchors.insert((hunk.path.clone(), hunk.base.clone(), hunk.header.clone()));
-            current_paths
-                .entry(hunk.path.clone())
-                .or_default()
-                .insert(hunk.base.clone());
-        }
-
+        let reviewed_bodies: Vec<_> = self.files.iter().flat_map(|file| &file.hunks).collect();
+        let current_bodies: Vec<_> = current
+            .files
+            .iter()
+            .flat_map(|file| &file.hunks)
+            .collect();
         let mut audit = SelectionAudit::default();
         let mut ordered = ids.into_iter().collect::<Vec<_>>();
         ordered.sort_unstable();
         for id in ordered {
             let hunk = &self.hunks[id - 1];
-            if current_paths.contains_key(&hunk.path)
-                && current_paths
-                    .get(&hunk.path)
-                    .is_some_and(|bases| bases.contains(&hunk.base))
-                && fresh_anchors.contains(&(
-                    hunk.path.clone(),
-                    hunk.base.clone(),
-                    hunk.header.clone(),
-                ))
+            let matching_base = |candidate: &ReviewHunk| {
+                candidate.path == hunk.path && candidate.base == hunk.base
+            };
+            let anchors: Vec<_> = current
+                .hunks
+                .iter()
+                .filter(|candidate| matching_base(candidate))
+                .filter(|candidate| candidate.header == hunk.header)
+                .collect();
+            if let [candidate] = anchors.as_slice()
+                && current_bodies[candidate.id - 1] == reviewed_bodies[id - 1]
+                && !audit.fresh.contains(&candidate.id)
             {
-                audit.fresh.push(id);
+                audit.fresh.push(candidate.id);
                 continue;
             }
-            let reason = if !current_paths.contains_key(&hunk.path) {
-                "reviewed file no longer has unstaged differences"
-            } else if current_paths
-                .get(&hunk.path)
-                .is_some_and(|bases| !bases.contains(&hunk.base))
+            let reason = if !current
+                .hunks
+                .iter()
+                .any(|candidate| candidate.path == hunk.path)
             {
+                "reviewed file no longer has unstaged differences"
+            } else if !current.hunks.iter().any(matching_base) {
                 "index base changed for this file"
-            } else {
+            } else if anchors.is_empty() {
                 "reviewed line range no longer matches the file"
+            } else if anchors.len() > 1 {
+                "reviewed hunk has ambiguous matches"
+            } else {
+                "reviewed hunk content changed or was selected more than once"
             };
             audit.stale.push(StaleHunk {
                 id,
@@ -788,16 +793,28 @@ mod tests {
     }
 
     #[test]
-    fn verified_selection_takes_its_content_from_the_fresh_patch() {
+    fn verified_selection_refuses_changed_content_at_the_same_anchor() {
         let reviewed = HunkPatch::parse(PATCH).unwrap();
         let current = HunkPatch::parse(
             "diff --git a/src/main.rs b/src/main.rs\nindex 1111111..2222222 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old\n+fresh\n@@ -20,1 +20,1 @@\n-older\n+newer\n",
         )
         .unwrap();
-        let staged = reviewed.select_verified(&[1], &current).unwrap();
-        assert!(staged.contains("+fresh"), "{staged}");
-        assert!(!staged.contains("+new\n"));
-        assert!(staged.contains("@@ -1,1 +1,1 @@"));
+        let error = reviewed.select_verified(&[1], &current).unwrap_err();
+        assert!(error.contains("content changed"), "{error}");
+    }
+
+    #[test]
+    fn verified_selection_remaps_shifted_ids_to_the_reviewed_file() {
+        let reviewed = HunkPatch::parse(PATCH).unwrap();
+        let unrelated = "diff --git a/a.rs b/a.rs\nindex 3333333..4444444 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let current = HunkPatch::parse(&format!("{unrelated}{PATCH}")).unwrap();
+        let audit = reviewed.verify_selection(&[1], &current).unwrap();
+        assert_eq!(audit.fresh, vec![2]);
+        assert!(audit.stale.is_empty());
+        let selected = reviewed.select_verified(&[1], &current).unwrap();
+        assert!(selected.contains("+new\n"));
+        assert!(!selected.contains("a/a.rs"));
+        assert!(!selected.contains("+newer"));
     }
 
     const NEW_FILE: &str = "diff --git a/new.rs b/new.rs\nnew file mode 100644\nindex 0000000..3333333\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1,1 @@\n+one\n@@ -0,0 +3,1 @@\n+two\n";

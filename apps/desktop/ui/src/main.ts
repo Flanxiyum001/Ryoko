@@ -2072,7 +2072,7 @@ async function refreshHunks(): Promise<void> {
       jump.textContent = 'Review diff';
       jump.title = 'Open this hunk in the Monaco diff editor with inline actions';
       jump.addEventListener('click', () => {
-        void openHunkDiff(hunk);
+        void openHunkDiff(hunk, snapshot, openedRoot);
       });
       const preview = document.createElement('pre');
       preview.className = 'hunk-preview';
@@ -2336,7 +2336,7 @@ function closeDiffReview(): void {
   }
 }
 
-function hunkWidget(hunk: GitHunk): monaco.editor.IContentWidget {
+function hunkWidget(hunk: GitHunk, snapshot: GitHunkSnapshot, root: string): monaco.editor.IContentWidget {
   const dom = document.createElement('div');
   dom.className = 'hunk-inline-actions';
   const accept = document.createElement('button');
@@ -2344,19 +2344,19 @@ function hunkWidget(hunk: GitHunk): monaco.editor.IContentWidget {
   accept.className = 'button primary compact';
   accept.textContent = 'Accept hunk';
   accept.title = 'Stage only this hunk after native confirmation';
-  accept.addEventListener('click', () => void actOnHunk('accept', hunk));
+  accept.addEventListener('click', () => void actOnHunk('accept', hunk, snapshot, root));
   const reject = document.createElement('button');
   reject.type = 'button';
   reject.className = 'button ghost compact';
   reject.textContent = 'Reject hunk';
   reject.title = 'Revert only this hunk from the working files after native confirmation';
-  reject.addEventListener('click', () => void actOnHunk('reject', hunk));
+  reject.addEventListener('click', () => void actOnHunk('reject', hunk, snapshot, root));
   const revise = document.createElement('button');
   revise.type = 'button';
   revise.className = 'button ghost compact';
   revise.textContent = 'Ask agent to revise';
   revise.title = 'Start a new validated worktree run with this hunk as context';
-  revise.addEventListener('click', () => void actOnHunk('revise', hunk));
+  revise.addEventListener('click', () => void actOnHunk('revise', hunk, snapshot, root));
   dom.append(accept, reject, revise);
   return {
     getId: () => `ryoko-hunk-${hunk.id}-${hunk.path}`,
@@ -2371,14 +2371,19 @@ function hunkWidget(hunk: GitHunk): monaco.editor.IContentWidget {
   };
 }
 
-async function openHunkDiff(hunk: GitHunk): Promise<void> {
-  if (!state.root) return;
+async function openHunkDiff(hunk: GitHunk, snapshot: GitHunkSnapshot, root: string): Promise<void> {
+  if (state.root !== root) return;
   if ([...openFiles.values()].some((file) => file.dirty)) {
     setStatus('Save or discard unsaved Monaco edits before reviewing hunks.');
     return;
   }
   try {
     const review = await invoke<ReviewFileContent>('read_review_file', { path: hunk.path });
+    const current = await invoke<GitHunkSnapshot>('list_review_hunks');
+    if (state.root !== root || current.patch !== snapshot.patch) {
+      setStatus('Review changed while opening the diff. Refresh and reselect the hunk.');
+      return;
+    }
     clearDiffEditor();
     const languageId = detectEditorLanguage(hunk.path, review.modified, monaco.languages.getLanguages());
     const suffix = encodeURIComponent(hunk.path).replaceAll('%', '_');
@@ -2399,8 +2404,8 @@ async function openHunkDiff(hunk: GitHunk): Promise<void> {
     emptyEditor.classList.add('hidden');
     diffEditor.layout();
     const modified = diffEditor.getModifiedEditor();
-    for (const candidate of (gitHunks?.hunks ?? []).filter((item) => item.path === hunk.path)) {
-      const widget = hunkWidget(candidate);
+    for (const candidate of snapshot.hunks.filter((item) => item.path === hunk.path)) {
+      const widget = hunkWidget(candidate, snapshot, root);
       diffWidgets.push(widget);
       modified.addContentWidget(widget);
     }
@@ -2437,8 +2442,17 @@ async function validateAfterHunk(): Promise<void> {
   }
 }
 
-async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk): Promise<void> {
-  if (!gitHunks) return;
+async function actOnHunk(
+  action: 'accept' | 'reject' | 'revise', hunk: GitHunk, snapshot: GitHunkSnapshot, root: string,
+): Promise<void> {
+  if (state.root !== root) {
+    setStatus('Workspace changed. Reopen the diff before acting.');
+    return;
+  }
+  if ([...openFiles.values()].some((file) => file.dirty)) {
+    setStatus('Save or discard unsaved Monaco edits before applying hunks.');
+    return;
+  }
   if (action === 'revise') {
     const feedback = window.prompt(`Ask the agent to revise ${hunk.path}:`, '');
     if (!feedback?.trim()) return;
@@ -2463,7 +2477,7 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
     if (action === 'accept') {
       const report = await invoke<ReviewActionReport>('stage_review_hunks', {
         ids: [hunk.id],
-        expectedPatch: gitHunks.patch,
+        expectedPatch: snapshot.patch,
       });
       void refreshWorkbenchChanges();
       setStatus(
@@ -2473,7 +2487,7 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
     } else {
       const report = await invoke<ReviewActionReport>('reject_review_hunks', {
         ids: [hunk.id],
-        expectedPatch: gitHunks.patch,
+        expectedPatch: snapshot.patch,
       });
       void refreshWorkbenchChanges();
       setStatus(
@@ -2482,9 +2496,8 @@ async function actOnHunk(action: 'accept' | 'reject' | 'revise', hunk: GitHunk):
       );
     }
     await refreshHunks();
-    const remaining = gitHunks?.hunks.find((item) => item.id === hunk.id);
-    if (remaining) await openHunkDiff(remaining);
-    else closeDiffReview();
+    // IDs can be reassigned after a mutation; require an explicit new selection.
+    closeDiffReview();
     await validateAfterHunk();
   } catch (error) {
     setStatus(`Hunk ${action} failed: ` + (error instanceof Error ? error.message : String(error)));

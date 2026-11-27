@@ -108,6 +108,7 @@ fn git_diff(root: &Path) -> Result<String, String> {
             "--no-textconv",
             "--no-color",
             "--binary",
+            "--full-index",
             "--ignore-submodules=all",
             "--",
             ".",
@@ -309,7 +310,9 @@ fn verified_selection(
     }
     let patch = current.select(&audit.fresh)?;
     let mut by_path: Vec<ReviewFileReport> = Vec::new();
-    for id in &audit.fresh {
+    let mut reviewed_ids = ids.to_vec();
+    reviewed_ids.sort_unstable();
+    for id in &reviewed_ids {
         let path = reviewed
             .hunks()
             .iter()
@@ -344,7 +347,7 @@ async fn run_review_action(
         .await
         .map_err(|_| "Git diff worker failed".to_owned())??;
     verified_selection(&expected_patch, &initial, &ids)?;
-    let parsed = hunks::HunkPatch::parse(&initial)?;
+    let parsed = hunks::HunkPatch::parse(&expected_patch)?;
     let selected = parsed
         .hunks()
         .iter()
@@ -399,18 +402,13 @@ async fn run_review_action(
     }
     let target = root.clone();
     let expected = expected_patch.clone();
-    let (applied_patch, report) = tauri::async_runtime::spawn_blocking(move || {
-        // Fail closed if a tool, extension or another process changed the
-        // unstaged diff while native approval was displayed.
-        let current = git_diff(&target)?;
-        verified_selection(&expected, &current, &ids)
-    })
-    .await
-    .map_err(|_| "Git staging worker failed".to_owned())??;
-    let target = root.clone();
     let cached = action == "stage";
-    tauri::async_runtime::spawn_blocking(move || {
-        apply_patch(&target, &applied_patch, cached, !cached)
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        // Revalidate and apply in one worker, without another async handoff.
+        let current = git_diff(&target)?;
+        let (applied_patch, report) = verified_selection(&expected, &current, &ids)?;
+        apply_patch(&target, &applied_patch, cached, !cached)?;
+        Ok::<_, String>(report)
     })
     .await
     .map_err(|_| "Git staging worker failed".to_owned())??;
@@ -518,6 +516,17 @@ mod tests {
         assert!(patch.contains("+new"));
         assert!(!patch.contains("generated.rs"));
         assert_eq!(report.len(), 1);
+        assert_eq!(report[0].path, "src/main.rs");
+        assert_eq!(report[0].hunk_ids, vec![1]);
+    }
+
+    #[test]
+    fn shifted_ids_preserve_original_report_and_exact_patch() {
+        let earlier = "diff --git a/a.rs b/a.rs\nindex 3333333..4444444 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        let current = format!("{earlier}{SNAPSHOT}");
+        let (patch, report) = verified_selection(SNAPSHOT, &current, &[1]).unwrap();
+        assert!(patch.contains("+new"));
+        assert!(!patch.contains("a/a.rs"));
         assert_eq!(report[0].path, "src/main.rs");
         assert_eq!(report[0].hunk_ids, vec![1]);
     }
