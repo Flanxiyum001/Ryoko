@@ -599,6 +599,219 @@ fn replace_file_atomically(
     fs::rename(temp, target)
 }
 
+async fn confirm_sensitive_path_action(
+    path: &str,
+    action: &str,
+    root: &std::path::Path,
+    state: &State<'_, WorkspaceState>,
+    app: &AppHandle,
+) -> Result<(), String> {
+    if !requires_sensitive_write_approval(path) {
+        return Ok(());
+    }
+    let description = format!(
+        "Allow {action} sensitive project path '{path}' in '{}'? \
+         \n\nDeny unless you explicitly intended this change.",
+        root.display()
+    );
+    let app_handle = app.clone();
+    let approved = tauri::async_runtime::spawn_blocking(move || {
+        app_handle
+            .dialog()
+            .message(description)
+            .title("Ryoko — sensitive file permission")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Approve once".to_owned(),
+                "Deny".to_owned(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "could not display permission dialog".to_owned())?;
+    if !approved {
+        return Err(format!("sensitive path action denied by user: {path}"));
+    }
+    if current_root(state)? != root {
+        return Err("workspace changed while awaiting permission; action cancelled".to_owned());
+    }
+    Ok(())
+}
+
+fn create_file_in_root(root: &std::path::Path, path: &str) -> Result<(), String> {
+    let candidate = safe_join(root, path)?;
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| format!("invalid file path: {path}"))?;
+    create_directories_without_symlinks(root, parent)?;
+    let real_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve {}: {error}", parent.display()))?;
+    if !real_parent.starts_with(root) {
+        return Err(format!("path escapes the workspace: {path}"));
+    }
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| format!("invalid file path: {path}"))?;
+    let target = real_parent.join(file_name);
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(format!("file or folder already exists: {path}"));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o644);
+    }
+    options
+        .open(&target)
+        .map_err(|error| format!("cannot create {path}: {error}"))?;
+    Ok(())
+}
+
+fn create_directory_in_root(root: &std::path::Path, path: &str) -> Result<(), String> {
+    let candidate = safe_join(root, path)?;
+    if candidate == root {
+        return Err("cannot create workspace root".to_owned());
+    }
+    if fs::symlink_metadata(&candidate).is_ok() {
+        return Err(format!("file or folder already exists: {path}"));
+    }
+    create_directories_without_symlinks(root, &candidate)
+}
+
+fn rename_path_in_root(
+    root: &std::path::Path,
+    old_path: &str,
+    new_path: &str,
+) -> Result<(), String> {
+    let old_candidate = safe_join(root, old_path)?;
+    let new_candidate = safe_join(root, new_path)?;
+    if old_candidate == root || new_candidate == root {
+        return Err("cannot rename the workspace root".to_owned());
+    }
+    let old_meta = fs::symlink_metadata(&old_candidate)
+        .map_err(|error| format!("cannot access {old_path}: {error}"))?;
+    if old_meta.file_type().is_symlink() {
+        return Err(format!("refusing to rename a symlink: {old_path}"));
+    }
+    let old_parent = old_candidate
+        .parent()
+        .ok_or_else(|| format!("invalid path: {old_path}"))?;
+    let real_old_parent = old_parent
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve {}: {error}", old_parent.display()))?;
+    if !real_old_parent.starts_with(root) {
+        return Err(format!("path escapes the workspace: {old_path}"));
+    }
+    let old_name = old_candidate
+        .file_name()
+        .ok_or_else(|| format!("invalid path: {old_path}"))?;
+    let old_target = real_old_parent.join(old_name);
+
+    let new_parent = new_candidate
+        .parent()
+        .ok_or_else(|| format!("invalid destination path: {new_path}"))?;
+    create_directories_without_symlinks(root, new_parent)?;
+    let real_new_parent = new_parent
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve {}: {error}", new_parent.display()))?;
+    if !real_new_parent.starts_with(root) {
+        return Err(format!("path escapes the workspace: {new_path}"));
+    }
+    let new_name = new_candidate
+        .file_name()
+        .ok_or_else(|| format!("invalid destination path: {new_path}"))?;
+    let new_target = real_new_parent.join(new_name);
+    if old_target == new_target {
+        return Ok(());
+    }
+    if fs::symlink_metadata(&new_target).is_ok() {
+        return Err(format!("destination already exists: {new_path}"));
+    }
+    fs::rename(&old_target, &new_target)
+        .map_err(|error| format!("cannot rename {old_path} to {new_path}: {error}"))
+}
+
+fn delete_path_in_root(root: &std::path::Path, path: &str) -> Result<(), String> {
+    let candidate = safe_join(root, path)?;
+    if candidate == root {
+        return Err("cannot delete the workspace root".to_owned());
+    }
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("cannot delete {path}: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("refusing to delete a symlink: {path}"));
+    }
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| format!("invalid path: {path}"))?;
+    let real_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve {}: {error}", parent.display()))?;
+    if !real_parent.starts_with(root) {
+        return Err(format!("path escapes the workspace: {path}"));
+    }
+    let name = candidate
+        .file_name()
+        .ok_or_else(|| format!("invalid path: {path}"))?;
+    let target = real_parent.join(name);
+    if metadata.is_dir() {
+        fs::remove_dir_all(&target).map_err(|error| format!("cannot delete {path}: {error}"))
+    } else {
+        fs::remove_file(&target).map_err(|error| format!("cannot delete {path}: {error}"))
+    }
+}
+
+#[tauri::command]
+pub async fn create_file(
+    path: String,
+    state: State<'_, WorkspaceState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let root = current_root(&state)?;
+    confirm_sensitive_path_action(&path, "creating", &root, &state, &app).await?;
+    create_file_in_root(&root, &path)
+}
+
+#[tauri::command]
+pub async fn create_directory(
+    path: String,
+    state: State<'_, WorkspaceState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let root = current_root(&state)?;
+    confirm_sensitive_path_action(&path, "creating", &root, &state, &app).await?;
+    create_directory_in_root(&root, &path)
+}
+
+#[tauri::command]
+pub async fn rename_path(
+    old_path: String,
+    new_path: String,
+    state: State<'_, WorkspaceState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let root = current_root(&state)?;
+    if requires_sensitive_write_approval(&old_path) {
+        confirm_sensitive_path_action(&old_path, "renaming", &root, &state, &app).await?;
+    } else if requires_sensitive_write_approval(&new_path) {
+        confirm_sensitive_path_action(&new_path, "renaming to", &root, &state, &app).await?;
+    }
+    rename_path_in_root(&root, &old_path, &new_path)
+}
+
+#[tauri::command]
+pub async fn delete_path(
+    path: String,
+    state: State<'_, WorkspaceState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let root = current_root(&state)?;
+    confirm_sensitive_path_action(&path, "deleting", &root, &state, &app).await?;
+    delete_path_in_root(&root, &path)
+}
+
 #[cfg(test)]
 mod permission_tests {
     use super::{
@@ -686,6 +899,39 @@ mod permission_tests {
         super::replace_file_atomically(&temp, &target).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "after");
         assert!(!temp.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn creates_renames_and_deletes_files_and_folders_within_workspace() {
+        let dir = std::env::temp_dir().join(format!("ryoko-workspace-crud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.canonicalize().unwrap();
+
+        super::create_directory_in_root(&root, "src/nested").unwrap();
+        assert!(root.join("src/nested").is_dir());
+
+        super::create_file_in_root(&root, "src/nested/hello.rs").unwrap();
+        assert!(root.join("src/nested/hello.rs").is_file());
+        assert!(super::create_file_in_root(&root, "src/nested/hello.rs").is_err());
+        assert!(super::create_file_in_root(&root, "../escape.rs").is_err());
+
+        super::rename_path_in_root(&root, "src/nested/hello.rs", "src/nested/renamed.rs").unwrap();
+        assert!(!root.join("src/nested/hello.rs").exists());
+        assert!(root.join("src/nested/renamed.rs").is_file());
+
+        super::create_file_in_root(&root, "src/nested/existing.rs").unwrap();
+        assert!(
+            super::rename_path_in_root(&root, "src/nested/renamed.rs", "src/nested/existing.rs")
+                .is_err()
+        );
+
+        super::delete_path_in_root(&root, "src/nested/renamed.rs").unwrap();
+        assert!(!root.join("src/nested/renamed.rs").exists());
+        super::delete_path_in_root(&root, "src").unwrap();
+        assert!(!root.join("src").exists());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -226,11 +226,28 @@ export function mountSettingsDialog(deps: SettingsPanelDeps): void {
     return line;
   }
 
+  let returnFocusTo: HTMLElement | null = null;
+  const closeDialog = (): void => {
+    dialog.classList.add('hidden');
+    if (returnFocusTo && document.contains(returnFocusTo)) {
+      returnFocusTo.focus();
+    }
+    returnFocusTo = null;
+  };
+
   openButton?.addEventListener('click', () => {
+    returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : openButton;
     dialog.classList.remove('hidden');
     void load();
+    closeButton.focus();
   });
-  closeButton.addEventListener('click', () => dialog.classList.add('hidden'));
+  closeButton.addEventListener('click', closeDialog);
+  dialog.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeDialog();
+    }
+  });
   saveProviders.addEventListener('click', async () => {
     if (providerBox.value.length > MAX_SETTINGS_TEXT) {
       deps.setStatus('Provider catalog exceeds 256 KiB.');

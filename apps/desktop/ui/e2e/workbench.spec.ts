@@ -42,6 +42,37 @@ test.beforeEach(async ({ page }) => {
             document.body.dataset.savedEncoding = args.encoding ?? 'utf-8';
             return;
           }
+          if (command === 'create_file') {
+            if (args.path in files) throw new Error(`file or folder already exists: ${args.path}`);
+            files[args.path] = '';
+            return;
+          }
+          if (command === 'create_directory') {
+            return;
+          }
+          if (command === 'rename_path') {
+            if (args.oldPath in files) {
+              files[args.newPath] = files[args.oldPath];
+              delete files[args.oldPath];
+            } else {
+              const prefix = `${args.oldPath}/`;
+              for (const key of Object.keys(files)) {
+                if (key.startsWith(prefix)) {
+                  files[`${args.newPath}/${key.slice(prefix.length)}`] = files[key];
+                  delete files[key];
+                }
+              }
+            }
+            return;
+          }
+          if (command === 'delete_path') {
+            delete files[args.path];
+            const prefix = `${args.path}/`;
+            for (const key of Object.keys(files)) {
+              if (key.startsWith(prefix)) delete files[key];
+            }
+            return;
+          }
           if (command === 'git_changes') return { isRepository: false, entries: [] };
           if (command === 'run_status') return { running: false, paused: false, exitCode: null, eventLog: null, startedMs: null, logTail: '' };
           if (command === 'lsp_registry') return { registry: { servers: [] } };
@@ -373,4 +404,63 @@ test('action icons retain labels and editor tab close behavior', async ({ page }
   await expect(close.locator('svg')).toHaveAttribute('data-icon', 'x');
   await close.click();
   await expect(page.getByRole('tab')).toHaveCount(0);
+});
+
+test('explorer creates, renames, and deletes files/folders and splits editor panes', async ({ page }) => {
+  await openProject(page);
+
+  // Create new folder.
+  await page.locator('#newFolderBtn').click();
+  const folderDialog = page.getByRole('dialog', { name: 'New folder' });
+  await folderDialog.getByRole('textbox', { name: 'New folder path' }).fill('components');
+  await folderDialog.getByRole('button', { name: 'Create' }).click();
+  await expect(page.locator('.tree-dir').filter({ hasText: 'components' })).toBeVisible();
+
+  // Create new file inside folder and edit it immediately.
+  await page.locator('#newFileBtn').click();
+  const fileDialog = page.getByRole('dialog', { name: 'New file' });
+  await fileDialog.getByRole('textbox', { name: 'New file path' }).fill('components/button.ts');
+  await fileDialog.getByRole('button', { name: 'Create' }).click();
+  await expect(page.getByRole('tab', { name: 'components/button.ts', exact: true }))
+    .toHaveAttribute('aria-selected', 'true');
+
+  // Open a second file and split editor right.
+  await openFile(page, 'main.ts');
+  await page.locator('#splitEditorBtn').click();
+  await expect(page.locator('#secondaryPane')).toBeVisible();
+  await expect(page.locator('#secondaryFileSelect')).toHaveValue('components/button.ts');
+  await page.locator('#secondaryFileSelect').selectOption('main.ts');
+  await expect(page.locator('#secondaryEditor')).toContainText('Hello Ryoko');
+  await page.locator('#closeSplitEditor').click();
+  await expect(page.locator('#secondaryPane')).toBeHidden();
+
+  // Rename file via Explorer action button.
+  await page.getByRole('button', { name: 'Rename components/button.ts' }).click({ force: true });
+  const renameDialog = page.getByRole('dialog', { name: 'Rename components/button.ts' });
+  await renameDialog.getByRole('textbox', { name: 'New path' }).fill('components/card.ts');
+  await renameDialog.getByRole('button', { name: 'Rename' }).click();
+  await expect(page.getByRole('tab', { name: 'components/card.ts', exact: true })).toBeVisible();
+
+  // Delete file with confirmation.
+  await page.getByRole('button', { name: 'Delete components/card.ts' }).click({ force: true });
+  const deleteDialog = page.getByRole('dialog', { name: 'Delete components/card.ts?' });
+  await deleteDialog.getByRole('button', { name: 'Delete' }).click();
+  await expect(page.getByRole('tab', { name: 'components/card.ts', exact: true })).toHaveCount(0);
+});
+
+test('supports keyboard navigation, skip link, and settings dialog focus restoration', async ({ page }) => {
+  await expect(page.locator('.skip-link')).toHaveAttribute('href', '#editorColumn');
+  await page.locator('#openSettings').click();
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings).toBeVisible();
+  await expect(page.locator('#settingsClose')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(settings).toBeHidden();
+  await expect(page.locator('#openSettings')).toBeFocused();
+
+  await openProject(page);
+  const firstTreeItem = page.locator('#fileList [role="treeitem"]').first();
+  await firstTreeItem.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.locator('#fileList [role="treeitem"]').nth(1)).toBeFocused();
 });

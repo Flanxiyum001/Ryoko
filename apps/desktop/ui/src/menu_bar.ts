@@ -19,6 +19,8 @@ export const MENUS: readonly MenuDefinition[] = [
     label: 'File',
     entries: [
       { command: 'workspace.openFolder' },
+      { command: 'workspace.newFile' },
+      { command: 'workspace.newFolder' },
       { command: 'workspace.openFile' },
       { command: 'workspace.openFileByPath' },
       { command: 'workbench.quickOpen' },
@@ -59,6 +61,7 @@ export const MENUS: readonly MenuDefinition[] = [
       { command: 'view.toggleSidebar' },
       { command: 'view.toggleInspector' },
       { command: 'view.togglePanel' },
+      { command: 'editor.splitRight' },
       { command: 'view.toggleMinimap' },
       { command: 'view.resetLayout' },
       { separator: true },
