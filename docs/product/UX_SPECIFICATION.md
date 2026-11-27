@@ -2,6 +2,10 @@
 
 Status: active specification for the Ryoko desktop workbench (`apps/desktop`, Tauri + Monaco) alongside the `ryoko-cli` terminal workflow. See [DESKTOP_ARCHITECTURE.md](../architecture/DESKTOP_ARCHITECTURE.md) and [DESKTOP_IDE_WORKBENCH.md](../architecture/DESKTOP_IDE_WORKBENCH.md) for the implemented IPC and shell contracts.
 
+## Implemented (experimental) and planned / unverified
+
+The interaction table below identifies existing code paths, not certified feature completeness. The layout, modes, states, onboarding and accessibility sections define product requirements; untested behavior remains a target. See the [Phase 4 IDE experience](../PHASE_4_IDE_EXPERIENCE.md) and [Phase 5 release trust plan](../PHASE_5_RELEASE_TRUST.md) for acceptance gates and evidence.
+
 ## Layout
 
 ```text
@@ -35,16 +39,16 @@ Mode is a view state. Switching never discards work and never starts work.
 
 | Area | Requirements | Status |
 | --- | --- | --- |
-| Command palette | Every command reachable and discoverable; shows keybinding | Implemented (`command_palette.ts`, `commands.ts`) |
-| Keybindings | Platform-aware defaults, configurable overrides, Vim/Emacs presets | Implemented (`keybindings.ts`, `keymap_preset.ts`) |
-| Tabs & splits | Dirty indicators, close confirmation, split editor right | Implemented (`editor_tabs.ts`, `#secondaryPane`) |
-| Explorer | Keyboard tree navigation, new file/folder, rename, delete with confirmation | Implemented (`tree.ts`, `workspace.rs`) |
-| Diff | Side-by-side Monaco diff, hunk staging/rejection, proposal review | Implemented (`proposal_review.ts`, `review.rs`) |
-| Agents | Status, model, elapsed time, tokens, cost, current tool, cancellable | Implemented (`mission.ts`, `agent_chat.ts`, `run.rs`) |
-| Review | Findings grouped by file, jump to line, severity filters | Implemented (`ryoko_review.ts`) |
-| Terminal & Debug | Local PTY terminal and DAP debugger workbench | Implemented (`terminal.rs`, `debug_adapter.rs`) |
-| Crash recovery | Opt-in atomic buffer snapshots with diff preview and consent on restart | Implemented (`recovery.rs`, `recovery.ts`) |
-| Errors | Human-readable message, actionable guidance, status bar + toast | Implemented (`toasts.ts`) |
+| Command palette | Every command reachable and discoverable; shows keybinding | Implemented (experimental) (`command_palette.ts`, `commands.ts`) |
+| Keybindings | Platform-aware defaults, configurable overrides, Vim/Emacs presets | Implemented (experimental) (`keybindings.ts`, `keymap_preset.ts`) |
+| Tabs & splits | Dirty indicators, close confirmation, split editor right | Implemented (experimental) (`editor_tabs.ts`, `#secondaryPane`) |
+| Explorer | Keyboard tree navigation, new file/folder, rename, delete with confirmation | Implemented (experimental) (`tree.ts`, `workspace.rs`) |
+| Diff | Side-by-side Monaco diff, hunk staging/rejection, proposal review | Implemented (experimental) (`proposal_review.ts`, `review.rs`) |
+| Agents | Status, model, elapsed time, tokens, cost, current tool, cancellable | Implemented (experimental) (`mission.ts`, `agent_chat.ts`, `run.rs`) |
+| Review | Findings grouped by file, jump to line, severity filters | Implemented (experimental) (`ryoko_review.ts`) |
+| Terminal & Debug | Local PTY terminal and DAP debugger workbench | Implemented (experimental) (`terminal.rs`, `debug_adapter.rs`) |
+| Crash recovery | Opt-in atomic buffer snapshots with diff preview and consent on restart | Implemented (experimental) (`recovery.rs`, `recovery.ts`) |
+| Errors | Human-readable message, actionable guidance, status bar + toast | Implemented (experimental) (`toasts.ts`) |
 
 ## Default keybindings
 
@@ -69,6 +73,8 @@ Panels expose explicit loading, empty, error, and ready states without claiming 
 
 ## Truthfulness
 
+These are required UI contracts, not a guarantee that every path has been independently validated. Human review and release/security gates must be verified against the corresponding execution evidence.
+
 The UI distinguishes:
 
 - "agent says complete" from "validated complete";
@@ -78,7 +84,9 @@ The UI distinguishes:
 
 Never show an optimistic success state for an operation the backend has not confirmed.
 
-## Accessibility
+## Accessibility — requirements and current evidence
+
+The renderer contains a skip link, landmarks, named controls, live regions, focus styles and reduced-motion rules. Existing renderer tests exercise selected keyboard navigation and settings focus restoration. Full keyboard-only traversal of every view, dialog focus containment/restoration, non-color status cues and native screen-reader verification remain unverified ([#47](https://github.com/Flanxiyum001/Ryoko/issues/47)). The following are requirements, not a conformance statement:
 
 - Skip-to-editor link (`Skip to editor`) and semantic landmarks (`nav`, `aside`, `main`, `role="tree"`, `role="tablist"`).
 - Keyboard access to every action, arrow-key navigation in menus, tabs, and the explorer tree, plus `Escape` handling and focus restoration in dialogs.
@@ -86,6 +94,8 @@ Never show an optimistic success state for an operation the backend has not conf
 - `@media (prefers-reduced-motion: reduce)` disables CSS transitions/animations and Monaco smooth scrolling.
 
 ## Onboarding
+
+This is the intended flow; native credential storage and onboarding must be validated on each supported platform before claiming production readiness.
 
 Open or create a project → index → configure a provider (test connection) →
 optional GitHub connection → first-run tour. Credentials are entered into a
