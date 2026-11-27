@@ -19,6 +19,7 @@
 mod manifest;
 mod run;
 mod types;
+pub mod worker;
 
 pub use manifest::{
     PluginError, PluginHost, PluginKind, PluginLimits, PluginManifest, PluginPolicy, WasiPlugin,

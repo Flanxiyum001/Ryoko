@@ -34,11 +34,16 @@
 mod client;
 mod download;
 mod errors;
+pub mod trust;
 mod types;
 
 pub use client::{MarketplaceClient, UpdateInfo};
 pub use download::{DownloadConfig, DownloadResult, DownloadResultWrapper};
 pub use errors::MarketplaceError;
+pub use trust::{
+    PinnedPluginTrust, PublisherSignatureEnvelope, PublisherTrustStore, SignedPackageStatement,
+    TRUST_SCHEMA_VERSION, TrustedPublisherKey, VerifiedInstallRecord, sign_package_statement,
+};
 pub use types::{
     ExtensionManifest, InstallationRecord, MarketplaceEntry, MarketplaceIndex, MarketplaceLock,
     MarketplaceType, MarketplaceVersion, SkillKind, SkillManifest,

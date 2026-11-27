@@ -1,10 +1,13 @@
 //! Manifest, policy, host and WASI invocation.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
 use tokio::task::JoinError;
 use wasmtime::{
     Config, Engine, Linker, Module, ResourceLimiter, Store, StoreLimits, StoreLimitsBuilder,
@@ -111,7 +114,7 @@ impl PluginLimits {
         }
     }
 
-    fn timeout(self) -> Duration {
+    pub(crate) fn timeout(self) -> Duration {
         Duration::from_millis(self.timeout_ms.max(1))
     }
 }
@@ -233,10 +236,28 @@ impl PluginPolicy {
     }
 }
 
-/// Compiles plugins with a shared engine. The engine has fuel and epoch
-/// interruption enabled; no host functions beyond WASI preview 1 are linked.
+enum HostBackend {
+    #[cfg(not(windows))]
+    InProcess(Engine),
+    Worker(PathBuf),
+}
+
+#[derive(Clone)]
+enum PluginBackend {
+    #[cfg(not(windows))]
+    InProcess { engine: Engine, module: Module },
+    Worker {
+        worker_path: PathBuf,
+        wasm_bytes: Arc<[u8]>,
+    },
+}
+
+/// Compiles and executes plugins either in-process (Unix) or inside an isolated
+/// `wasm-plugin-worker` subprocess (Windows, or explicitly via
+/// [`PluginHost::new_with_worker`]). Fuel and epoch interruption are always
+/// enabled and no host functions beyond WASI preview 1 are linked.
 pub struct PluginHost {
-    engine: Engine,
+    backend: HostBackend,
     max_limits: PluginLimits,
 }
 
@@ -248,26 +269,74 @@ impl std::fmt::Debug for PluginHost {
     }
 }
 
+fn build_engine() -> Result<Engine, PluginError> {
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    config.epoch_interruption(true);
+    config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Disable);
+    Engine::new(&config).map_err(|error| PluginError::Compile(error.to_string()))
+}
+
+#[cfg(windows)]
+fn resolve_windows_worker() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("RYOKO_WASM_PLUGIN_WORKER_BIN") {
+        let candidate = PathBuf::from(explicit);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let current = std::env::current_exe().ok()?;
+    let sibling = current.parent()?.join("wasm-plugin-worker.exe");
+    sibling.is_file().then_some(sibling)
+}
+
 impl PluginHost {
-    /// Wasmtime 26 guest traps may abort the Windows host process. Refuse
-    /// in-process plugins rather than putting the user's IDE at risk until
-    /// plugin execution is isolated in a monitored subprocess.
+    /// On Windows, Wasmtime 26 guest traps can abort the host process
+    /// (`0xc0000409`). Delegate execution to the dedicated
+    /// `wasm-plugin-worker.exe` subprocess next to the app binary (or via
+    /// `RYOKO_WASM_PLUGIN_WORKER_BIN`), failing closed if the worker binary
+    /// is missing.
     #[cfg(windows)]
-    pub fn new(_max_limits: PluginLimits) -> Result<Self, PluginError> {
-        Err(PluginError::Compile(
-            "native Windows WASI plugin execution unavailable pending isolated worker".into(),
-        ))
+    pub fn new(max_limits: PluginLimits) -> Result<Self, PluginError> {
+        let worker_path = resolve_windows_worker().ok_or_else(|| {
+            PluginError::Compile(
+                "native Windows WASI plugin execution unavailable: wasm-plugin-worker.exe not found next to host binary"
+                    .into(),
+            )
+        })?;
+        Ok(Self {
+            backend: HostBackend::Worker(worker_path),
+            max_limits,
+        })
     }
 
     #[cfg(not(windows))]
     pub fn new(max_limits: PluginLimits) -> Result<Self, PluginError> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        config.epoch_interruption(true);
-        config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Disable);
-        let engine =
-            Engine::new(&config).map_err(|error| PluginError::Compile(error.to_string()))?;
-        Ok(Self { engine, max_limits })
+        let engine = build_engine()?;
+        Ok(Self {
+            backend: HostBackend::InProcess(engine),
+            max_limits,
+        })
+    }
+
+    /// Creates a plugin host that delegates every invocation to an explicit
+    /// `wasm-plugin-worker` binary. Available on all platforms for isolated
+    /// execution and cross-platform testing.
+    pub fn new_with_worker(
+        max_limits: PluginLimits,
+        worker_path: impl Into<PathBuf>,
+    ) -> Result<Self, PluginError> {
+        let worker_path = worker_path.into();
+        if !worker_path.is_file() {
+            return Err(PluginError::Compile(format!(
+                "isolated WASI plugin worker not found at {}",
+                worker_path.display()
+            )));
+        }
+        Ok(Self {
+            backend: HostBackend::Worker(worker_path),
+            max_limits,
+        })
     }
 
     /// Loads one explicitly chosen manifest/module pair. The policy is checked
@@ -293,15 +362,28 @@ impl PluginHost {
                 )));
             }
         }
-        let engine = self.engine.clone();
-        let module = tokio::task::spawn_blocking(move || Module::new(&engine, &bytes))
-            .await
-            .map_err(join_error)?
-            .map_err(|error| PluginError::Compile(error.to_string()))?;
+        let backend = match &self.backend {
+            #[cfg(not(windows))]
+            HostBackend::InProcess(engine) => {
+                let engine_clone = engine.clone();
+                let module =
+                    tokio::task::spawn_blocking(move || Module::new(&engine_clone, &bytes))
+                        .await
+                        .map_err(join_error)?
+                        .map_err(|error| PluginError::Compile(error.to_string()))?;
+                PluginBackend::InProcess {
+                    engine: engine.clone(),
+                    module,
+                }
+            }
+            HostBackend::Worker(worker_path) => PluginBackend::Worker {
+                worker_path: worker_path.clone(),
+                wasm_bytes: Arc::from(bytes),
+            },
+        };
         Ok(WasiPlugin {
             manifest,
-            module,
-            engine: self.engine.clone(),
+            backend,
             limits,
         })
     }
@@ -338,6 +420,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
+#[cfg(not(windows))]
 fn join_error(error: JoinError) -> PluginError {
     PluginError::Execution(format!("plugin task failed: {error}"))
 }
@@ -346,8 +429,7 @@ fn join_error(error: JoinError) -> PluginError {
 #[derive(Clone)]
 pub struct WasiPlugin {
     manifest: PluginManifest,
-    module: Module,
-    engine: Engine,
+    backend: PluginBackend,
     limits: PluginLimits,
 }
 
@@ -387,7 +469,19 @@ impl WasiPlugin {
                 "plugin request exceeds 256 KiB".into(),
             ));
         }
-        let output = execute(self.engine.clone(), self.module.clone(), self.limits, input).await?;
+        let output = match &self.backend {
+            #[cfg(not(windows))]
+            PluginBackend::InProcess { engine, module } => {
+                execute(engine.clone(), module.clone(), self.limits, input).await?
+            }
+            PluginBackend::Worker {
+                worker_path,
+                wasm_bytes,
+            } => {
+                crate::worker::execute_in_worker(worker_path, wasm_bytes, self.limits, input)
+                    .await?
+            }
+        };
         let response: PluginResponse = serde_json::from_slice(&output)
             .map_err(|error| PluginError::Protocol(format!("response is not JSON: {error}")))?;
         response.validate()?;
@@ -456,6 +550,103 @@ impl ResourceLimiter for PluginState {
     }
 }
 
+fn run_module_sync(
+    engine: &Engine,
+    module: &Module,
+    limits: PluginLimits,
+    input: Vec<u8>,
+    started: Instant,
+) -> Result<Vec<u8>, PluginError> {
+    let timeout = limits.timeout();
+    let stdin = MemoryInputPipe::new(input);
+    // One extra byte distinguishes "exactly at the limit" from truncation.
+    let stdout = MemoryOutputPipe::new(limits.max_output_bytes.saturating_add(1));
+    let stderr = MemoryOutputPipe::new(MAX_STDERR_BYTES);
+    let mut builder = WasiCtxBuilder::new();
+    builder
+        .stdin(stdin)
+        .stdout(stdout.clone())
+        .stderr(stderr.clone());
+    let store_limits = StoreLimitsBuilder::new()
+        .memory_size(limits.max_memory_bytes)
+        .instances(8)
+        .tables(8)
+        .build();
+    let mut store = Store::new(
+        engine,
+        PluginState {
+            wasi: builder.build_p1(),
+            limits: store_limits,
+        },
+    );
+    store.limiter(|state| state as &mut dyn ResourceLimiter);
+    store
+        .set_fuel(limits.fuel)
+        .map_err(|error| PluginError::Instantiate(error.to_string()))?;
+    store.set_epoch_deadline(1);
+    let mut linker = Linker::new(engine);
+    preview1::add_to_linker_sync(&mut linker, |state: &mut PluginState| &mut state.wasi)
+        .map_err(|error| PluginError::Instantiate(error.to_string()))?;
+    let instance = linker
+        .instantiate(&mut store, module)
+        .map_err(|error| PluginError::Instantiate(error.to_string()))?;
+    let start = instance
+        .get_typed_func::<(), ()>(&mut store, "_start")
+        .map_err(|error| {
+            PluginError::Instantiate(format!("plugin must export `_start`: {error}"))
+        })?;
+    let result = start.call(&mut store, ());
+    let bytes = stdout.contents();
+    let logs = stderr.contents();
+    if bytes.len() > limits.max_output_bytes {
+        return Err(PluginError::OutputLimit(limits.max_output_bytes));
+    }
+    if let Err(error) = result {
+        let detail = String::from_utf8_lossy(&logs);
+        let detail = detail.trim();
+        let message = if detail.is_empty() {
+            error.to_string()
+        } else {
+            format!("{error}: {}", detail.chars().take(1024).collect::<String>())
+        };
+        return Err(if started.elapsed() >= timeout {
+            PluginError::Timeout(limits.timeout_ms)
+        } else {
+            PluginError::Execution(message)
+        });
+    }
+    Ok(bytes.to_vec())
+}
+
+/// Synchronous entry point executed inside the isolated `wasm-plugin-worker`
+/// subprocess.
+pub(crate) fn evaluate_sync(
+    wasm_bytes: &[u8],
+    limits: PluginLimits,
+    input: Vec<u8>,
+) -> Result<Vec<u8>, PluginError> {
+    let engine = build_engine()?;
+    let module = Module::new(&engine, wasm_bytes)
+        .map_err(|error| PluginError::Compile(error.to_string()))?;
+    let started = Instant::now();
+    let timeout = limits.timeout();
+    let done = Arc::new(AtomicBool::new(false));
+    let done_flag = Arc::clone(&done);
+    let engine_clone = engine.clone();
+    let ticker = std::thread::spawn(move || {
+        std::thread::park_timeout(timeout);
+        if !done_flag.load(Ordering::Acquire) {
+            engine_clone.increment_epoch();
+        }
+    });
+    let result = run_module_sync(&engine, &module, limits, input, started);
+    done.store(true, Ordering::Release);
+    ticker.thread().unpark();
+    let _ = ticker.join();
+    result
+}
+
+#[cfg(not(windows))]
 async fn execute(
     engine: Engine,
     module: Module,
@@ -473,64 +664,7 @@ async fn execute(
     };
 
     let execution = tokio::task::spawn_blocking(move || {
-        let stdin = MemoryInputPipe::new(input);
-        // One extra byte distinguishes "exactly at the limit" from truncation.
-        let stdout = MemoryOutputPipe::new(limits.max_output_bytes.saturating_add(1));
-        let stderr = MemoryOutputPipe::new(MAX_STDERR_BYTES);
-        let mut builder = WasiCtxBuilder::new();
-        builder
-            .stdin(stdin)
-            .stdout(stdout.clone())
-            .stderr(stderr.clone());
-        let store_limits = StoreLimitsBuilder::new()
-            .memory_size(limits.max_memory_bytes)
-            .instances(8)
-            .tables(8)
-            .build();
-        let mut store = Store::new(
-            &engine,
-            PluginState {
-                wasi: builder.build_p1(),
-                limits: store_limits,
-            },
-        );
-        store.limiter(|state| state as &mut dyn ResourceLimiter);
-        store
-            .set_fuel(limits.fuel)
-            .map_err(|error| PluginError::Instantiate(error.to_string()))?;
-        store.set_epoch_deadline(1);
-        let mut linker = Linker::new(&engine);
-        preview1::add_to_linker_sync(&mut linker, |state: &mut PluginState| &mut state.wasi)
-            .map_err(|error| PluginError::Instantiate(error.to_string()))?;
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|error| PluginError::Instantiate(error.to_string()))?;
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(|error| {
-                PluginError::Instantiate(format!("plugin must export `_start`: {error}"))
-            })?;
-        let result = start.call(&mut store, ());
-        let bytes = stdout.contents();
-        let logs = stderr.contents();
-        if bytes.len() > limits.max_output_bytes {
-            return Err(PluginError::OutputLimit(limits.max_output_bytes));
-        }
-        if let Err(error) = result {
-            let detail = String::from_utf8_lossy(&logs);
-            let detail = detail.trim();
-            let message = if detail.is_empty() {
-                error.to_string()
-            } else {
-                format!("{error}: {}", detail.chars().take(1024).collect::<String>())
-            };
-            return Err(if started.elapsed() >= timeout {
-                PluginError::Timeout(limits.timeout_ms)
-            } else {
-                PluginError::Execution(message)
-            });
-        }
-        Ok(bytes.to_vec())
+        run_module_sync(&engine, &module, limits, input, started)
     })
     .await;
 
