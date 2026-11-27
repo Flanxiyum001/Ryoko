@@ -7,7 +7,8 @@ const KEY = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgQUJDREVGCg==';
 const ENDPOINT = 'https://github.com/Flanxiyum001/Ryoko/releases/download/desktop-updates/latest.json';
 
 test('release versions increase with the run number and follow tags', () => {
-  assert.equal(releaseVersionFromRef('refs/heads/main', 42), '0.1.0-alpha.42');
+  assert.equal(releaseVersionFromRef('refs/heads/ryoko', 42), '0.1.0-alpha.42');
+  assert.equal(releaseVersionFromRef('refs/heads/ryoko', 43), '0.1.0-alpha.43');
   assert.equal(releaseVersionFromRef('refs/tags/desktop-preview-v0.2.0-beta.1', 1), '0.2.0-beta.1');
   assert.throws(() => releaseVersionFromRef('refs/tags/desktop-preview-vbanana', 1));
 });

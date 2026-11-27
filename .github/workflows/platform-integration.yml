@@ -2,7 +2,7 @@ name: Phase 5 cross-platform integration
 
 on:
   push:
-    branches: [main]
+    branches: [ryoko]
   pull_request:
   workflow_dispatch:
 
