@@ -16,15 +16,24 @@
 //! * Agents cannot grant themselves permissions: tools, command approval and
 //!   delegation depth are set by the host through [`HarnessConfig`].
 
+pub mod context;
 mod harness;
 pub mod memory;
+pub mod review;
 pub mod skills;
+pub mod swarm;
 mod tools;
 
+pub use context::{ContextHit, FastContext};
 pub use harness::{
     Harness, HarnessConfig, HarnessError, HarnessEvent, HarnessOutcome, PlanItem, PlanStatus,
     StopCause,
 };
 pub use memory::{MemoryError, ProjectMemory};
+pub use review::{ReviewFinding, ReviewReport, Severity, Verdict};
 pub use skills::Skill;
+pub use swarm::{
+    GitSwarmWorkspace, Swarm, SwarmConfig, SwarmEvent, SwarmReport, SwarmTaskResult,
+    SwarmTaskStatus,
+};
 pub use tools::{ApprovalGate, CommandRequest, DenyAllCommands, ExternalTool, ProposedChange};

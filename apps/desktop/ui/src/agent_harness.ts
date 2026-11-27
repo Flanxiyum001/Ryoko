@@ -7,6 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { renderReview, type ReviewReport } from './ryoko_review';
 
 type PlanStatus = 'pending' | 'in_progress' | 'done';
 interface PlanItem { task: string; status: PlanStatus }
@@ -41,9 +42,11 @@ interface DonePayload {
 
 export interface AgentHarnessDeps {
   setStatus: (message: string) => void;
-  showChange: (change: StagedChange) => void;
+  showChange: (change: StagedChange, line?: number) => void;
   onApplied: (changes: StagedChange[]) => void;
   onCost: (estimatedCostUsd: number) => void;
+  /** Runs the goal as a swarm of parallel tasks, one branch each. */
+  runSwarm?: (goal: string) => Promise<void>;
 }
 
 const MODE_KEY = 'ryoko.chatMode';
@@ -92,6 +95,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 export function mountAgentHarness(deps: AgentHarnessDeps): {
   agentMode: () => boolean;
   run: (goal: string) => void;
+  swarmFinished: () => void;
 } {
   const history = document.getElementById('chatHistory')!;
   const input = document.getElementById('chatInput') as HTMLTextAreaElement;
@@ -255,7 +259,26 @@ export function mountAgentHarness(deps: AgentHarnessDeps): {
     const actions = el('div', 'agent-actions');
     const apply = el('button', 'button primary compact', 'Apply all');
     const discard = el('button', 'button ghost compact', 'Discard');
-    apply.type = discard.type = 'button';
+    const reviewButton = el('button', 'button ghost compact', 'Review with Ryoko');
+    apply.type = discard.type = reviewButton.type = 'button';
+    reviewButton.addEventListener('click', async () => {
+      reviewButton.disabled = true;
+      reviewButton.textContent = 'Reviewing…';
+      try {
+        const report = await invoke<ReviewReport>('ryoko_review', {
+          source: { source: 'agent', requestId },
+        });
+        card.insertBefore(renderReview(report, (finding) => {
+          const change = changes.find((entry) => entry.path === finding.path);
+          if (change) deps.showChange(change, finding.line ?? undefined);
+        }), actions);
+        reviewButton.remove();
+      } catch (error) {
+        reviewButton.disabled = false;
+        reviewButton.textContent = 'Review with Ryoko';
+        deps.setStatus('Review failed: ' + String(error));
+      }
+    });
     apply.addEventListener('click', async () => {
       apply.disabled = discard.disabled = true;
       try {
@@ -278,7 +301,7 @@ export function mountAgentHarness(deps: AgentHarnessDeps): {
       list.remove();
       actions.remove();
     });
-    actions.append(apply, discard);
+    actions.append(apply, reviewButton, discard);
     card.append(title, list, actions);
     view.root.append(card);
     scroll();
@@ -311,6 +334,13 @@ export function mountAgentHarness(deps: AgentHarnessDeps): {
 
   async function run(goal: string): Promise<void> {
     if (active) return;
+    const swarm = document.getElementById('chatSwarm') as HTMLInputElement | null;
+    if (swarm?.checked && deps.runSwarm) {
+      send.disabled = true;
+      note.textContent = 'Agents are working in parallel, each on its own branch.';
+      await deps.runSwarm(goal);
+      return;
+    }
     const requestId = `agent-${++sequence}-${Date.now()}`;
     active = requestId;
     startView();
@@ -352,5 +382,12 @@ export function mountAgentHarness(deps: AgentHarnessDeps): {
   agentButton.addEventListener('click', () => setMode('agent'));
   setMode(mode);
 
-  return { agentMode: () => mode === 'agent', run: (goal) => void run(goal) };
+  return {
+    agentMode: () => mode === 'agent',
+    run: (goal) => void run(goal),
+    swarmFinished: () => {
+      send.disabled = false;
+      note.textContent = 'Swarm finished. Push a branch to open its pull request.';
+    },
+  };
 }

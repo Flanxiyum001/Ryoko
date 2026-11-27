@@ -62,6 +62,8 @@ import {
 } from './agent_chat';
 import { previewAccepted, proposalHunks, type ProposalHunk } from './proposal_review';
 import { mountAgentHarness, type StagedChange } from './agent_harness';
+import { mountSwarm } from './swarm_view';
+import { renderReview, type ReviewReport } from './ryoko_review';
 import { DebugViewController } from './debug_view';
 import {
   chordForEvent,
@@ -687,7 +689,7 @@ function updateUsageMeter(): void {
   usageMeter.title = 'Usage reported by models and missions. Costs are estimates where pricing is known; unpriced requests may be excluded. Not an invoice.';
 }
 
-function showAgentChange(change: StagedChange): void {
+function showAgentChange(change: StagedChange, line?: number): void {
   clearDiffEditor();
   const languageId = detectEditorLanguage(change.path, change.content, monaco.languages.getLanguages());
   const suffix = encodeURIComponent(change.path).replaceAll('%', '_') + '-' + Date.now();
@@ -703,6 +705,10 @@ function showAgentChange(change: StagedChange): void {
   editorHost.classList.add('hidden');
   emptyEditor.classList.add('hidden');
   diffEditor.layout();
+  if (line) {
+    diffEditor.getModifiedEditor().revealLineInCenter(line);
+    diffEditor.getModifiedEditor().setPosition({ lineNumber: line, column: 1 });
+  }
   setStatus(`Reviewing the agent's change to ${change.path}. Apply or discard it in the chat.`);
 }
 
@@ -718,7 +724,14 @@ function reloadAppliedChanges(changes: StagedChange[]): void {
   void loadFiles();
 }
 
+const swarmView = mountSwarm({
+  setStatus,
+  openFile: (path, line) => void openFileAtLine(path, line ?? 1),
+  onFinished: () => agentHarness.swarmFinished(),
+});
+
 const agentHarness = mountAgentHarness({
+  runSwarm: (goal) => swarmView.run(goal),
   setStatus,
   showChange: showAgentChange,
   onApplied: reloadAppliedChanges,
@@ -726,6 +739,26 @@ const agentHarness = mountAgentHarness({
     chatEstimatedCostUsd += cost;
     updateUsageMeter();
   },
+});
+
+const changesReview = element<HTMLButtonElement>('changesReview');
+const changesReviewResult = element('changesReviewResult');
+changesReview.addEventListener('click', async () => {
+  changesReview.disabled = true;
+  changesReview.textContent = 'Reviewing…';
+  changesReviewResult.replaceChildren();
+  try {
+    const report = await invoke<ReviewReport>('ryoko_review', { source: { source: 'working_tree' } });
+    changesReviewResult.append(renderReview(report, (finding) => void openFileAtLine(finding.path, finding.line ?? 1)));
+  } catch (error) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = error instanceof Error ? error.message : String(error);
+    changesReviewResult.append(hint);
+  } finally {
+    changesReview.disabled = false;
+    changesReview.textContent = 'Review with Ryoko';
+  }
 });
 
 const agentChat = mountAgentChat({

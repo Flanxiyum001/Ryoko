@@ -31,7 +31,7 @@ serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "process"] }
 
 # The Linux folder picker is a GTK dialog made transient for the main window;
 # gtk is already part of the Tauri dependency tree on Linux.

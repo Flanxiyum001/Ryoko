@@ -4,6 +4,7 @@ mod check;
 mod connectors;
 mod context_window;
 mod experience;
+mod harness_cmds;
 mod mcp;
 mod perf;
 mod ui_capture;
@@ -80,6 +81,12 @@ enum Commands {
     DiscoverLocal,
     /// Run Ryoko's agent harness on a goal. Edits are staged for review, never written.
     Agent(Box<agent::AgentArgs>),
+    /// Fast Context: find the files and lines that match a description, in milliseconds.
+    Find(harness_cmds::FindArgs),
+    /// Ryoko Review: review your uncommitted, staged or branch changes with a model.
+    ReviewDiff(Box<harness_cmds::ReviewDiffArgs>),
+    /// Split a goal across parallel agents, one worktree, branch and pull request each.
+    Swarm(Box<harness_cmds::SwarmArgs>),
     /// Ask one configured model a question (no tools or filesystem changes).
     Ask(AskArgs),
     /// Run eight role-specific planning/review turns. Preview only: never edits files.
@@ -1027,6 +1034,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::Providers(args) => providers(args).await,
         Commands::DiscoverLocal => discover_local().await,
         Commands::Agent(args) => agent::run(*args).await,
+        Commands::Find(args) => harness_cmds::find(args),
+        Commands::ReviewDiff(args) => harness_cmds::review_diff(*args).await,
+        Commands::Swarm(args) => harness_cmds::swarm(*args).await,
         Commands::Ask(args) => ask(args).await,
         Commands::TeamPreview(args) => team_preview(args).await,
         Commands::Run(args) => run_goal(*args).await,

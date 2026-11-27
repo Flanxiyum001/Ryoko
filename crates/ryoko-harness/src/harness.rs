@@ -5,13 +5,14 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ryoko_models::{ChatRequest, ContentBlock, Message, ModelRouter, Role, ToolDefinition};
 use ryoko_tools::{ReadOnlyTools, ToolRequest, ToolResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::context::{self, FastContext};
 use crate::memory::ProjectMemory;
 use crate::skills::{self, Skill};
 use crate::tools::{
@@ -134,6 +135,7 @@ pub struct Harness {
     cancel: Arc<AtomicBool>,
     memory: ProjectMemory,
     skills: Vec<Skill>,
+    fast_context: OnceLock<Result<FastContext, String>>,
 }
 
 impl Harness {
@@ -158,6 +160,7 @@ impl Harness {
             external: Vec::new(),
             events: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            fast_context: OnceLock::new(),
         })
     }
 
@@ -221,7 +224,7 @@ impl Harness {
     fn system_prompt(&self, depth: u8) -> String {
         let mut prompt = String::from(
             "You are Ryoko, a software engineering agent working inside the user's project.\n\
-             Work in small steps: look at the code, make a short plan with update_plan, make \
+             Work in small steps: find the relevant code with find_context, make a short plan with update_plan, make \
              focused changes with edit_file or write_file, and check your work.\n\
              Rules:\n\
              - Your edits are staged for the user to review as diffs; nothing touches disk \
@@ -423,6 +426,29 @@ impl Harness {
                 .ok_or_else(|| format!("missing string argument `{key}`"))
         };
         match name {
+            "find_context" => {
+                let query = text("query")?;
+                if query.trim().is_empty() || query.chars().count() > 500 {
+                    return Err("query must be 1..500 characters".into());
+                }
+                let limit = arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(8)
+                    .clamp(1, 20) as usize;
+                let index = self
+                    .fast_context
+                    .get_or_init(|| {
+                        FastContext::build(&self.root).map_err(|error| error.to_string())
+                    })
+                    .as_ref()
+                    .map_err(Clone::clone)?;
+                let hits = index.search(&query, limit);
+                if hits.is_empty() {
+                    return Ok("no matching code found; try other words or identifiers".into());
+                }
+                Ok(context::format_hits(&hits))
+            }
             "read_file" => {
                 let path = tools::validate_relative_path(&text("path")?)?;
                 if let Some(change) = state.lock().expect("state").changes.get(&path) {

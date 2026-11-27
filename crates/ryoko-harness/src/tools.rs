@@ -66,6 +66,7 @@ pub trait ExternalTool: Send + Sync {
 }
 
 pub(crate) const BUILTIN_NAMES: &[&str] = &[
+    "find_context",
     "read_file",
     "list_files",
     "search_text",
@@ -86,6 +87,13 @@ pub(crate) struct ToolSet {
 
 pub(crate) fn builtin_definitions(set: &ToolSet) -> Vec<ToolDefinition> {
     let mut tools = vec![
+        ToolDefinition::new(
+            "find_context",
+            "Fast Context: describe what you are looking for in plain words or identifiers and get \
+             the most relevant files and line ranges with snippets, in milliseconds. Use this \
+             first instead of listing or reading many files.",
+            json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"]}),
+        ),
         ToolDefinition::new(
             "read_file",
             "Read a UTF-8 source file. Paths are relative to the workspace root and use '/'. \

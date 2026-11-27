@@ -1262,7 +1262,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .chat-mode button[aria-checked='true'] { color: var(--on-accent); background: var(--accent); font-weight: 600; }
 .chat-mode button:hover:not([aria-checked='true']) { color: var(--text-strong); }
-.chat-agent-options { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-sm); }
+.chat-agent-options { display: grid; gap: 4px; color: var(--muted); font-size: var(--fs-sm); }
+.chat-agent-options label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .chat-agent-options.hidden { display: none; }
 .agent-run { display: grid; gap: 8px; }
 .agent-run-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -1302,6 +1303,43 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .agent-change-tag { padding: 0 6px; border-radius: 999px; color: var(--on-accent); background: var(--accent); font-size: var(--fs-xs); }
 .agent-change-added { color: var(--success); font-family: var(--font-mono); font-size: var(--fs-sm); }
 .agent-change-removed { color: var(--danger); font-family: var(--font-mono); font-size: var(--fs-sm); }
+
+
+/* Ryoko Review findings. */
+.ryoko-review { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--input-bg); }
+.ryoko-review-approve > strong { color: var(--success); }
+.ryoko-review-needs_changes > strong { color: var(--warning); }
+.ryoko-review-summary { margin: 0; color: var(--text); font-size: var(--fs-md); line-height: 1.5; }
+.ryoko-review-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.ryoko-finding {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; width: 100%; padding: 6px 8px;
+  border: 0; border-radius: var(--radius-sm); color: var(--text); background: transparent; cursor: pointer; text-align: left;
+}
+.ryoko-finding:hover { background: var(--hover-bg); }
+.ryoko-finding-badge { grid-row: span 2; align-self: start; padding: 1px 7px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 600; }
+.ryoko-finding-blocker .ryoko-finding-badge { color: #fff; background: var(--danger); }
+.ryoko-finding-warning .ryoko-finding-badge { color: #1a1406; background: var(--warning); }
+.ryoko-finding-suggestion .ryoko-finding-badge { color: var(--text); background: var(--hover-bg); }
+.ryoko-finding-title { color: var(--text-strong); font-size: var(--fs-md); }
+.ryoko-finding-where { color: var(--muted); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.ryoko-finding-detail { margin: 0 8px 4px; color: var(--muted); font-size: var(--fs-sm); line-height: 1.5; }
+.changes-review-result { padding: 0 var(--sp-4) var(--sp-3); }
+.changes-review-result:empty { display: none; }
+
+/* Agent swarm. */
+.swarm-tasks { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.swarm-task { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--menu-bg); }
+.swarm-task-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.swarm-task-head strong { color: var(--text-strong); font-size: var(--fs-md); }
+.swarm-task-state { flex: none; color: var(--muted); font-size: var(--fs-sm); }
+.swarm-task-ready .swarm-task-state { color: var(--success); }
+.swarm-task-failed .swarm-task-state { color: var(--danger); }
+.swarm-task-body { display: grid; gap: 6px; }
+.swarm-task-body .hint { padding: 0; }
+.swarm-branch { justify-self: start; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--input-bg); color: var(--muted); font-size: var(--fs-xs); }
+.swarm-review > summary { color: var(--text); font-size: var(--fs-sm); cursor: pointer; }
+.swarm-review[open] > summary { margin-bottom: 6px; }
+.swarm-pr-link { color: var(--text-strong); font-weight: 600; }
 
 /* -------------------------------------------------------------- responsive */
 

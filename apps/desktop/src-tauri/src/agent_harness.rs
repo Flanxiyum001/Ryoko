@@ -45,6 +45,21 @@ pub struct AgentHarnessState {
     approval_ids: Arc<AtomicU64>,
 }
 
+impl AgentHarnessState {
+    /// The staged changes of a finished run, for Ryoko Review.
+    pub(crate) fn staged_changes(
+        &self,
+        request_id: &str,
+    ) -> Option<(PathBuf, Vec<ProposedChange>)> {
+        let inner = self.inner.lock().expect("harness state");
+        inner
+            .staged
+            .as_ref()
+            .filter(|staged| staged.request_id == request_id)
+            .map(|staged| (staged.root.clone(), staged.changes.clone()))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessStartArgs {
@@ -292,7 +307,9 @@ pub fn harness_apply(
         .filter(|staged| staged.request_id == request_id)
         .ok_or("these changes are no longer available; run the agent again")?;
     let applied = apply_changes(&staged.root, &staged.changes, &paths)?;
-    staged.changes.retain(|change| !applied.contains(&change.path));
+    staged
+        .changes
+        .retain(|change| !applied.contains(&change.path));
     Ok(ApplyReport { applied })
 }
 
@@ -369,7 +386,9 @@ fn safe_target(root: &Path, path: &str) -> Result<PathBuf, String> {
     }
     let target = root.join(relative);
     if target.is_symlink() {
-        return Err(format!("`{path}` is a symbolic link; refusing to write through it"));
+        return Err(format!(
+            "`{path}` is a symbolic link; refusing to write through it"
+        ));
     }
     Ok(target)
 }
@@ -398,8 +417,14 @@ mod tests {
         let applied =
             apply_changes(dir.path(), &changes, &["a.rs".into(), "src/b.rs".into()]).unwrap();
         assert_eq!(applied, ["a.rs", "src/b.rs"]);
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.rs")).unwrap(), "new");
-        assert_eq!(std::fs::read_to_string(dir.path().join("src/b.rs")).unwrap(), "fresh");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/b.rs")).unwrap(),
+            "fresh"
+        );
         assert!(!dir.path().join("c.rs").exists());
     }
 
@@ -422,7 +447,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for bad in ["../x.rs", "/etc/x", ".git/config", "a\\b"] {
             let changes = [change(bad, None, "x")];
-            assert!(apply_changes(dir.path(), &changes, &[bad.into()]).is_err(), "{bad}");
+            assert!(
+                apply_changes(dir.path(), &changes, &[bad.into()]).is_err(),
+                "{bad}"
+            );
         }
     }
 }
