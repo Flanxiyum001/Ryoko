@@ -25,6 +25,16 @@ describe('polyglot detection', () => {
     expect(detectLanguage('.env.local')).toBe('ini');
     expect(detectLanguage('Vagrantfile')).toBe('ruby');
     expect(detectLanguage('script', '\uFEFF#!/usr/bin/env python3')).toBe('python');
+    expect(detectLanguage('sim.f90')).toBe('fortran');
+    expect(detectLanguage('server.erl')).toBe('erlang');
+    expect(detectLanguage('main.odin')).toBe('odin');
+    expect(detectLanguage('unit.pas')).toBe('pascal');
+    expect(detectLanguage('core.sv')).toBe('systemverilog');
+    expect(detectLanguage('shader.wgsl')).toBe('wgsl');
+    expect(detectLanguage('App.csproj')).toBe('xml');
+    expect(detectLanguage('events.jsonl')).toBe('json');
+    expect(detectLanguage('.gitconfig')).toBe('ini');
+    expect(detectLanguage('tool', '#!/usr/bin/env escript\n')).toBe('erlang');
   });
   it('uses registered editor modes and conservative content detection', () => {
     const modes = [{ id: 'custom', extensions: ['.abc'], filenames: ['CUSTOMFILE'] },

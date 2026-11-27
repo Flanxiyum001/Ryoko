@@ -203,13 +203,129 @@ pub fn read_file(path: String, state: State<'_, WorkspaceState>) -> Result<Strin
     Ok(content)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16LeBom,
+    Utf16Be,
+    Utf16BeBom,
+}
+
+impl TextEncoding {
+    fn from_id(id: Option<&str>) -> Result<Self, String> {
+        match id.unwrap_or("utf-8") {
+            "utf-8" => Ok(Self::Utf8),
+            "utf-16le" => Ok(Self::Utf16Le),
+            "utf-16le-bom" => Ok(Self::Utf16LeBom),
+            "utf-16be" => Ok(Self::Utf16Be),
+            "utf-16be-bom" => Ok(Self::Utf16BeBom),
+            other => Err(format!("unsupported file encoding for saving: {other}")),
+        }
+    }
+
+    fn as_id(self) -> &'static str {
+        match self {
+            Self::Utf8 => "utf-8",
+            Self::Utf16Le => "utf-16le",
+            Self::Utf16LeBom => "utf-16le-bom",
+            Self::Utf16Be => "utf-16be",
+            Self::Utf16BeBom => "utf-16be-bom",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Utf8 => "UTF-8",
+            Self::Utf16Le | Self::Utf16LeBom => "UTF-16 LE",
+            Self::Utf16Be | Self::Utf16BeBom => "UTF-16 BE",
+        }
+    }
+
+    fn decode(self, bytes: &[u8], path: &str) -> Result<String, String> {
+        let invalid = || format!("cannot decode {path} as {}", self.label());
+        match self {
+            Self::Utf8 => String::from_utf8(bytes.to_vec()).map_err(|_| invalid()),
+            Self::Utf16Le | Self::Utf16LeBom | Self::Utf16Be | Self::Utf16BeBom => {
+                let (little_endian, has_bom) = match self {
+                    Self::Utf16Le => (true, false),
+                    Self::Utf16LeBom => (true, true),
+                    Self::Utf16Be => (false, false),
+                    Self::Utf16BeBom => (false, true),
+                    Self::Utf8 => unreachable!(),
+                };
+                let data = if has_bom {
+                    let expected_bom = if little_endian {
+                        [0xff, 0xfe]
+                    } else {
+                        [0xfe, 0xff]
+                    };
+                    bytes.strip_prefix(&expected_bom).ok_or_else(invalid)?
+                } else {
+                    bytes
+                };
+                if data.len() & 1 != 0 {
+                    return Err(invalid());
+                }
+                let units: Vec<u16> = data
+                    .chunks_exact(2)
+                    .map(|pair| {
+                        if little_endian {
+                            u16::from_le_bytes([pair[0], pair[1]])
+                        } else {
+                            u16::from_be_bytes([pair[0], pair[1]])
+                        }
+                    })
+                    .collect();
+                String::from_utf16(&units).map_err(|_| invalid())
+            }
+        }
+    }
+
+    fn encode(self, content: &str) -> Vec<u8> {
+        match self {
+            Self::Utf8 => content.as_bytes().to_vec(),
+            Self::Utf16Le | Self::Utf16LeBom | Self::Utf16Be | Self::Utf16BeBom => {
+                let (little_endian, has_bom) = match self {
+                    Self::Utf16Le => (true, false),
+                    Self::Utf16LeBom => (true, true),
+                    Self::Utf16Be => (false, false),
+                    Self::Utf16BeBom => (false, true),
+                    Self::Utf8 => unreachable!(),
+                };
+                let mut out = Vec::with_capacity(content.len() * 2 + usize::from(has_bom) * 2);
+                if has_bom {
+                    out.extend_from_slice(if little_endian {
+                        &[0xff, 0xfe]
+                    } else {
+                        &[0xfe, 0xff]
+                    });
+                }
+                for unit in content.encode_utf16() {
+                    out.extend_from_slice(&if little_endian {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    });
+                }
+                out
+            }
+        }
+    }
+}
+
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EncodedFilePreview {
     content: String,
     encoding: &'static str,
+    editable: bool,
+    encoding_id: &'static str,
 }
 
-// Read-only by design: never convert an existing file's encoding on save.
+// Lossless encodings (UTF-16 LE/BE) stay editable and save back in the same
+// encoding; unknown legacy single-byte encodings open read-only so we never
+// silently corrupt bytes on save.
 #[tauri::command]
 pub fn read_encoded_file_preview(
     path: String,
@@ -226,9 +342,9 @@ fn decode_editor_preview(bytes: &[u8], path: &str) -> Result<EncodedFilePreview,
         return Err(unsupported());
     }
     let utf16 = if bytes.starts_with(&[0xff, 0xfe]) {
-        Some((true, &bytes[2..]))
+        Some(TextEncoding::Utf16LeBom)
     } else if bytes.starts_with(&[0xfe, 0xff]) {
-        Some((false, &bytes[2..]))
+        Some(TextEncoding::Utf16BeBom)
     } else if bytes.len() >= 8 && bytes.len() & 1 == 0 {
         let pairs = bytes.len() / 2;
         let even_zero = bytes.iter().step_by(2).filter(|&&byte| byte == 0).count();
@@ -239,60 +355,48 @@ fn decode_editor_preview(bytes: &[u8], path: &str) -> Result<EncodedFilePreview,
             .filter(|&&byte| byte == 0)
             .count();
         if odd_zero * 4 >= pairs * 3 && even_zero * 8 <= pairs {
-            Some((true, bytes))
+            Some(TextEncoding::Utf16Le)
         } else if even_zero * 4 >= pairs * 3 && odd_zero * 8 <= pairs {
-            Some((false, bytes))
+            Some(TextEncoding::Utf16Be)
         } else {
             None
         }
     } else {
         None
     };
-    let (content, encoding) = if let Some((little_endian, data)) = utf16 {
-        if data.len() & 1 != 0 {
-            return Err(unsupported());
-        }
-        let units: Vec<u16> = data
-            .chunks_exact(2)
-            .map(|pair| {
-                if little_endian {
-                    u16::from_le_bytes([pair[0], pair[1]])
-                } else {
-                    u16::from_be_bytes([pair[0], pair[1]])
-                }
-            })
-            .collect();
-        (
-            String::from_utf16(&units).map_err(|_| unsupported())?,
-            if little_endian {
-                "UTF-16 LE"
-            } else {
-                "UTF-16 BE"
-            },
-        )
+    let (content, encoding, editable, encoding_id) = if let Some(detected) = utf16 {
+        let decoded = detected.decode(bytes, path).map_err(|_| unsupported())?;
+        (decoded, detected.label(), true, detected.as_id())
     } else {
-        // For text-like logs with mixed or legacy bytes, display a best-effort
-        // preview; do not pretend to know the encoding or allow saving it.
-        let log = path.to_ascii_lowercase().ends_with(".log");
+        // For text-like files with mixed or legacy single-byte encodings,
+        // display a best-effort read-only preview regardless of extension;
+        // never pretend to know the encoding or allow saving it.
         let ascii = bytes
             .iter()
-            .filter(|&&byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0x1b | 0x20..=0x7e))
+            .filter(|&&byte| matches!(byte, b'\t' | b'\n' | b'\r' | 0x0c | 0x1b | 0x20..=0x7e))
             .count();
-        if !log || bytes.is_empty() || ascii * 4 < bytes.len() * 3 {
+        if bytes.is_empty() || bytes.contains(&0) || ascii * 4 < bytes.len() * 3 {
             return Err(unsupported());
         }
         (
             String::from_utf8_lossy(bytes).into_owned(),
             "Unknown encoding (lossy)",
+            false,
+            "lossy",
         )
     };
     if content
         .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\r' | '\n' | '\u{1b}'))
+        .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\r' | '\n' | '\x0c' | '\u{1b}'))
     {
         return Err(unsupported());
     }
-    Ok(EncodedFilePreview { content, encoding })
+    Ok(EncodedFilePreview {
+        content,
+        encoding,
+        editable,
+        encoding_id,
+    })
 }
 
 fn validate_editor_text(content: &str, path: &str) -> Result<(), String> {
@@ -321,15 +425,21 @@ pub async fn write_file(
     path: String,
     content: String,
     expected_content: String,
+    encoding: Option<String>,
     state: State<'_, WorkspaceState>,
     app: AppHandle,
 ) -> Result<(), String> {
     let root = current_root(&state)?;
+    let file_encoding = TextEncoding::from_id(encoding.as_deref())?;
     if content.len() as u64 > MAX_FILE_BYTES {
         return Err(format!("refusing to write more than 2 MiB: {path}"));
     }
     if expected_content.len() as u64 > MAX_FILE_BYTES {
         return Err("expected file version exceeds 2 MiB".to_owned());
+    }
+    let encoded_bytes = file_encoding.encode(&content);
+    if encoded_bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("refusing to write more than 2 MiB: {path}"));
     }
     let candidate = safe_join(&root, &path)?;
     if requires_sensitive_write_approval(&path) {
@@ -384,8 +494,12 @@ pub async fn write_file(
     // Never silently replace edits made outside Ryoko since the file was
     // opened. This is a best-effort optimistic-concurrency guard; robust
     // multi-process atomic compare-and-swap needs OS-specific primitives.
-    let current = fs::read_to_string(&target)
-        .map_err(|error| format!("cannot verify current file {path}: {error}"))?;
+    let current_bytes =
+        fs::read(&target).map_err(|error| format!("cannot verify current file {path}: {error}"))?;
+    if current_bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("file is larger than 2 MiB: {path}"));
+    }
+    let current = file_encoding.decode(&current_bytes, &path)?;
     validate_editor_text(&current, &path)?;
     validate_editor_text(&content, &path)?;
     if current != expected_content {
@@ -410,7 +524,7 @@ pub async fn write_file(
             options.mode(0o600);
         }
         let mut file = options.open(&temp)?;
-        file.write_all(content.as_bytes())?;
+        file.write_all(&encoded_bytes)?;
         file.sync_all()
     })();
     if let Err(error) = write_result {
@@ -428,7 +542,10 @@ pub async fn write_file(
 
 #[cfg(test)]
 mod permission_tests {
-    use super::{decode_editor_preview, requires_sensitive_write_approval, validate_editor_text};
+    use super::{
+        TextEncoding, decode_editor_preview, requires_sensitive_write_approval,
+        validate_editor_text,
+    };
 
     #[test]
     fn rejects_binary_content_without_rejecting_unknown_text_files() {
@@ -437,49 +554,43 @@ mod permission_tests {
     }
 
     #[test]
-    fn previews_utf16_logs_with_and_without_bom() {
+    fn decodes_and_round_trips_utf16_files_with_and_without_bom() {
         let text = "server started\r\n";
-        for little_endian in [true, false] {
-            let bytes: Vec<u8> = text
-                .encode_utf16()
-                .flat_map(|unit| {
-                    if little_endian {
-                        unit.to_le_bytes()
-                    } else {
-                        unit.to_be_bytes()
-                    }
-                })
-                .collect();
-            let mut bom = if little_endian {
-                vec![0xff, 0xfe]
-            } else {
-                vec![0xfe, 0xff]
-            };
-            bom.extend_from_slice(&bytes);
-            for data in [&bytes, &bom] {
-                let preview = decode_editor_preview(data, ".server.log").unwrap();
-                assert_eq!(preview.content, text);
-                assert_eq!(
-                    preview.encoding,
-                    if little_endian {
-                        "UTF-16 LE"
-                    } else {
-                        "UTF-16 BE"
-                    }
-                );
-            }
+        for (encoding, expected_label) in [
+            (TextEncoding::Utf16Le, "UTF-16 LE"),
+            (TextEncoding::Utf16LeBom, "UTF-16 LE"),
+            (TextEncoding::Utf16Be, "UTF-16 BE"),
+            (TextEncoding::Utf16BeBom, "UTF-16 BE"),
+        ] {
+            let bytes = encoding.encode(text);
+            let preview = decode_editor_preview(&bytes, "script.ps1").unwrap();
+            assert_eq!(preview.content, text);
+            assert_eq!(preview.encoding, expected_label);
+            assert!(preview.editable);
+            assert_eq!(preview.encoding_id, encoding.as_id());
+            let parsed = TextEncoding::from_id(Some(preview.encoding_id)).unwrap();
+            assert_eq!(parsed.encode("updated\r\n").len() % 2, 0);
+            assert_eq!(
+                parsed
+                    .decode(&parsed.encode("updated\r\n"), "script.ps1")
+                    .unwrap(),
+                "updated\r\n"
+            );
         }
     }
 
     #[test]
-    fn lossy_preview_is_limited_to_text_like_logs() {
-        let bytes = b"server: started \xff successfully\n";
-        let preview = decode_editor_preview(bytes, ".server.log").unwrap();
-        assert!(preview.content.contains('\u{fffd}'));
-        assert!(preview.encoding.contains("lossy"));
-        assert!(decode_editor_preview(bytes, "main.rs").is_err());
+    fn lossy_preview_works_for_any_text_like_file_and_rejects_binaries() {
+        let bytes = b"/* copyright \xa9 2026 */\nint main(void) { return 0; }\n";
+        for path in [".server.log", "legacy.c", "notes.py", "README.unknown"] {
+            let preview = decode_editor_preview(bytes, path).unwrap();
+            assert!(preview.content.contains('\u{fffd}'));
+            assert!(preview.encoding.contains("lossy"));
+            assert!(!preview.editable);
+        }
         assert!(decode_editor_preview(b"server started\0\xff\n", "binary.log").is_err());
         assert!(decode_editor_preview(&[0xff, 0xfe, 0, 0], "utf32.log").is_err());
+        assert!(TextEncoding::from_id(Some("lossy")).is_err());
     }
 
     #[test]
