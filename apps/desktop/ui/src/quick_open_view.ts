@@ -129,6 +129,9 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
     matches.forEach((match, index) => {
       const option = document.createElement('button');
       option.type = 'button';
+      // Combobox navigation uses aria-activedescendant; options are not tab stops.
+      option.tabIndex = -1;
+      option.addEventListener('mousedown', (event) => event.preventDefault());
       option.id = 'ryoko-quick-open-option-' + index;
       option.className = 'quick-open-option';
       option.setAttribute('role', 'option');
@@ -191,7 +194,10 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
   });
   input.addEventListener('keydown', (event) => {
     event.stopPropagation();
-    if (event.key === 'Escape') {
+    if (event.key === 'Tab') {
+      // The combobox is the only keyboard focus stop in this modal picker.
+      event.preventDefault();
+    } else if (event.key === 'Escape') {
       event.preventDefault();
       close();
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -201,22 +207,6 @@ export function mountQuickOpen(deps: QuickOpenDeps): QuickOpenController {
     } else if (event.key === 'Enter') {
       event.preventDefault();
       openSelected();
-    }
-  });
-  dialog.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.stopPropagation();
-      close();
-    } else if (event.key === 'Tab') {
-      const focusable = [input, ...Array.from(list.querySelectorAll<HTMLButtonElement>('button'))];
-      const position = focusable.indexOf(document.activeElement as HTMLInputElement);
-      if (event.shiftKey && position <= 0) {
-        event.preventDefault();
-        focusable[focusable.length - 1]?.focus();
-      } else if (!event.shiftKey && position === focusable.length - 1) {
-        event.preventDefault();
-        input.focus();
-      }
     }
   });
   backdrop.addEventListener('mousedown', (event) => {

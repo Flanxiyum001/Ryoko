@@ -156,6 +156,9 @@ export function mountCommandPalette(deps: CommandPaletteDeps): CommandPaletteCon
     matches.forEach((match, index) => {
       const option = document.createElement('button');
       option.type = 'button';
+      // Combobox navigation uses aria-activedescendant; options are not tab stops.
+      option.tabIndex = -1;
+      option.addEventListener('mousedown', (event) => event.preventDefault());
       option.id = `ryoko-command-option-${index}`;
       option.className = 'quick-open-option command-option';
       option.setAttribute('role', 'option');
@@ -194,7 +197,10 @@ export function mountCommandPalette(deps: CommandPaletteDeps): CommandPaletteCon
   input.addEventListener('input', () => { selected = 0; render(); });
   input.addEventListener('keydown', (event) => {
     event.stopPropagation();
-    if (event.key === 'Escape') {
+    if (event.key === 'Tab') {
+      // The combobox is the only keyboard focus stop in this modal picker.
+      event.preventDefault();
+    } else if (event.key === 'Escape') {
       event.preventDefault();
       close();
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
