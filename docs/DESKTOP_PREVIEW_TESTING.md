@@ -146,8 +146,16 @@ On the default `ryoko` branch, the **Ryoko preview installers (unsigned)**
 GitHub Actions workflow can be started manually using **Actions → Run workflow**.
 It also runs on every push to `ryoko` (including merged pull requests).
 Automatic releases require both post-merge CI workflows to pass on the
-exact commit before native builds start. Superseded branch builds do not
-publish; the newest successful commit gets its own release.
+exact commit before native builds start. Publication is serialized across
+branch builds and explicit tags, with up to 100 pending runs. Branch builds
+check the head immediately before and after public release promotion and
+updater-manifest publication. Detected drift fails the job and attempts to
+withdraw the just-published release or restore the previous manifest.
+GitHub does not offer a branch-head compare-and-swap for release mutations:
+this is best-effort compensation, not an atomic guarantee. A concurrent
+branch advance can briefly expose the release or manifest; rollback failure
+requires maintainer attention. Strict exclusion requires coordinating all
+branch writers with the publisher.
 
 It builds native desktop installers on three operating systems, then publishes
 a real **GitHub pre-release** with the five installers and SHA-256 checksums

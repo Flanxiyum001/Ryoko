@@ -15,6 +15,7 @@ concurrency:
   # Serialize publication across branch builds and explicit tags.
   group: ryoko-preview-publication
   cancel-in-progress: false
+  queue: max
 
 jobs:
   verify:
@@ -256,6 +257,12 @@ jobs:
         with:
           subject-path: dist/*
 
+      - name: Checkout publication guard and updater scripts
+        uses: actions/checkout@v5
+        with:
+          path: source
+          sparse-checkout: apps/desktop/scripts/updater
+
       - name: Publish preview release assets
         id: publish
         shell: bash
@@ -276,13 +283,8 @@ jobs:
               exit 1
             fi
           done
-          if [[ "$GITHUB_REF" == refs/heads/ryoko ]]; then
-            HEAD_SHA="$(gh api "repos/$GH_REPO/branches/ryoko" --jq '.commit.sha')"
-            if [[ "$HEAD_SHA" != "$GITHUB_SHA" ]]; then
-              echo "::error::A newer default-branch commit exists; refusing to publish a superseded build."
-              exit 1
-            fi
-          fi
+          source source/apps/desktop/scripts/updater/publication_guard.sh
+          require_current_preview_head
           if [[ "$GITHUB_REF" == refs/tags/desktop-preview-v* ]]; then
             TAG="$GITHUB_REF_NAME"
             TAG_FLAGS=(--verify-tag)
@@ -325,20 +327,18 @@ jobs:
           printf '\nBuilt from commit: `%s`\n' "$GITHUB_SHA" >> "$RUNNER_TEMP/release-notes.md"
           # Published as the repository's Latest release by policy, even for
           # alpha tags; the notes still describe the build as pre-alpha.
+          # Upload the expensive assets while private; only the final promotion
+          # is a public mutation. Never overwrite an existing version.
           gh release create "$TAG" \
             "${TAG_FLAGS[@]}" \
-            --latest \
+            --draft --latest=false \
             --title "Ryoko Desktop $TAG (Alpha Testing)" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             "${INSTALLERS[@]}" "${UPDATER_ASSETS[@]}" dist/SHA256SUMS.txt
+          promote() { gh release edit "$TAG" --draft=false --latest; }
+          withdraw() { gh release edit "$TAG" --draft=true --latest=false; }
+          guarded_preview_publish promote withdraw
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout updater scripts
-        if: vars.RYOKO_UPDATER_PUBKEY != ''
-        uses: actions/checkout@v5
-        with:
-          path: source
-          sparse-checkout: apps/desktop/scripts/updater
 
       - name: Publish in-app update manifest
         if: vars.RYOKO_UPDATER_PUBKEY != ''
@@ -349,6 +349,8 @@ jobs:
           TAG: ${{ steps.publish.outputs.release_tag }}
         run: |
           set -euo pipefail
+          source source/apps/desktop/scripts/updater/publication_guard.sh
+          require_current_preview_head
           VERSION="${TAG#desktop-preview-v}"
           printf 'Ryoko Desktop %s.\n\nSee https://github.com/%s/releases/tag/%s for details.\n' \
             "$VERSION" "$GH_REPO" "$TAG" > "$RUNNER_TEMP/update-notes.txt"
@@ -357,12 +359,34 @@ jobs:
           # The manifest lives on one fixed prerelease so its URL never changes
           # and it never becomes the repository's Latest release. Installed apps
           # verify each artifact's signature before installing it.
-          if ! gh release view desktop-updates > /dev/null 2>&1; then
-            gh release create desktop-updates --prerelease --latest=false \
+          if gh release view desktop-updates --json assets > "$RUNNER_TEMP/update-assets.json"; then
+            # Keep the old manifest for compensation if the head advances
+            # during upload, or if clobber removes it but the upload fails.
+            mkdir -p "$RUNNER_TEMP/previous-update"
+            if jq -e '.assets | any(.name == "latest.json")' "$RUNNER_TEMP/update-assets.json" >/dev/null; then
+              gh release download desktop-updates --pattern latest.json --dir "$RUNNER_TEMP/previous-update"
+            fi
+            upload_manifest() {
+              gh release upload desktop-updates "$RUNNER_TEMP/latest.json" --clobber
+            }
+            restore_manifest() {
+              if [[ -f "$RUNNER_TEMP/previous-update/latest.json" ]]; then
+                gh release upload desktop-updates "$RUNNER_TEMP/previous-update/latest.json" --clobber
+              else
+                gh release delete-asset desktop-updates latest.json --yes
+              fi
+            }
+            guarded_preview_publish upload_manifest restore_manifest
+          else
+            # A new manifest release is private until the guarded promotion.
+            gh release create desktop-updates --draft --prerelease --latest=false \
               --target "$GITHUB_SHA" --title "Ryoko Desktop update manifest" \
-              --notes "Machine-readable manifest for Ryoko's in-app updater. Download installers from the versioned releases instead."
+              --notes "Machine-readable manifest for Ryoko's in-app updater. Download installers from the versioned releases instead." \
+              "$RUNNER_TEMP/latest.json"
+            promote_manifest() { gh release edit desktop-updates --draft=false --prerelease --latest=false; }
+            withdraw_manifest() { gh release edit desktop-updates --draft=true --latest=false; }
+            guarded_preview_publish promote_manifest withdraw_manifest
           fi
-          gh release upload desktop-updates "$RUNNER_TEMP/latest.json" --clobber
 
   publish-cli-package:
     name: Publish Ryoko CLI to GitHub Packages (GHCR)
