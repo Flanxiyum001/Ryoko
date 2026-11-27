@@ -46,7 +46,16 @@ For the desktop IDE workbench, see [`apps/desktop/README.md`](../apps/desktop/RE
 
 ## Desktop UX status & remaining roadmap
 
-Most items originally listed as future desktop milestones are now implemented in `apps/desktop`:
+### Implemented (experimental)
 
-- **Implemented in `apps/desktop`:** Monaco editor with tabs, split pane, polyglot language detection, Explorer file/folder CRUD, integrated diff/hunk review, Mission Control & agent sessions, onboarding & OS keychain credential storage, native provider adapters, context mentions & fast-context search, dark/light themes, keyboard navigation, reduced-motion support, and opt-in crash recovery.
-- **Remaining / hardening:** Live signed marketplace plugin installs (currently browse-only pending production signing registry), production auto-updater key configuration, and container-backed execution sandboxing across all host platforms.
+The Tauri/Monaco workbench supports file exploration and editing, tabs and splits, project search, language selection and LSP routing, agent chat and Mission Control, local diff/hunk review, a PTY terminal and DAP bridge, provider setup and opt-in buffer recovery. The CLI remains a separate supported entry point; its advice-only team preview is not a claim of autonomous execution.
+
+Keyboard shortcuts, the skip-to-editor link, semantic landmarks, focus styling and reduced-motion handling exist in the renderer. These are individual implemented mechanisms, not evidence of complete keyboard or screen-reader coverage.
+
+### Planned / unverified
+
+- Complete keyboard navigation, focus restoration, reduced-motion and assistive-technology verification ([#47](https://github.com/Flanxiyum001/Ryoko/issues/47)).
+- Production-signed installers, validated signed updates, and independent reproducibility and installer smoke evidence. An unsigned preview is not a production release.
+- Verified publisher trust for marketplace installation, full cross-platform sandbox and debugger parity, and end-to-end human-review and security acceptance evidence.
+
+See the [Phase 4 IDE experience](PHASE_4_IDE_EXPERIENCE.md) for workbench scope and acceptance tests and the [Phase 5 release trust plan](PHASE_5_RELEASE_TRUST.md) for outstanding release gates.

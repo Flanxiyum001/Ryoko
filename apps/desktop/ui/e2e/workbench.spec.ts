@@ -464,3 +464,30 @@ test('supports keyboard navigation, skip link, and settings dialog focus restora
   await page.keyboard.press('ArrowDown');
   await expect(page.locator('#fileList [role="treeitem"]').nth(1)).toBeFocused();
 });
+
+
+test('modal palettes retain keyboard focus and restore it on Escape', async ({ page }) => {
+  await openProject(page);
+  const trigger = page.locator('#quickOpenButton');
+  await trigger.focus();
+  for (const [shortcut, name] of [['Control+p', 'Quick open files'], ['Control+Shift+p', 'Command palette']]) {
+    await page.keyboard.press(shortcut);
+    const dialog = page.getByRole('dialog', { name });
+    const input = dialog.getByRole('combobox');
+    await expect(input).toBeFocused();
+    await expect(dialog.getByRole('option').first()).toHaveAttribute('tabindex', '-1');
+    await page.keyboard.press('Tab');
+    await expect(input).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(input).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    const selected = dialog.getByRole('option', { selected: true });
+    await expect(selected).toHaveCount(1);
+    const id = await selected.getAttribute('id');
+    expect(id).toBeTruthy();
+    await expect(input).toHaveAttribute('aria-activedescendant', id!);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  }
+});
