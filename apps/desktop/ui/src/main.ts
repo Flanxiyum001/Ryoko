@@ -308,6 +308,7 @@ const lspPills = element('lspPills');
 const changesSummary = element('changesSummary');
 const changesList = element('changesList');
 const notify = createNotifier();
+const editorStatus = element('editorStatus');
 const bugReporter = mountBugReporter({ setStatus: (message: string) => notify(message) });
 const usageMeter = element('usageMeter');
 const reviewInboxList = element('reviewInboxList');
@@ -479,7 +480,7 @@ const editor = monaco.editor.create(editorHost, {
   automaticLayout: true,
   fontSize: 13.5,
   lineHeight: 21,
-  minimap: { enabled: layoutState.minimap, renderCharacters: false, showSlider: 'mouseover' },
+  minimap: { enabled: layoutState.minimap, renderCharacters: true, showSlider: 'mouseover' },
   scrollBeyondLastLine: false,
   renderWhitespace: 'selection',
   padding: { top: 10 },
@@ -805,8 +806,20 @@ const agentChat = mountAgentChat({
   setStatus,
 });
 
+function isEditorBufferStatus(text: string): boolean {
+  if (text === 'Ready' || text === 'No file open' || text === 'Loading files…') return true;
+  if (text.startsWith('Opening ') && text.endsWith('…')) return true;
+  if (text.startsWith('Read-only preview: ')) return true;
+  if (/^\d+\s+files\s+from\s+/i.test(text)) return true;
+  if (/^(?:[A-Za-z]:[\\/]|[\w./\\:-]+(?:\.[\w-]+)+$)/.test(text)) return true;
+  return false;
+}
+
 function setStatus(message: string): void {
-  notify(message);
+  editorStatus.textContent = message;
+  if (!isEditorBufferStatus(message)) {
+    notify(message);
+  }
 }
 
 function showBottom(panel: 'terminal' | 'debug' | 'search' | 'task'): void {
@@ -2115,26 +2128,35 @@ async function openFolderByPath(): Promise<void> {
 }
 
 async function openWorkspaceFile(byPath = false): Promise<void> {
-  if (!requireNativeWorkspace()) return;
-  if (!state.root || workspaceSwitching) {
-    setStatus('Open a project folder before opening a file.');
-    return;
-  }
+  if (!requireNativeWorkspace() || workspaceSwitching) return;
   const root = state.root;
   try {
     const selected = byPath
       ? await promptFolderPath(true)
-      : await pickFile({ title: 'Open File', directory: false, multiple: false,
-          defaultPath: normalizeFilePath(root) });
-    if (typeof selected !== 'string' || root !== state.root || workspaceSwitching) return;
-    const relative = workspaceRelativeFile(root, selected);
-    if (!relative) {
-      setStatus('Choose a file inside the current project, or open its project folder first.');
-      return;
+      : await pickFile({
+          title: 'Open File',
+          directory: false,
+          multiple: false,
+          ...(root ? { defaultPath: normalizeFilePath(root) } : {}),
+        });
+    if (typeof selected !== 'string' || workspaceSwitching) return;
+    if (root) {
+      const relative = workspaceRelativeFile(root, selected);
+      if (relative) {
+        await openFile(relative);
+        return;
+      }
     }
-    await openFile(relative);
+    const parentDir = selected.replace(/[\\/][^\\/]+$/, '');
+    if (parentDir) {
+      await openFolder(parentDir);
+      const relative = state.root ? workspaceRelativeFile(state.root, selected) : null;
+      if (relative) await openFile(relative);
+    }
   } catch (error) {
-    setStatus('Could not open file: ' + String(error) + '. Try File: Open File by Path.');
+    const message = 'Could not open file: ' + String(error) + '. Try File: Open File by Path.';
+    setStatus(message);
+    notify(message);
   }
 }
 
@@ -3514,7 +3536,11 @@ async function openFile(path: string): Promise<void> {
     if (!readOnlyEncoding) lsp.ensureOpen(uri, languageId, file.version, content);
     selectOpenFile(path);
   } catch (error) {
-    if (ticket === fileOpenGeneration) setStatus(error instanceof Error ? error.message : String(error));
+    if (ticket === fileOpenGeneration) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(message);
+      notify(message);
+    }
   }
 }
 
@@ -4176,14 +4202,14 @@ function togglePanel(): void {
 
 function toggleMinimap(): void {
   layoutState.minimap = !layoutState.minimap;
-  editor.updateOptions({ minimap: { enabled: layoutState.minimap } });
+  editor.updateOptions({ minimap: { enabled: layoutState.minimap, renderCharacters: true } });
   persistLayout();
   setStatus(layoutState.minimap ? 'Minimap shown' : 'Minimap hidden');
 }
 
 function resetLayout(): void {
   Object.assign(layoutState, DEFAULT_LAYOUT);
-  editor.updateOptions({ minimap: { enabled: layoutState.minimap } });
+  editor.updateOptions({ minimap: { enabled: layoutState.minimap, renderCharacters: true } });
   applyLayout();
   persistLayout();
   activateView('explorer');
