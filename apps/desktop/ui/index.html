@@ -8,7 +8,7 @@
   <link rel="icon" type="image/png" href="/ryoko-logo.png">
 </head>
 <body>
-  <div id="startupSplash" class="startup-splash" aria-hidden="true"><img src="/ryoko-logo.png" alt=""><span>RYOKO</span><small>PREPARING YOUR WORKSPACE</small></div>
+  <div id="startupSplash" class="startup-splash" aria-hidden="true"><img src="/ryoko-logo.png" alt=""><span>RYOKO</span><small>Preparing your workspace</small></div>
   <div id="app">
     <header class="topbar">
       <div class="brand"><span class="brand-mark" aria-hidden="true"><img src="/ryoko-logo.png" alt=""></span><span class="brand-name">ryoko</span><span class="brand-sub">DESKTOP</span></div>
@@ -37,8 +37,8 @@
       </nav>
       <aside class="explorer" id="explorerPane" aria-label="Workspace explorer">
         <div id="sidebarSash" class="sash sash-vertical sash-right" role="separator" aria-orientation="vertical" aria-label="Resize side bar" tabindex="0" title="Drag to resize. Double-click to reset."></div>
-        <div class="panel-head"><span>EXPLORER</span><button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg></button></div>
-        <div class="explorer-summary"><span id="fileCount" class="counter">0 files</span><span>WORKSPACE</span></div>
+        <div class="panel-head"><span>Explorer</span><button id="refreshFiles" class="button ghost compact" type="button" aria-label="Refresh files" title="Refresh files"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg></button></div>
+        <div class="explorer-summary"><span id="fileCount" class="counter">0 files</span><span>Workspace</span></div>
         <label class="sr-only" for="fileFilter">Filter files</label>
         <input id="fileFilter" type="search" placeholder="Filter files…" autocomplete="off">
         <div id="fileList" class="file-list">
@@ -78,7 +78,7 @@
         </div>
         <div id="emptyEditor" class="empty-editor">
           <div class="welcome-content">
-            <div class="welcome-heading"><div class="empty-mark" aria-hidden="true"><img src="/ryoko-logo.png" alt=""></div><div><h1>Ryoko</h1><p>Your code. Your workspace.</p></div></div>
+            <div class="welcome-heading"><div class="empty-mark" aria-hidden="true"><img src="/ryoko-logo.png" alt=""></div><div><h1>Ryoko</h1><p>A fast editor for you, your teammates and your AI agents. Open a project to start.</p></div></div>
             <div class="welcome-columns">
               <section class="welcome-start" aria-label="Get started">
                 <h2>Start</h2>
@@ -99,10 +99,7 @@
                   <span><kbd>Ctrl / ⌘ K</kbd> Inline edit</span>
                   <span><kbd>Ctrl / ⌘ S</kbd> Save file</span>
                 </div>
-                <h2>A familiar place to build</h2>
-                <p class="welcome-guide-copy">Browse files on the left, work in tabs, and approve agent changes from your review inbox.</p>
-                <p>Use Changes to review diffs, Search to find code, and Mission Control to follow your agents.</p>
-                <div class="welcome-note">Make an idea real<br><span>Start in Mission Control and approve every change before it touches your project.</span></div>
+<div class="welcome-note">Agents propose, you approve<br><span>Give a task in Mission Control. Every change waits in Changes until you review it.</span></div>
               </section>
             </div>
           </div>
@@ -173,7 +170,7 @@
             <div class="debug-workbench" id="debugWorkbench">
               <div class="debug-pane debug-pane-stack" id="debugPaneStack">
                 <div class="debug-pane-header">
-                  <span>CALL STACK</span>
+                  <span>Call stack</span>
                   <span id="debugStackCount" class="counter">0 frames</span>
                 </div>
                 <div id="debugStackList" class="debug-list" role="list" aria-label="Call stack frames" tabindex="0">
@@ -182,7 +179,7 @@
               </div>
               <div class="debug-pane debug-pane-variables" id="debugPaneVariables">
                 <div class="debug-pane-header">
-                  <span>VARIABLES</span>
+                  <span>Variables</span>
                   <span id="debugVariablesCount" class="counter">0 vars</span>
                 </div>
                 <div id="debugVariablesList" class="debug-list debug-variables-tree" role="tree" aria-label="Variables tree" tabindex="0">
@@ -191,7 +188,7 @@
               </div>
               <div class="debug-pane debug-pane-breakpoints" id="debugPaneBreakpoints">
                 <div class="debug-pane-header">
-                  <span>BREAKPOINTS</span>
+                  <span>Breakpoints</span>
                   <span id="debugBreakpointsCount" class="counter">0</span>
                 </div>
                 <div id="debugBreakpointsList" class="debug-list" role="list" aria-label="Breakpoints list" tabindex="0">
@@ -200,7 +197,7 @@
               </div>
               <div class="debug-pane debug-pane-log" id="debugPaneLog">
                 <div class="debug-pane-header">
-                  <span>OUTPUT</span>
+                  <span>Output</span>
                   <button id="debugClearLog" class="button ghost compact debug-clear-btn" type="button">Clear</button>
                 </div>
                 <pre id="debugLog" class="debug-log" aria-live="polite"></pre>
@@ -212,7 +209,7 @@
 
       <aside class="problems" id="inspectorPane" aria-label="Agent chat, review inbox, Mission Control and diagnostics">
         <section class="agent-chat" id="agentChat" aria-label="Agent chat">
-          <div class="panel-head"><span>AGENT CHAT</span><span class="counter">READ-ONLY CHAT</span></div>
+          <div class="panel-head"><span>Agent chat</span><span class="counter">Read-only</span></div>
           <div id="chatHistory" class="chat-history" role="log" aria-live="polite">
             <p class="hint">Ask your coding assistant about the workspace. Pin @file, @symbol, @docs, @git-diff or @selection for focused context.</p>
           </div>
@@ -241,14 +238,14 @@
           </div>
         </section>
         <section class="review-inbox" id="reviewInbox" aria-label="Agent review inbox">
-          <div class="panel-head"><span>REVIEW INBOX</span><span id="reviewInboxCount" class="counter">0</span></div>
+          <div class="panel-head"><span>Review inbox</span><span id="reviewInboxCount" class="counter">0</span></div>
           <div id="reviewInboxList" class="review-inbox-list">
             <p class="hint">Published agent worktree proposals appear here for diff review.</p>
           </div>
         </section>
         <div id="inspectorSash" class="sash sash-vertical sash-left" role="separator" aria-orientation="vertical" aria-label="Resize inspector" tabindex="0" title="Drag to resize. Double-click to reset."></div>
         <section class="agent-sessions" aria-label="Agent sessions">
-          <div class="panel-head"><span>AGENT SESSIONS</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
+          <div class="panel-head"><span>Agent sessions</span><span id="agentSessionSummary" class="counter">0 sessions</span></div>
           <div class="agent-session-toolbar">
             <button id="agentSessionRefresh" class="button ghost compact" type="button"><svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-icon="refresh-cw"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /> <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /> <path d="M8 16H3v5" /></svg>Refresh</button>
           </div>
@@ -257,7 +254,7 @@
           </div>
         </section>
         <section class="mission" aria-label="Mission Control">
-          <div class="panel-head"><span>MISSION CONTROL</span><span id="missionSummary" class="counter">no events</span></div>
+          <div class="panel-head"><span>Mission Control</span><span id="missionSummary" class="counter">no events</span></div>
           <form id="runForm" class="run-controls" aria-label="Start an agent run">
             <label for="runGoal">Goal</label>
             <textarea id="runGoal" rows="2" maxlength="8000" placeholder="Describe the change the team should make…"></textarea>
@@ -344,7 +341,7 @@
             <p class="hint">Open a Git repository to review every modified file.</p>
           </div>
         </details>
-        <div class="panel-head"><span>PROBLEMS</span><span id="problemCount" class="counter">0</span></div>
+        <div class="panel-head"><span>Problems</span><span id="problemCount" class="counter">0</span></div>
         <div id="problemList" class="problem-list">
           <p class="hint">No diagnostics yet.</p>
         </div>
