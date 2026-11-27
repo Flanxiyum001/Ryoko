@@ -73,22 +73,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable action revision
         with:
+          toolchain: '1.100.0'
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: |
             .
             apps/desktop/src-tauri
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '22'
+          node-version: '22.23.5'
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
@@ -128,19 +129,6 @@ jobs:
             test -f "$SOURCE"
             cp "$SOURCE" "apps/desktop/src-tauri/binaries/$BINARY-$TARGET$SUFFIX"
           done
-
-      - name: Align preview JavaScript bindings with locked Rust Tauri versions
-        working-directory: apps/desktop
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The checked-in npm lock currently resolves a newer frontend minor
-          # than the Rust crates. Tauri CLI blocks bundling mismatched minors.
-          # Preview-only alignment avoids changing production dependencies or
-          # regenerating the lockfile during this installer smoke test.
-          npm install --no-save --package-lock=false \
-            @tauri-apps/api@2.11.1 @tauri-apps/plugin-dialog@2.7.3
-          node -e "for (const [name, ver] of [['@tauri-apps/api','2.11.1'], ['@tauri-apps/plugin-dialog','2.7.3']]) { const pkg=require('./node_modules/'+name+'/package.json'); if(pkg.version !== ver) process.exit(1); }"
 
       - name: Build unsigned desktop test installers
         working-directory: apps/desktop
@@ -193,9 +181,36 @@ jobs:
               ;;
           esac
 
+      - name: Record redacted build inputs
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- Cargo.lock apps/desktop/package-lock.json apps/desktop/src-tauri/Cargo.lock
+          export RYOKO_RUST_VERSION="$(rustc -V)"
+          export RYOKO_CARGO_VERSION="$(cargo -V)"
+          export RYOKO_NPM_VERSION="$(npm -v)"
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const e = process.env;
+          const lockfiles = ['Cargo.lock', 'apps/desktop/package-lock.json', 'apps/desktop/src-tauri/Cargo.lock'];
+          const manifest = {
+            schema: 1,
+            sourceSha: e.GITHUB_SHA,
+            target: e.TARGET,
+            runner: { os: e.RUNNER_OS, arch: e.RUNNER_ARCH, image: e.ImageOS ?? null, imageVersion: e.ImageVersion ?? null },
+            tools: { rust: e.RYOKO_RUST_VERSION, cargo: e.RYOKO_CARGO_VERSION, node: process.version, npm: e.RYOKO_NPM_VERSION },
+            lockfiles: Object.fromEntries(lockfiles.map(path => [path, createHash('sha256').update(readFileSync(path)).digest('hex')])),
+          };
+          const path = 'apps/desktop/src-tauri/target/' + e.TARGET + '/release/bundle/build-manifest-' + e.TARGET + '.json';
+          writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n');
+          NODE
+
       - name: Upload Linux CLI for GitHub Packages
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ryoko-cli-linux-x64
           retention-days: 14
@@ -203,12 +218,13 @@ jobs:
           path: target/x86_64-unknown-linux-gnu/release/ryoko
 
       - name: Upload unsigned preview installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ryoko-preview-${{ matrix.target }}
           retention-days: 14
           if-no-files-found: error
           path: |
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/build-manifest-${{ matrix.target }}.json
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
@@ -232,7 +248,7 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: ryoko-preview-*
           path: dist
@@ -253,12 +269,12 @@ jobs:
           (cd dist && sha256sum --check SHA256SUMS.txt)
 
       - name: Attest preview release artifacts
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: dist/*
 
       - name: Checkout publication guard and updater scripts
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: source
           sparse-checkout: apps/desktop/scripts/updater
@@ -276,6 +292,11 @@ jobs:
                -o -name '*.deb' -o -name '*.AppImage' \) -print0)
           mapfile -d '' UPDATER_ASSETS < <(find dist -type f \
             \( -name '*.sig' -o -name '*.app.tar.gz' \) -print0)
+          mapfile -d '' BUILD_MANIFESTS < <(find dist -type f -name 'build-manifest-*.json' -print0)
+          if [ "${#BUILD_MANIFESTS[@]}" -ne 3 ]; then
+            echo "::error::Expected one build manifest per platform."
+            exit 1
+          fi
           for extension in exe msi dmg deb AppImage; do
             mapfile -t MATCHES < <(find dist -type f -name "*.$extension")
             if [ "${#MATCHES[@]}" -ne 1 ]; then
@@ -334,7 +355,7 @@ jobs:
             --draft --latest=false \
             --title "Ryoko Desktop $TAG (Alpha Testing)" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
-            "${INSTALLERS[@]}" "${UPDATER_ASSETS[@]}" dist/SHA256SUMS.txt
+            "${INSTALLERS[@]}" "${UPDATER_ASSETS[@]}" "${BUILD_MANIFESTS[@]}" dist/SHA256SUMS.txt
           promote() { gh release edit "$TAG" --draft=false --latest; }
           withdraw() { gh release edit "$TAG" --draft=true --latest=false; }
           guarded_preview_publish promote withdraw
@@ -396,10 +417,10 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Download the tested Linux CLI binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ryoko-cli-linux-x64
           path: packaging/cli
