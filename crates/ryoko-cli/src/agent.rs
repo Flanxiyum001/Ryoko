@@ -286,7 +286,8 @@ async fn run_harness_internal(args: HarnessRunArgs) -> Result<(), Box<dyn Error>
         eprintln!("Saved the full proposal to {}", path.display());
     }
     if let Some(path) = args.journal {
-        harness.journal().save_to_json(&path)?;
+        let json = serde_json::to_string_pretty(&harness.journal().events())?;
+        crate::experience::create_private_file(&path, &json)?;
         eprintln!("Saved execution trace to {}", path.display());
     }
     if args.trace {

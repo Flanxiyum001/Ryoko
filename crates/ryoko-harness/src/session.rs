@@ -149,7 +149,17 @@ impl SessionJournal {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, json)
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        let mut file = options.open(path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()
     }
 
     /// Imports a session journal from a JSON file.
@@ -224,11 +234,7 @@ impl SessionJournal {
                     args,
                 } => {
                     let args_str = serde_json::to_string(&args).unwrap_or_default();
-                    let truncated = if args_str.len() > 120 {
-                        format!("{}…", &args_str[..120])
-                    } else {
-                        args_str
-                    };
+                    let truncated = truncate_preview(&args_str, 120);
                     out.push_str(&format!("  [T{turn} Tool:Run] {name}({truncated})\n"));
                 }
                 SessionEvent::ToolFinished {
@@ -283,11 +289,7 @@ impl SessionJournal {
                     ));
                 }
                 SessionEvent::SubAgentStarted { task } => {
-                    let preview = if task.len() > 60 {
-                        format!("{}…", &task[..60])
-                    } else {
-                        task
-                    };
+                    let preview = truncate_preview(&task, 60);
                     out.push_str(&format!("  [SUB-AGENT] Started: \"{preview}\"\n"));
                 }
                 SessionEvent::SubAgentFinished { summary_chars } => {
@@ -312,5 +314,40 @@ impl SessionJournal {
         }
 
         out
+    }
+}
+
+fn truncate_preview(text: &str, max_bytes: usize) -> String {
+    if text.len() > max_bytes {
+        let mut end = max_bytes;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &text[..end])
+    } else {
+        text.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_preview_utf8_boundaries() {
+        // Multi-byte unicode: 🦀 is 4 bytes (F0 9F A6 80)
+        let s = "🦀🦀🦀"; // 12 bytes
+        // Cutting at 6 bytes falls in the middle of the second crab (byte 4..8)
+        let truncated = truncate_preview(s, 6);
+        assert_eq!(truncated, "🦀…");
+
+        // 3-byte characters (e.g. Japanese kanji: 漢 is 3 bytes)
+        let s2 = "漢字テスト"; // 5 * 3 = 15 bytes
+        // Cutting at 5 bytes falls in the middle of '字' (bytes 3..6)
+        let truncated2 = truncate_preview(s2, 5);
+        assert_eq!(truncated2, "漢…");
+
+        let ascii = "short";
+        assert_eq!(truncate_preview(ascii, 10), "short");
     }
 }

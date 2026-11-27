@@ -28,6 +28,8 @@ pub struct Completion {
     pub provider: String,
     pub model: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
     pub stop_reason: Option<crate::types::StopReason>,
@@ -220,6 +222,15 @@ pub async fn collect_stream(
                     ));
                 }
                 completion.text.push_str(&text);
+            }
+            StreamEvent::ReasoningDelta { text } => {
+                let reasoning = completion.reasoning.get_or_insert_with(String::new);
+                if reasoning.len().saturating_add(text.len()) > MAX_TEXT_BYTES {
+                    return Err(ModelError::Decode(
+                        "model reasoning exceeded completion size limit".into(),
+                    ));
+                }
+                reasoning.push_str(&text);
             }
             StreamEvent::ToolCallDelta {
                 index,

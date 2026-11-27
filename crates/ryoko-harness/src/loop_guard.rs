@@ -34,7 +34,21 @@ impl LoopGuard {
     ///
     /// Returns `Some(warning_message)` if the tool call represents a loop, or `None` if safe.
     pub fn check_and_record(&mut self, name: &str, arguments: &Value) -> Option<String> {
-        let args_repr = arguments.to_string();
+        self.check_and_record_with_revision(name, arguments, 0)
+    }
+
+    /// Records a tool call with a state revision and checks whether an intervention should occur.
+    pub fn check_and_record_with_revision(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        revision: usize,
+    ) -> Option<String> {
+        let args_repr = if revision > 0 {
+            format!("{}:rev={}", arguments, revision)
+        } else {
+            arguments.to_string()
+        };
         let key = (name.to_owned(), args_repr);
 
         // Count how many consecutive or recent identical calls exist
@@ -58,6 +72,21 @@ impl LoopGuard {
         } else {
             None
         }
+    }
+
+    /// Invalidates recorded read history for a file path after a successful edit.
+    pub fn invalidate_file(&mut self, path: &str) {
+        self.recent_calls.retain(|(name, args)| {
+            if name == "read_file" {
+                let json_part = args.split(":rev=").next().unwrap_or(args.as_str());
+                if let Ok(val) = serde_json::from_str::<Value>(json_part) {
+                    if val.get("path").and_then(Value::as_str) == Some(path) {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
     }
 
     /// Clears the loop guard history.
@@ -94,5 +123,57 @@ mod tests {
         assert!(guard.check_and_record("read_file", &args2).is_none());
         assert!(guard.check_and_record("read_file", &args1).is_none());
         assert!(guard.check_and_record("read_file", &args2).is_none());
+    }
+
+    #[test]
+    fn test_loop_guard_invalidation_after_edit() {
+        let mut guard = LoopGuard::new(6, 3);
+        let args = json!({"path": "src/main.rs"});
+
+        assert!(guard.check_and_record("read_file", &args).is_none());
+        assert!(guard.check_and_record("read_file", &args).is_none());
+
+        // Invalidate read history when edit succeeds
+        guard.invalidate_file("src/main.rs");
+
+        // Reading again should now start fresh without triggering immediately
+        assert!(guard.check_and_record("read_file", &args).is_none());
+        assert!(guard.check_and_record("read_file", &args).is_none());
+        assert!(guard.check_and_record("read_file", &args).is_some());
+    }
+
+    #[test]
+    fn test_loop_guard_revision_tracking() {
+        let mut guard = LoopGuard::new(6, 3);
+        let args = json!({"path": "src/main.rs"});
+
+        // Read revision 0 twice
+        assert!(
+            guard
+                .check_and_record_with_revision("read_file", &args, 0)
+                .is_none()
+        );
+        assert!(
+            guard
+                .check_and_record_with_revision("read_file", &args, 0)
+                .is_none()
+        );
+
+        // Revision increments after edit
+        assert!(
+            guard
+                .check_and_record_with_revision("read_file", &args, 1)
+                .is_none()
+        );
+        assert!(
+            guard
+                .check_and_record_with_revision("read_file", &args, 1)
+                .is_none()
+        );
+        assert!(
+            guard
+                .check_and_record_with_revision("read_file", &args, 1)
+                .is_some()
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! The bounded agent loop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -129,6 +129,7 @@ type EventFn = Arc<dyn Fn(HarnessEvent) + Send + Sync>;
 struct RunState {
     changes: BTreeMap<String, ProposedChange>,
     plan: Vec<PlanItem>,
+    file_revisions: HashMap<String, usize>,
 }
 
 pub struct Harness {
@@ -146,7 +147,6 @@ pub struct Harness {
     fast_context: OnceLock<Result<FastContext, String>>,
     plugins: PluginRegistry,
     journal: Arc<SessionJournal>,
-    loop_guard: Arc<Mutex<LoopGuard>>,
 }
 
 impl Harness {
@@ -162,7 +162,6 @@ impl Harness {
             .map_err(|error| HarnessError::Workspace(error.to_string()))?;
         let profile = HarnessProfile::code(config.model.clone());
         let journal = Arc::new(SessionJournal::new());
-        let loop_guard = Arc::new(Mutex::new(LoopGuard::default()));
         let plugins = PluginRegistry::new();
 
         Ok(Self {
@@ -180,7 +179,6 @@ impl Harness {
             fast_context: OnceLock::new(),
             plugins,
             journal,
-            loop_guard,
         })
     }
 
@@ -247,10 +245,13 @@ impl Harness {
 
     /// Runs the agent on `goal` until it answers, hits a limit or is cancelled.
     pub async fn run(&self, goal: &str) -> HarnessOutcome {
+        let run_start = std::time::Instant::now();
+        let loop_guard = Arc::new(Mutex::new(LoopGuard::default()));
         let session_id = uuid::Uuid::new_v4().to_string();
+        let filtered_goal = redact_credentials_str(goal);
         let meta = SessionMeta {
             session_id: session_id.clone(),
-            goal: goal.to_owned(),
+            goal: filtered_goal.clone(),
             root: self.root.clone(),
             model: self.config.model.clone(),
         };
@@ -263,7 +264,7 @@ impl Harness {
         if self.profile.enable_session_trace {
             self.journal.record(SessionEvent::SessionStarted {
                 session_id,
-                goal: goal.to_owned(),
+                goal: filtered_goal,
                 profile: self.profile.name.clone(),
                 model: self.config.model.clone(),
                 timestamp: SessionJournal::now_iso(),
@@ -273,7 +274,13 @@ impl Harness {
 
         let state = Arc::new(Mutex::new(RunState::default()));
         let (final_text, turns, stop) = self
-            .run_loop(goal.to_owned(), 0, state.clone(), plugin_ctx.clone())
+            .run_loop(
+                goal.to_owned(),
+                0,
+                state.clone(),
+                plugin_ctx.clone(),
+                loop_guard.clone(),
+            )
             .await;
         let state = std::mem::take(&mut *state.lock().expect("harness state lock"));
         let outcome = HarnessOutcome {
@@ -289,7 +296,7 @@ impl Harness {
                 turns: outcome.turns,
                 stop_cause: format!("{:?}", outcome.stop),
                 total_changes: outcome.changes.len(),
-                duration_ms: self.journal.elapsed_ms(),
+                duration_ms: run_start.elapsed().as_millis() as u64,
             });
         }
         self.plugins.dispatch_session_end(&plugin_ctx, &outcome);
@@ -340,6 +347,7 @@ impl Harness {
         depth: u8,
         state: Arc<Mutex<RunState>>,
         plugin_ctx: PluginContext,
+        loop_guard: Arc<Mutex<LoopGuard>>,
     ) -> Pin<Box<dyn Future<Output = (String, usize, StopCause)> + Send + '_>> {
         Box::pin(async move {
             let mut request = ChatRequest::new(self.config.model.clone())
@@ -447,6 +455,13 @@ impl Harness {
                 }
 
                 let mut blocks = Vec::new();
+                if let Some(reasoning) = &completion.reasoning {
+                    if !reasoning.trim().is_empty() {
+                        blocks.push(ContentBlock::Reasoning {
+                            text: reasoning.clone(),
+                        });
+                    }
+                }
                 if !completion.text.trim().is_empty() {
                     blocks.push(ContentBlock::Text {
                         text: completion.text.clone(),
@@ -485,7 +500,9 @@ impl Harness {
                     let pre_decision = self
                         .plugins
                         .dispatch_pre_tool_call(&plugin_ctx, &tool_call_obj)
-                        .unwrap_or(ToolDecision::Allow);
+                        .unwrap_or_else(|err| {
+                            ToolDecision::Deny(format!("plugin pre_tool_call error: {err}"))
+                        });
 
                     let result = if self.cancel.load(Ordering::SeqCst) {
                         Err("cancelled by the user".to_owned())
@@ -500,10 +517,23 @@ impl Harness {
                             ToolDecision::Override(output) => Ok(output),
                             ToolDecision::Allow => {
                                 let loop_warning = if self.profile.enable_loop_guard {
-                                    self.loop_guard
-                                        .lock()
-                                        .ok()
-                                        .and_then(|mut g| g.check_and_record(&name, &arguments))
+                                    let rev = if name == "read_file" {
+                                        arguments
+                                            .get("path")
+                                            .and_then(Value::as_str)
+                                            .and_then(|p| {
+                                                state
+                                                    .lock()
+                                                    .ok()
+                                                    .and_then(|s| s.file_revisions.get(p).copied())
+                                            })
+                                            .unwrap_or(0)
+                                    } else {
+                                        0
+                                    };
+                                    loop_guard.lock().ok().and_then(|mut g| {
+                                        g.check_and_record_with_revision(&name, &arguments, rev)
+                                    })
                                 } else {
                                     None
                                 };
@@ -523,7 +553,7 @@ impl Harness {
                                             turn,
                                             call_id: id.clone(),
                                             name: name.clone(),
-                                            args: arguments.clone(),
+                                            args: redact_credentials_val(&arguments),
                                         });
                                     }
                                     self.emit(HarnessEvent::ToolStarted {
@@ -531,7 +561,14 @@ impl Harness {
                                         name: name.clone(),
                                     });
                                     let result = self
-                                        .call_tool(&name, &arguments, depth, &state, &plugin_ctx)
+                                        .call_tool(
+                                            &name,
+                                            &arguments,
+                                            depth,
+                                            &state,
+                                            &plugin_ctx,
+                                            &loop_guard,
+                                        )
                                         .await;
                                     self.emit(HarnessEvent::ToolFinished {
                                         depth,
@@ -603,6 +640,7 @@ impl Harness {
                 .flat_map(|message| &message.content)
                 .map(|block| match block {
                     ContentBlock::Text { text } => text.len(),
+                    ContentBlock::Reasoning { text } => text.len(),
                     ContentBlock::ToolResult { content, .. } => content.len(),
                     ContentBlock::ToolCall { arguments, .. } => arguments.to_string().len(),
                     ContentBlock::Image { data_base64, .. } => data_base64.len(),
@@ -647,6 +685,7 @@ impl Harness {
         depth: u8,
         state: &Arc<Mutex<RunState>>,
         plugin_ctx: &PluginContext,
+        loop_guard: &Arc<Mutex<LoopGuard>>,
     ) -> Result<String, String> {
         if !arguments.is_object() {
             return Err("tool arguments must be a JSON object".into());
@@ -731,7 +770,7 @@ impl Harness {
             }
             "write_file" => {
                 let path = tools::validate_relative_path(&text("path")?)?;
-                self.stage(state, path, text("content")?)
+                self.stage(state, path, text("content")?, loop_guard)
             }
             "edit_file" => {
                 let path = tools::validate_relative_path(&text("path")?)?;
@@ -751,7 +790,7 @@ impl Harness {
                 };
                 match current.matches(old.as_str()).count() {
                     0 => Err("`old` text was not found; read the file again".into()),
-                    1 => self.stage(state, path, current.replacen(&old, &new, 1)),
+                    1 => self.stage(state, path, current.replacen(&old, &new, 1), loop_guard),
                     n => Err(format!("`old` appears {n} times; include more context")),
                 }
             }
@@ -815,7 +854,13 @@ impl Harness {
                 }
                 self.emit(HarnessEvent::SubAgentStarted { task: task.clone() });
                 let (summary, _, stop) = self
-                    .run_loop(task, depth + 1, state.clone(), plugin_ctx.clone())
+                    .run_loop(
+                        task,
+                        depth + 1,
+                        state.clone(),
+                        plugin_ctx.clone(),
+                        loop_guard.clone(),
+                    )
                     .await;
                 if self.profile.enable_session_trace {
                     self.journal.record(SessionEvent::SubAgentFinished {
@@ -856,6 +901,7 @@ impl Harness {
         state: &Arc<Mutex<RunState>>,
         path: String,
         content: String,
+        loop_guard: &Arc<Mutex<LoopGuard>>,
     ) -> Result<String, String> {
         if content.len() > MAX_STAGED_FILE_BYTES {
             return Err(format!("file is larger than {MAX_STAGED_FILE_BYTES} bytes"));
@@ -878,7 +924,11 @@ impl Harness {
                 content: content.clone(),
             },
         );
+        *guard.file_revisions.entry(path.clone()).or_insert(0) += 1;
         drop(guard);
+        if let Ok(mut g) = loop_guard.lock() {
+            g.invalidate_file(&path);
+        }
         self.emit(HarnessEvent::ChangeStaged { path: path.clone() });
         if self.profile.enable_session_trace {
             self.journal.record(SessionEvent::ChangeStaged {
@@ -888,6 +938,178 @@ impl Harness {
             });
         }
         Ok(format!("staged `{path}` for review"))
+    }
+}
+
+pub fn redact_credentials_str(text: &str) -> String {
+    let mut out = text.to_owned();
+
+    // 1. Redact PEM private keys
+    if out.contains("BEGIN") && out.contains("PRIVATE KEY") {
+        if let Some(start) = out.find("-----BEGIN") {
+            if let Some(end) = out[start..].find("-----END") {
+                if let Some(final_dash) = out[start + end..].find("-----") {
+                    let end_pos = start + end + final_dash + 5;
+                    out.replace_range(start..end_pos, "[REDACTED PRIVATE KEY]");
+                }
+            }
+        }
+    }
+
+    // 2. Token / key prefixes
+    let prefixes = [
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "sk-",
+        "sk_live_",
+        "rk_live_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxs-",
+        "glpat-",
+    ];
+
+    for prefix in prefixes {
+        let mut idx = 0;
+        while let Some(pos) = out[idx..].find(prefix) {
+            let start = idx + pos;
+            let end = out[start..]
+                .find(|ch: char| {
+                    ch.is_whitespace()
+                        || ch == '"'
+                        || ch == '\''
+                        || ch == ';'
+                        || ch == '&'
+                        || ch == '|'
+                        || ch == ','
+                })
+                .map(|len| start + len)
+                .unwrap_or(out.len());
+            let secret_len = end - start;
+            if secret_len >= prefix.len() + 8 {
+                out.replace_range(start..end, "[REDACTED TOKEN]");
+                idx = start + "[REDACTED TOKEN]".len();
+            } else {
+                idx = start + prefix.len();
+            }
+        }
+    }
+
+    // 3. AWS keys AKIA... (16 uppercase/digits)
+    let mut idx = 0;
+    while let Some(pos) = out[idx..].find("AKIA") {
+        let start = idx + pos;
+        let suffix = &out[start + 4..];
+        let count = suffix
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            .count();
+        if count == 16 {
+            let end = start + 20;
+            out.replace_range(start..end, "[REDACTED AWS KEY]");
+            idx = start + "[REDACTED AWS KEY]".len();
+        } else {
+            idx = start + 4;
+        }
+    }
+
+    // 4. Common key=value or key: value forms
+    let kv_markers = [
+        "password=",
+        "password:",
+        "api_key=",
+        "api_key:",
+        "apikey=",
+        "apikey:",
+        "secret=",
+        "secret:",
+        "token=",
+        "token:",
+    ];
+    for marker in kv_markers {
+        let lower = out.to_ascii_lowercase();
+        let mut search_idx = 0;
+        while let Some(pos) = lower[search_idx..].find(marker) {
+            let start = search_idx + pos + marker.len();
+            let remainder = &out[start..];
+            let trimmed_start = remainder
+                .chars()
+                .take_while(|c| c.is_whitespace() || *c == '"' || *c == '\'')
+                .count();
+            let val_start = start + trimmed_start;
+            let val_len = out[val_start..]
+                .find(|ch: char| {
+                    ch.is_whitespace()
+                        || ch == '"'
+                        || ch == '\''
+                        || ch == ';'
+                        || ch == '&'
+                        || ch == ','
+                        || ch == '\n'
+                })
+                .unwrap_or(out.len() - val_start);
+            if val_len > 0 {
+                let end = val_start + val_len;
+                out.replace_range(val_start..end, "[REDACTED]");
+                break;
+            } else {
+                search_idx = start;
+            }
+        }
+    }
+
+    // 5. Bearer tokens: Bearer <token>
+    let mut idx = 0;
+    while let Some(pos) = out[idx..].find("Bearer ") {
+        let start = idx + pos + 7;
+        let end = out[start..]
+            .find(|ch: char| ch.is_whitespace() || ch == '"' || ch == '\'' || ch == '\n')
+            .map(|l| start + l)
+            .unwrap_or(out.len());
+        if end > start + 5 {
+            out.replace_range(start..end, "[REDACTED]");
+            idx = start + "[REDACTED]".len();
+        } else {
+            idx = start;
+        }
+    }
+
+    out
+}
+
+pub fn redact_credentials_val(val: &Value) -> Value {
+    match val {
+        Value::String(s) => Value::String(redact_credentials_str(s)),
+        Value::Array(arr) => Value::Array(arr.iter().map(redact_credentials_val).collect()),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                let k_lower = k.to_ascii_lowercase();
+                if [
+                    "token",
+                    "api_key",
+                    "apikey",
+                    "secret",
+                    "password",
+                    "authorization",
+                    "auth",
+                ]
+                .iter()
+                .any(|sensitive| k_lower == *sensitive)
+                {
+                    out.insert(k.clone(), Value::String("[REDACTED]".to_owned()));
+                } else {
+                    out.insert(k.clone(), redact_credentials_val(v));
+                }
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
     }
 }
 
@@ -1118,5 +1340,125 @@ mod tests {
         assert_eq!(harness.profile().name, "minimal");
         assert_eq!(harness.config.max_turns, 15);
         assert_eq!(harness.config.context_char_budget, 60_000);
+    }
+
+    struct FailingPlugin;
+    impl HarnessPlugin for FailingPlugin {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn pre_tool_call(
+            &self,
+            _ctx: &PluginContext,
+            _call: &ryoko_models::ToolCall,
+        ) -> Result<ToolDecision, String> {
+            Err("plugin failure".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_dispatch_error_denies_tool_call() {
+        let (dir, mock, router) = setup();
+        mock.push_turn(call("1", "read_file", json!({"path": "src/lib.rs"})));
+        mock.push_turn(ScriptedTurn::text("done"));
+
+        let harness = Harness::new(dir.path(), router, HarnessConfig::new("mock/coder"))
+            .unwrap()
+            .with_plugin(Arc::new(FailingPlugin));
+
+        let outcome = harness.run("test plugin failure").await;
+        assert_eq!(outcome.stop, StopCause::Completed);
+
+        // Tool call should be denied with error message from failing plugin
+        let res = mock.requests()[1].messages.iter().find_map(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+        });
+        assert!(res.is_some());
+        assert!(res.unwrap().contains("plugin pre_tool_call error"));
+    }
+
+    #[tokio::test]
+    async fn intervening_edit_allows_rereading_file() {
+        let (dir, mock, router) = setup();
+        // 1. read_file
+        mock.push_turn(call("1", "read_file", json!({"path": "src/lib.rs"})));
+        // 2. edit_file
+        mock.push_turn(call(
+            "2",
+            "edit_file",
+            json!({"path": "src/lib.rs", "old": "41", "new": "42"}),
+        ));
+        // 3. read_file again (revision 1)
+        mock.push_turn(call("3", "read_file", json!({"path": "src/lib.rs"})));
+        // 4. edit_file again
+        mock.push_turn(call(
+            "4",
+            "edit_file",
+            json!({"path": "src/lib.rs", "old": "42", "new": "43"}),
+        ));
+        // 5. read_file again (revision 2)
+        mock.push_turn(call("5", "read_file", json!({"path": "src/lib.rs"})));
+        mock.push_turn(ScriptedTurn::text("Verified all edits"));
+
+        let harness = Harness::new(dir.path(), router, HarnessConfig::new("mock/coder")).unwrap();
+        let outcome = harness.run("edit and verify").await;
+        assert_eq!(outcome.stop, StopCause::Completed);
+
+        // None of the tool calls should have been blocked by loop guard
+        for req in mock.requests() {
+            for msg in &req.messages {
+                for block in &msg.content {
+                    if let ContentBlock::ToolResult { content, .. } = block {
+                        assert!(
+                            !content.contains("Loop protection triggered"),
+                            "unexpected loop guard hit: {content}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_redacts_credentials_in_goal_and_tool_args() {
+        let (dir, mock, router) = setup();
+        mock.push_turn(call(
+            "1",
+            "read_file",
+            json!({"path": "src/lib.rs", "token": "ghp_12345678901234567890"}),
+        ));
+        mock.push_turn(ScriptedTurn::text("done"));
+
+        let harness = Harness::new(dir.path(), router, HarnessConfig::new("mock/coder")).unwrap();
+        let _ = harness
+            .run("use api token sk-1234567890abcdef1234567890 to check")
+            .await;
+
+        let events = harness.journal().events();
+        // Check SessionStarted goal
+        let started_event = events.iter().find_map(|e| match e {
+            SessionEvent::SessionStarted { goal, .. } => Some(goal),
+            _ => None,
+        });
+        assert!(started_event.is_some());
+        assert!(
+            !started_event
+                .unwrap()
+                .contains("sk-1234567890abcdef1234567890")
+        );
+        assert!(started_event.unwrap().contains("[REDACTED TOKEN]"));
+
+        // Check ToolStarted args
+        let tool_event = events.iter().find_map(|e| match e {
+            SessionEvent::ToolStarted { args, .. } => Some(args),
+            _ => None,
+        });
+        assert!(tool_event.is_some());
+        let args_str = serde_json::to_string(tool_event.unwrap()).unwrap();
+        assert!(!args_str.contains("ghp_12345678901234567890"));
+        assert!(args_str.contains("[REDACTED]"));
     }
 }

@@ -225,6 +225,7 @@ fn anthropic_message(message: &Message) -> Value {
                     blocks.push(json!({"type": "text", "text": text}));
                 }
             }
+            ContentBlock::Reasoning { .. } => {}
             ContentBlock::Image {
                 media_type,
                 data_base64,

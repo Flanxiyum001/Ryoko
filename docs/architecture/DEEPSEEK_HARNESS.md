@@ -32,11 +32,14 @@ dependencies.
      fast-fail on repeated errors, and JSON trace export.
    - `minimal`: Lightweight runner with restricted toolsets and reduced token footprints (60k char budget).
 
-4. **Durable Session Journaling & Execution Tracing**:
-   Every turn, prompt dimension, model response, tool invocation, compaction event,
-   and loop intervention is permanently captured in [`SessionJournal`].
-   Sessions can be saved to JSON and inspected with `ryoko harness trace <journal.json>`
-   to review the exact timeline of model decisions and tool outputs.
+4. **Session Journaling & Execution Tracing**:
+   Every turn, prompt dimension, model response latency, tool invocation, compaction event,
+   and loop intervention is recorded in memory within [`SessionJournal`].
+   The CLI exports a journal only when the user supplies `--journal`, after the run returns;
+   events recorded in memory are not permanently captured, and interrupted runs do not reach export.
+   Tool entries include status, output length, and duration, but not full tool output text,
+   so the journal cannot provide interruption or output recovery. Exported sessions can be
+   inspected with `ryoko harness trace <journal.json>` to review the timeline of model decisions and tool executions.
 
 5. **Loop and Thrashing Prevention**:
    The [`LoopGuard`] tracks consecutive identical tool calls or cyclic thrashing.

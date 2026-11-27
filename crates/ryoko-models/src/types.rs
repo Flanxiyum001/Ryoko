@@ -37,6 +37,9 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    Reasoning {
+        text: String,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -365,6 +368,9 @@ pub enum StreamEvent {
         model: String,
     },
     TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
         text: String,
     },
     ToolCallDelta {
